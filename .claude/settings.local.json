@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(openspec list:*)",
+      "Bash(openspec status:*)",
+      "Bash(openspec instructions proposal:*)",
+      "mcp__zread__get_repo_structure",
+      "mcp__zread__read_file",
+      "Bash(openspec instructions design:*)",
+      "Bash(openspec config list:*)",
+      "Bash(openspec config profile)",
+      "Bash(openspec instructions specs --change \"llm-custom-platform-config\")",
+      "Bash(openspec:*)",
+      "Bash(npm view:*)",
+      "Bash(wchat:*)",
+      "mcp__web-reader__webReader",
+      "Bash(npx openspec status:*)",
+      "Bash(npx openspec:*)",
+      "Bash(sqlite3:*)",
+      "Bash(WCHAT_LOG_LEVEL=DEBUG wchat fetch:*)",
+      "Bash(head_limit=50)",
+      "Bash(./scripts/start.sh:*)",
+      "Bash(/Users/jie.hua/Documents/Developments/Projects/wchat_doc/openspec/changes/add-market-summary/tasks.md:*)",
+      "Bash(find:*)",
+      "Bash(git init:*)",
+      "Bash(git remote add:*)",
+      "Bash(git add:*)"
+    ]
+  }
+}

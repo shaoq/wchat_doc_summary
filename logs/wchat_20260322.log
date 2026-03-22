@@ -1,0 +1,596 @@
+环境检查通过 ✓
+Traceback (most recent call last):
+  File "/Users/jie.hua/Documents/Developments/Projects/wchat_doc/scripts/run.py", line 372, in <module>
+    cli()
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 1485, in __call__
+    return self.main(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 1406, in main
+    rv = self.invoke(ctx)
+         ^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 1873, in invoke
+    return _process_result(sub_ctx.command.invoke(sub_ctx))
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 1269, in invoke
+    return ctx.invoke(self.callback, **ctx.params)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 824, in invoke
+    return callback(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/Documents/Developments/Projects/wchat_doc/scripts/run.py", line 255, in fetch
+    asyncio.run(fetch_all_with_progress())
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/Documents/Developments/Projects/wchat_doc/scripts/run.py", line 161, in fetch_all_with_progress
+    from src.storage.database import DatabaseManager
+ImportError: cannot import name 'DatabaseManager' from 'src.storage.database' (/Users/jie.hua/Documents/Developments/Projects/wchat_doc/src/storage/database.py)
+环境检查通过 ✓
+Traceback (most recent call last):
+  File "/Users/jie.hua/Documents/Developments/Projects/wchat_doc/scripts/run.py", line 372, in <module>
+    cli()
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 1485, in __call__
+    return self.main(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 1406, in main
+    rv = self.invoke(ctx)
+         ^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 1873, in invoke
+    return _process_result(sub_ctx.command.invoke(sub_ctx))
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 1269, in invoke
+    return ctx.invoke(self.callback, **ctx.params)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 824, in invoke
+    return callback(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/Documents/Developments/Projects/wchat_doc/scripts/run.py", line 255, in fetch
+    asyncio.run(fetch_all_with_progress())
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/Documents/Developments/Projects/wchat_doc/scripts/run.py", line 162, in fetch_all_with_progress
+    from src.config.settings import settings
+ModuleNotFoundError: No module named 'src.config'
+环境检查通过 ✓
+Traceback (most recent call last):
+  File "/Users/jie.hua/Documents/Developments/Projects/wchat_doc/scripts/run.py", line 372, in <module>
+    cli()
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 1485, in __call__
+    return self.main(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 1406, in main
+    rv = self.invoke(ctx)
+         ^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 1873, in invoke
+    return _process_result(sub_ctx.command.invoke(sub_ctx))
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 1269, in invoke
+    return ctx.invoke(self.callback, **ctx.params)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 824, in invoke
+    return callback(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/Documents/Developments/Projects/wchat_doc/scripts/run.py", line 255, in fetch
+    asyncio.run(fetch_all_with_progress())
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/Documents/Developments/Projects/wchat_doc/scripts/run.py", line 162, in fetch_all_with_progress
+    from src.config.settings import settings
+ModuleNotFoundError: No module named 'src.config'
+环境检查通过 ✓
+Traceback (most recent call last):
+  File "/Users/jie.hua/Documents/Developments/Projects/wchat_doc/scripts/run.py", line 372, in <module>
+    cli()
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 1485, in __call__
+    return self.main(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 1406, in main
+    rv = self.invoke(ctx)
+         ^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 1873, in invoke
+    return _process_result(sub_ctx.command.invoke(sub_ctx))
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 1269, in invoke
+    return ctx.invoke(self.callback, **ctx.params)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 824, in invoke
+    return callback(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/Documents/Developments/Projects/wchat_doc/scripts/run.py", line 255, in fetch
+    asyncio.run(fetch_all_with_progress())
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/Documents/Developments/Projects/wchat_doc/scripts/run.py", line 162, in fetch_all_with_progress
+    from config.settings import settings
+ImportError: cannot import name 'settings' from 'config.settings' (/Users/jie.hua/Documents/Developments/Projects/wchat_doc/config/settings.py). Did you mean: 'Settings'?
+环境检查通过 ✓
+Traceback (most recent call last):
+  File "/Users/jie.hua/Documents/Developments/Projects/wchat_doc/scripts/run.py", line 372, in <module>
+    cli()
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 1485, in __call__
+    return self.main(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 1406, in main
+    rv = self.invoke(ctx)
+         ^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 1873, in invoke
+    return _process_result(sub_ctx.command.invoke(sub_ctx))
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 1269, in invoke
+    return ctx.invoke(self.callback, **ctx.params)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 824, in invoke
+    return callback(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/Documents/Developments/Projects/wchat_doc/scripts/run.py", line 255, in fetch
+    asyncio.run(fetch_all_with_progress())
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/Documents/Developments/Projects/wchat_doc/scripts/run.py", line 162, in fetch_all_with_progress
+    from config.settings import settings
+ImportError: cannot import name 'settings' from 'config.settings' (/Users/jie.hua/Documents/Developments/Projects/wchat_doc/config/settings.py). Did you mean: 'Settings'?
+环境检查通过 ✓
+Traceback (most recent call last):
+  File "/Users/jie.hua/Documents/Developments/Projects/wchat_doc/scripts/run.py", line 372, in <module>
+    cli()
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 1485, in __call__
+    return self.main(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 1406, in main
+    rv = self.invoke(ctx)
+         ^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 1873, in invoke
+    return _process_result(sub_ctx.command.invoke(sub_ctx))
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 1269, in invoke
+    return ctx.invoke(self.callback, **ctx.params)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 824, in invoke
+    return callback(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/Documents/Developments/Projects/wchat_doc/scripts/run.py", line 255, in fetch
+    asyncio.run(fetch_all_with_progress())
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/Documents/Developments/Projects/wchat_doc/scripts/run.py", line 158, in fetch_all_with_progress
+    from src.services.fetcher import FetcherService
+  File "/Users/jie.hua/Documents/Developments/Projects/wchat_doc/src/services/__init__.py", line 5, in <module>
+    from src.services.fetcher import FetcherService
+  File "/Users/jie.hua/Documents/Developments/Projects/wchat_doc/src/services/fetcher.py", line 130
+    for article_info in article_list:
+IndentationError: unexpected indent
+环境检查通过 ✓
+Traceback (most recent call last):
+  File "/Users/jie.hua/Documents/Developments/Projects/wchat_doc/scripts/run.py", line 372, in <module>
+    cli()
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 1485, in __call__
+    return self.main(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 1406, in main
+    rv = self.invoke(ctx)
+         ^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 1873, in invoke
+    return _process_result(sub_ctx.command.invoke(sub_ctx))
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 1269, in invoke
+    return ctx.invoke(self.callback, **ctx.params)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 824, in invoke
+    return callback(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/Documents/Developments/Projects/wchat_doc/scripts/run.py", line 255, in fetch
+    asyncio.run(fetch_all_with_progress())
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/Documents/Developments/Projects/wchat_doc/scripts/run.py", line 158, in fetch_all_with_progress
+    from src.services.fetcher import FetcherService
+  File "/Users/jie.hua/Documents/Developments/Projects/wchat_doc/src/services/__init__.py", line 5, in <module>
+    from src.services.fetcher import FetcherService
+  File "/Users/jie.hua/Documents/Developments/Projects/wchat_doc/src/services/fetcher.py", line 130
+    for article_info in article_list:
+IndentationError: unexpected indent
+环境检查通过 ✓
+Traceback (most recent call last):
+  File "/Users/jie.hua/Documents/Developments/Projects/wchat_doc/scripts/run.py", line 372, in <module>
+    cli()
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 1485, in __call__
+    return self.main(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 1406, in main
+    rv = self.invoke(ctx)
+         ^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 1873, in invoke
+    return _process_result(sub_ctx.command.invoke(sub_ctx))
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 1269, in invoke
+    return ctx.invoke(self.callback, **ctx.params)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 824, in invoke
+    return callback(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/Documents/Developments/Projects/wchat_doc/scripts/run.py", line 255, in fetch
+    asyncio.run(fetch_all_with_progress())
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/Documents/Developments/Projects/wchat_doc/scripts/run.py", line 162, in fetch_all_with_progress
+    from config.settings import settings
+ImportError: cannot import name 'settings' from 'config.settings' (/Users/jie.hua/Documents/Developments/Projects/wchat_doc/config/settings.py). Did you mean: 'Settings'?
+环境检查通过 ✓
+Traceback (most recent call last):
+  File "/Users/jie.hua/Documents/Developments/Projects/wchat_doc/scripts/run.py", line 372, in <module>
+    cli()
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 1485, in __call__
+    return self.main(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 1406, in main
+    rv = self.invoke(ctx)
+         ^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 1873, in invoke
+    return _process_result(sub_ctx.command.invoke(sub_ctx))
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 1269, in invoke
+    return ctx.invoke(self.callback, **ctx.params)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 824, in invoke
+    return callback(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/Documents/Developments/Projects/wchat_doc/scripts/run.py", line 255, in fetch
+    asyncio.run(fetch_all_with_progress())
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/Documents/Developments/Projects/wchat_doc/scripts/run.py", line 164, in fetch_all_with_progress
+    token = check_auth_status()
+            ^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/Documents/Developments/Projects/wchat_doc/scripts/run.py", line 95, in check_auth_status
+    return asyncio.run(_check())
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/asyncio/runners.py", line 191, in run
+    raise RuntimeError(
+RuntimeError: asyncio.run() cannot be called from a running event loop
+sys:1: RuntimeWarning: coroutine 'check_auth_status.<locals>._check' was never awaited
+环境检查通过 ✓
+Traceback (most recent call last):
+  File "/Users/jie.hua/Documents/Developments/Projects/wchat_doc/scripts/run.py", line 369, in <module>
+    cli()
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 1485, in __call__
+    return self.main(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 1406, in main
+    rv = self.invoke(ctx)
+         ^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 1873, in invoke
+    return _process_result(sub_ctx.command.invoke(sub_ctx))
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 1269, in invoke
+    return ctx.invoke(self.callback, **ctx.params)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 824, in invoke
+    return callback(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/Documents/Developments/Projects/wchat_doc/scripts/run.py", line 252, in fetch
+    asyncio.run(fetch_all_with_progress())
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/Documents/Developments/Projects/wchat_doc/scripts/run.py", line 167, in fetch_all_with_progress
+    client = WeReadClient(base_url=settings.WEREAD_API_BASE, token=token)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/pydantic/main.py", line 1026, in __getattr__
+    raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+AttributeError: 'Settings' object has no attribute 'WEREAD_API_BASE'
+环境检查通过 ✓
+开始抓取 5 个公众号的文章...
+未找到订阅: 5
+未找到订阅: 4
+未找到订阅: 2
+⠹ ✓ 财闻私享: 0 篇文章                                                     
+⠹ ✓ 幽兰行天下: 0 篇文章                                                   
+⠹ ✗ 海榕财富风险投研: can't compare offset-naive and offset-aware datetimes
+⠹ ✓ 淘股吧: 0 篇文章                                                       
+⠹ ✗ 小象说财: can't compare offset-naive and offset-aware datetimes        
+          抓取结果           
+┏━━━━━━━━━━━━━━━━━━┳━━━━━━━━┓
+┃ 公众号           ┃ 文章数 ┃
+┡━━━━━━━━━━━━━━━━━━╇━━━━━━━━┩
+│ 财闻私享         │ 0      │
+│ 幽兰行天下       │ 0      │
+│ 海榕财富风险投研 │ 0      │
+│ 淘股吧           │ 0      │
+│ 小象说财         │ 0      │
+│ 总计             │ 0      │
+└──────────────────┴────────┘
+Traceback (most recent call last):
+  File "/Users/jie.hua/Documents/Developments/Projects/wchat_doc/scripts/run.py", line 254, in <module>
+    @click.argument("mp_id", required=False, help="指定公众号 ID，只抓取该公众号")
+     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/decorators.py", line 346, in decorator
+    _param_memo(f, cls(param_decls, **attrs))
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/jie.hua/miniconda3/envs/wchat_doc/lib/python3.12/site-packages/click/core.py", line 3345, in __init__
+    super().__init__(param_decls, required=required, **attrs)
+TypeError: Parameter.__init__() got an unexpected keyword argument 'help'
+环境检查通过 ✓
+开始抓取 5 个公众号的文章...
+未找到订阅: 5
+未找到订阅: 3
+未找到订阅: 2
+⠙ ✓ 财闻私享: 0 篇文章                                               
+⠙ ✗ 幽兰行天下: can't compare offset-naive and offset-aware datetimes
+⠙ ✓ 海榕财富风险投研: 0 篇文章                                       
+⠙ ✓ 淘股吧: 0 篇文章                                                 
+⠙ ✗ 小象说财: can't compare offset-naive and offset-aware datetimes  
+          抓取结果           
+┏━━━━━━━━━━━━━━━━━━┳━━━━━━━━┓
+┃ 公众号           ┃ 文章数 ┃
+┡━━━━━━━━━━━━━━━━━━╇━━━━━━━━┩
+│ 财闻私享         │ 0      │
+│ 幽兰行天下       │ 0      │
+│ 海榕财富风险投研 │ 0      │
+│ 淘股吧           │ 0      │
+│ 小象说财         │ 0      │
+│ 总计             │ 0      │
+└──────────────────┴────────┘
+环境检查通过 ✓
+开始抓取 5 个公众号的文章...
+未找到订阅: 3
+未找到订阅: 2
+未找到订阅: 1
+⠸ ✗ 财闻私享: can't compare offset-naive and offset-aware datetimes  
+⠸ ✗ 幽兰行天下: can't compare offset-naive and offset-aware datetimes
+⠸ ✓ 海榕财富风险投研: 0 篇文章                                       
+⠸ ✓ 淘股吧: 0 篇文章                                                 
+⠸ ✓ 小象说财: 0 篇文章                                               
+          抓取结果           
+┏━━━━━━━━━━━━━━━━━━┳━━━━━━━━┓
+┃ 公众号           ┃ 文章数 ┃
+┡━━━━━━━━━━━━━━━━━━╇━━━━━━━━┩
+│ 财闻私享         │ 0      │
+│ 幽兰行天下       │ 0      │
+│ 海榕财富风险投研 │ 0      │
+│ 淘股吧           │ 0      │
+│ 小象说财         │ 0      │
+│ 总计             │ 0      │
+└──────────────────┴────────┘
+环境检查通过 ✓
+开始抓取 5 个公众号的文章...
+未找到订阅: 5
+未找到订阅: 3
+未找到订阅: 2
+⠴ ✓ 财闻私享: 0 篇文章                                               
+⠴ ✗ 幽兰行天下: can't compare offset-naive and offset-aware datetimes
+⠴ ✓ 海榕财富风险投研: 0 篇文章                                       
+⠴ ✓ 淘股吧: 0 篇文章                                                 
+⠴ ✗ 小象说财: can't compare offset-naive and offset-aware datetimes  
+          抓取结果           
+┏━━━━━━━━━━━━━━━━━━┳━━━━━━━━┓
+┃ 公众号           ┃ 文章数 ┃
+┡━━━━━━━━━━━━━━━━━━╇━━━━━━━━┩
+│ 财闻私享         │ 0      │
+│ 幽兰行天下       │ 0      │
+│ 海榕财富风险投研 │ 0      │
+│ 淘股吧           │ 0      │
+│ 小象说财         │ 0      │
+│ 总计             │ 0      │
+└──────────────────┴────────┘
+环境检查通过 ✓
+开始抓取 5 个公众号的文章...
+未找到订阅: 4
+未找到订阅: 3
+未找到订阅: 2
+未找到订阅: 1
+⠴ ✗ 财闻私享: can't compare offset-naive and offset-aware datetimes
+⠴ ✓ 幽兰行天下: 0 篇文章                                           
+⠴ ✓ 海榕财富风险投研: 0 篇文章                                     
+⠴ ✓ 淘股吧: 0 篇文章                                               
+⠴ ✓ 小象说财: 0 篇文章                                             
+          抓取结果           
+┏━━━━━━━━━━━━━━━━━━┳━━━━━━━━┓
+┃ 公众号           ┃ 文章数 ┃
+┡━━━━━━━━━━━━━━━━━━╇━━━━━━━━┩
+│ 财闻私享         │ 0      │
+│ 幽兰行天下       │ 0      │
+│ 海榕财富风险投研 │ 0      │
+│ 淘股吧           │ 0      │
+│ 小象说财         │ 0      │
+│ 总计             │ 0      │
+└──────────────────┴────────┘
+环境检查通过 ✓
+开始抓取 5 个公众号的文章...
+未找到订阅: 5
+未找到订阅: 2
+⠏ ✓ 财闻私享: 0 篇文章                                                     
+⠏ ✗ 幽兰行天下: can't compare offset-naive and offset-aware datetimes      
+⠏ ✗ 海榕财富风险投研: can't compare offset-naive and offset-aware datetimes
+⠏ ✓ 淘股吧: 0 篇文章                                                       
+⠏ ✗ 小象说财: can't compare offset-naive and offset-aware datetimes        
+          抓取结果           
+┏━━━━━━━━━━━━━━━━━━┳━━━━━━━━┓
+┃ 公众号           ┃ 文章数 ┃
+┡━━━━━━━━━━━━━━━━━━╇━━━━━━━━┩
+│ 财闻私享         │ 0      │
+│ 幽兰行天下       │ 0      │
+│ 海榕财富风险投研 │ 0      │
+│ 淘股吧           │ 0      │
+│ 小象说财         │ 0      │
+│ 总计             │ 0      │
+└──────────────────┴────────┘
+环境检查通过 ✓
+开始抓取 5 个公众号的文章...
+未找到订阅: 5
+未找到订阅: 3
+⠇ ✓ 财闻私享: 0 篇文章                                               
+⠇ ✗ 幽兰行天下: can't compare offset-naive and offset-aware datetimes
+⠇ ✓ 海榕财富风险投研: 0 篇文章                                       
+⠇ ✗ 淘股吧: can't compare offset-naive and offset-aware datetimes    
+⠇ ✗ 小象说财: can't compare offset-naive and offset-aware datetimes  
+          抓取结果           
+┏━━━━━━━━━━━━━━━━━━┳━━━━━━━━┓
+┃ 公众号           ┃ 文章数 ┃
+┡━━━━━━━━━━━━━━━━━━╇━━━━━━━━┩
+│ 财闻私享         │ 0      │
+│ 幽兰行天下       │ 0      │
+│ 海榕财富风险投研 │ 0      │
+│ 淘股吧           │ 0      │
+│ 小象说财         │ 0      │
+│ 总计             │ 0      │
+└──────────────────┴────────┘
+环境检查通过 ✓
+开始抓取 5 个公众号的文章...
+未找到订阅: 5
+未找到订阅: 4
+未找到订阅: 3
+未找到订阅: 2
+未找到订阅: 1
+⠙ ✓ 财闻私享: 4 篇文章        
+⠙ ✓ 幽兰行天下: 2 篇文章      
+⠙ ✓ 海榕财富风险投研: 3 篇文章
+⠙ ✓ 淘股吧: 0 篇文章          
+⠙ ✓ 小象说财: 0 篇文章        
+          抓取结果           
+┏━━━━━━━━━━━━━━━━━━┳━━━━━━━━┓
+┃ 公众号           ┃ 文章数 ┃
+┡━━━━━━━━━━━━━━━━━━╇━━━━━━━━┩
+│ 财闻私享         │ 4      │
+│ 幽兰行天下       │ 2      │
+│ 海榕财富风险投研 │ 3      │
+│ 淘股吧           │ 0      │
+│ 小象说财         │ 0      │
+│ 总计             │ 9      │
+└──────────────────┴────────┘
+环境检查通过 ✓
+开始抓取 5 个公众号的文章...
+未找到订阅: 5
+未找到订阅: 4
+未找到订阅: 3
+未找到订阅: 2
+未找到订阅: 1
+⠸ ✓ 财闻私享: 0 篇文章        
+⠸ ✓ 幽兰行天下: 0 篇文章      
+⠸ ✓ 海榕财富风险投研: 3 篇文章
+⠸ ✓ 淘股吧: 0 篇文章          
+⠸ ✓ 小象说财: 0 篇文章        
+          抓取结果           
+┏━━━━━━━━━━━━━━━━━━┳━━━━━━━━┓
+┃ 公众号           ┃ 文章数 ┃
+┡━━━━━━━━━━━━━━━━━━╇━━━━━━━━┩
+│ 财闻私享         │ 0      │
+│ 幽兰行天下       │ 0      │
+│ 海榕财富风险投研 │ 3      │
+│ 淘股吧           │ 0      │
+│ 小象说财         │ 0      │
+│ 总计             │ 3      │
+└──────────────────┴────────┘
+环境检查通过 ✓
+开始抓取 5 个公众号的文章...
+未找到订阅: 5
+未找到订阅: 4
+未找到订阅: 3
+未找到订阅: 2
+未找到订阅: 1
+⠙ ✓ 财闻私享: 0 篇文章        
+⠙ ✓ 幽兰行天下: 0 篇文章      
+⠙ ✓ 海榕财富风险投研: 0 篇文章
+⠙ ✓ 淘股吧: 20 篇文章         
+⠙ ✓ 小象说财: 0 篇文章        
+          抓取结果           
+┏━━━━━━━━━━━━━━━━━━┳━━━━━━━━┓
+┃ 公众号           ┃ 文章数 ┃
+┡━━━━━━━━━━━━━━━━━━╇━━━━━━━━┩
+│ 财闻私享         │ 0      │
+│ 幽兰行天下       │ 0      │
+│ 海榕财富风险投研 │ 0      │
+│ 淘股吧           │ 20     │
+│ 小象说财         │ 0      │
+│ 总计             │ 20     │
+└──────────────────┴────────┘
+环境检查通过 ✓
+开始抓取 5 个公众号的文章...
+未找到订阅: 5
+未找到订阅: 4
+未找到订阅: 3
+未找到订阅: 2
+未找到订阅: 1
+⠼ ✓ 财闻私享: 4 篇文章        
+⠼ ✓ 幽兰行天下: 0 篇文章      
+⠼ ✓ 海榕财富风险投研: 3 篇文章
+⠼ ✓ 淘股吧: 20 篇文章         
+⠼ ✓ 小象说财: 0 篇文章        
+          抓取结果           
+┏━━━━━━━━━━━━━━━━━━┳━━━━━━━━┓
+┃ 公众号           ┃ 文章数 ┃
+┡━━━━━━━━━━━━━━━━━━╇━━━━━━━━┩
+│ 财闻私享         │ 4      │
+│ 幽兰行天下       │ 0      │
+│ 海榕财富风险投研 │ 3      │
+│ 淘股吧           │ 20     │
+│ 小象说财         │ 0      │
+│ 总计             │ 27     │
+└──────────────────┴────────┘
