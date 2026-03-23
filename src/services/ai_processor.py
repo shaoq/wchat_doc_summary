@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from collections.abc import Callable
 
 from anthropic import AsyncAnthropic
 
@@ -366,12 +367,16 @@ class AIProcessor:
         self,
         article_ids: list[int],
         force: bool = False,
+        concurrency_limit: int = 3,
+        progress_callback: Callable | None = None,
     ) -> dict[int, list[str]]:
         """批量提取文章股票信息。
 
         Args:
             article_ids: 文章 ID 列表
             force: 是否强制重新处理已处理的文章
+            concurrency_limit: 并发限制数，默认 3
+            progress_callback: 进度回调函数，参数为 (article_id, status, stocks_or_error)
 
         Returns:
             {article_id: [stocks]} 字典
@@ -388,34 +393,46 @@ class AIProcessor:
         else:
             processed_ids = set()
 
+        # 并发控制
+        semaphore = asyncio.Semaphore(concurrency_limit)
+
         async def process_one(article_id: int) -> None:
             if article_id in processed_ids:
                 skipped.append(article_id)
                 logger.info(f"文章 {article_id} 已处理，跳过")
+                if progress_callback:
+                    progress_callback(article_id, "skipped", None)
                 return
 
-            try:
-                stocks = await self.extract_stocks(article_id)
-                results[article_id] = stocks
+            async with semaphore:
+                try:
+                    stocks = await self.extract_stocks(article_id)
+                    results[article_id] = stocks
 
-                # 记录处理结果
-                await self._record_processing(
-                    article_id,
-                    "extract_stocks",
-                    "success",
-                    json.dumps(stocks, ensure_ascii=False),
-                )
-            except Exception as e:
-                errors[article_id] = str(e)
-                logger.error(f"处理文章 {article_id} 失败: {e}")
+                    # 记录处理结果
+                    await self._record_processing(
+                        article_id,
+                        "extract_stocks",
+                        "success",
+                        json.dumps(stocks, ensure_ascii=False),
+                    )
 
-                # 记录失败
-                await self._record_processing(
-                    article_id,
-                    "extract_stocks",
-                    "failed",
-                    json.dumps({"error": str(e)}, ensure_ascii=False),
-                )
+                    if progress_callback:
+                        progress_callback(article_id, "success", stocks)
+                except Exception as e:
+                    errors[article_id] = str(e)
+                    logger.error(f"处理文章 {article_id} 失败: {e}")
+
+                    # 记录失败
+                    await self._record_processing(
+                        article_id,
+                        "extract_stocks",
+                        "failed",
+                        json.dumps({"error": str(e)}, ensure_ascii=False),
+                    )
+
+                    if progress_callback:
+                        progress_callback(article_id, "failed", str(e))
 
         await asyncio.gather(*[process_one(aid) for aid in article_ids])
 
@@ -447,6 +464,7 @@ class AIProcessor:
                 select(ArticleProcessing.article_id).where(
                     ArticleProcessing.article_id.in_(article_ids),
                     ArticleProcessing.task_type == task_type,
+                    ArticleProcessing.status == "success",
                 )
             )
             return set(result.scalars().all())

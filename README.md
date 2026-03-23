@@ -1,21 +1,24 @@
-# 微信公众号文章订阅系统
+# 订阅文章系统
 
 通过微信读书 API 抓取和管理微信公众号文章。
 
 ## 快速开始
 
 ```bash
+# 查看帮助
+wchat --help
+
 # 初始化系统
-./scripts/start.sh init
+wchat init
 
 # 登录微信读书
-./scripts/start.sh login
+wchat login
 
 # 订阅公众号
-./scripts/start.sh subscribe <文章URL>
+wchat subscribe <文章URL>
 
 # 抓取文章
-./scripts/start.sh fetch
+wchat fetch
 ```
 
 ## 功能

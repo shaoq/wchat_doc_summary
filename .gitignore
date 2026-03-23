@@ -45,3 +45,7 @@ Thumbs.db
 # Project specific
 data/*.db
 data/*.sqlite
+output/
+
+# Claude local files
+.claude/ralph-loop.local.md

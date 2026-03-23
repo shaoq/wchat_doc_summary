@@ -4,6 +4,7 @@ import asyncio
 import io
 import json
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -307,9 +308,9 @@ def fetch(fetch_all: bool, days: int, full: bool, mp_id: str | None) -> None:
 
 @main.command()
 @click.option('--active-only', is_flag=True, default=True, help='只显示活跃订阅')
-def list(active_only: bool) -> None:
+def ls(active_only: bool) -> None:
     """查看订阅列表。"""
-    async def _list() -> None:
+    async def _ls() -> None:
         db = await get_db()
         subscription_service = SubscriptionService(db)
 
@@ -345,7 +346,7 @@ def list(active_only: bool) -> None:
 
         console.print(table)
 
-    run_async(_list())
+    run_async(_ls())
 
 
 @main.command()
@@ -587,13 +588,23 @@ def batch_summarize(mp_id: str | None, batch_size: int) -> None:
 
 @ai.command()
 @click.argument('mp_id')
-@click.option('--output', '-o', 'output_file', type=click.Path(), help='输出文件路径')
+@click.option('--output', '-o', 'output_file', type=click.Path(), default=None, help='输出文件路径（默认: output/extract_stocks/{mp_id}_stocks_{YYMMDD}.txt）')
 @click.option('--force', is_flag=False, flag_value=True, default=False, help='强制重新处理已处理的文章')
-def extract_stocks(mp_id: str, output_file: str | None, force: bool) -> None:
+@click.option('--simple-info', is_flag=True, default=False, help='额外输出简化格式的股票列表文件')
+def extract_stocks(mp_id: str, output_file: str | None, force: bool, simple_info: bool) -> None:
     """提取公众号文章中的股票信息。
 
     MP_ID: 公众号 ID
     """
+    from datetime import datetime
+
+    from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
+
+    # 默认输出路径
+    if output_file is None:
+        today = datetime.now().strftime("%y%m%d")
+        output_file = f"output/extract_stocks/{mp_id}_stocks_{today}.txt"
+
     async def _extract_stocks() -> None:
         db = await get_db()
         processor = AIProcessor(db)
@@ -633,11 +644,53 @@ def extract_stocks(mp_id: str, output_file: str | None, force: bool) -> None:
         if force:
             console.print("[yellow]强制模式: 重新处理所有文章[/yellow]")
 
-        article_ids = [a.id for a in articles]
-        console.print(f"[blue]开始处理 {len(article_ids)} 篇文章...[/blue]")
+        # 构建文章 ID 到文章的映射
+        article_map = {a.id: a for a in articles}
+        article_ids = list(article_map.keys())
 
-        # 批量处理
-        results = await processor.batch_extract_stocks(article_ids, force=force)
+        # 统计计数
+        stats = {"success": 0, "skipped": 0, "failed": 0}
+        results: dict[int, list[str]] = {}
+
+        # 进度回调函数
+        def on_progress(article_id: int, status: str, stocks_or_error) -> None:
+            stats[status] = stats.get(status, 0) + 1
+            if status == "success" and stocks_or_error:
+                results[article_id] = stocks_or_error
+
+        # 使用进度条
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TextColumn("  成功: {task.fields[success]}  跳过: {task.fields[skipped]}  失败: {task.fields[failed]}"),
+            console=console,
+        ) as progress:
+            task = progress.add_task(
+                "提取股票信息",
+                total=len(article_ids),
+                success=0,
+                skipped=0,
+                failed=0,
+            )
+
+            # 更新进度的回调
+            def progress_callback(article_id: int, status: str, stocks_or_error) -> None:
+                on_progress(article_id, status, stocks_or_error)
+                article = article_map.get(article_id)
+                title = article.title[:20] + "..." if article and len(article.title) > 20 else (article.title if article else "未知")
+                progress.update(
+                    task,
+                    advance=1,
+                    description=f"提取股票信息 - {title}",
+                    success=stats["success"],
+                    skipped=stats["skipped"],
+                    failed=stats["failed"],
+                )
+
+            # 批量处理
+            await processor.batch_extract_stocks(article_ids, force=force, progress_callback=progress_callback)
 
         # 收集所有股票
         all_stocks: set[str] = set()
@@ -649,33 +702,309 @@ def extract_stocks(mp_id: str, output_file: str | None, force: bool) -> None:
                 all_stocks.update(stocks)
                 line = f"文章 #{article.id} 《{article.title[:30]}{'...' if len(article.title) > 30 else ''}》\n  {', '.join(stocks)}"
                 output_lines.append(line)
-                console.print(f"\n[green]{line.split(chr(10))[0]}[/green]")
-                console.print(f"  {', '.join(stocks)}")
 
         # 汇总
         summary = f"\n[green]处理完成: {len(results)} 篇文章，提取到 {len(all_stocks)} 只股票[/green]"
         console.print(summary)
 
-        # 导出到文件
-        if output_file:
-            from pathlib import Path
-            output_path = Path(output_file)
-            with open(output_path, 'w', encoding='utf-8') as f:
-                f.write(f"公众号: {feed.name}\n")
-                f.write(f"文章总数: {total}\n")
-                f.write(f"处理文章: {len(results)}\n")
-                f.write(f"提取股票: {len(all_stocks)}\n")
-                f.write("\n" + "=" * 50 + "\n\n")
-                for line in output_lines:
-                    f.write(line + "\n\n")
-                f.write("\n" + "=" * 50 + "\n")
-                f.write(f"\n所有股票 ({len(all_stocks)} 只):\n")
-                for stock in sorted(all_stocks):
-                    f.write(f"  - {stock}\n")
+        # 导出到文件（默认保存）
+        from pathlib import Path
 
-            console.print(f"[green]已导出到: {output_path}[/green]")
+        output_path = Path(output_file)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(f"公众号: {feed.name}\n")
+            f.write(f"文章总数: {total}\n")
+            f.write(f"处理文章: {len(results)}\n")
+            f.write(f"提取股票: {len(all_stocks)}\n")
+            f.write("\n" + "=" * 50 + "\n\n")
+            for line in output_lines:
+                f.write(line + "\n\n")
+            f.write("\n" + "=" * 50 + "\n")
+            f.write(f"\n所有股票 ({len(all_stocks)} 只):\n")
+            for stock in sorted(all_stocks):
+                f.write(f"  - {stock}\n")
+
+        console.print(f"[green]已导出到: {output_path}[/green]")
+
+        # 输出简化格式文件
+        if simple_info and all_stocks:
+            info_file = f"output/extract_stocks/{mp_id}_stocks_{today}_info.txt"
+            info_path = Path(info_file)
+            info_path.parent.mkdir(parents=True, exist_ok=True)
+
+            sorted_stocks = sorted(all_stocks)
+            group_size = 10
+            groups = [sorted_stocks[i:i + group_size] for i in range(0, len(sorted_stocks), group_size)]
+
+            with open(info_path, 'w', encoding='utf-8') as f:
+                f.write(f"股票列表（共 {len(all_stocks)} 只）\n")
+                f.write("=" * 50 + "\n\n")
+                for idx, group in enumerate(groups, 1):
+                    f.write(f"第 {idx} 组:\n")
+                    f.write(", ".join(group) + "\n\n")
+
+            console.print(f"[green]已导出简化格式到: {info_path}[/green]")
 
     run_async(_extract_stocks())
+
+
+@ai.group()
+def stocks() -> None:
+    """股票信息查询命令。"""
+    pass
+
+
+@stocks.command('list')
+@click.option('--mp-id', 'mp_id', default=None, help='指定公众号 ID（可选）')
+@click.option('--limit', '-n', type=int, default=50, help='显示数量（默认 50）')
+def stocks_list(mp_id: str | None, limit: int) -> None:
+    """列出所有已提取的股票（按出现次数排序）。"""
+    import json
+
+    async def _stocks_list() -> None:
+        db = await get_db()
+
+        from sqlalchemy import func as sql_func, select
+        from src.models.schema import Article, ArticleProcessing, Feed
+
+        async with db.get_session() as session:
+            # 构建查询
+            query = (
+                select(ArticleProcessing.result, Article.feed_id)
+                .join(Article, ArticleProcessing.article_id == Article.id)
+                .where(
+                    ArticleProcessing.task_type == "extract_stocks",
+                    ArticleProcessing.status == "success",
+                )
+            )
+
+            if mp_id:
+                # 过滤特定公众号
+                subquery = select(Feed.id).where(Feed.mp_id == mp_id).scalar_subquery()
+                query = query.where(Article.feed_id == subquery)
+
+            result = await session.execute(query)
+            rows = result.all()
+
+        # 统计股票出现次数
+        stock_counts: dict[str, int] = {}
+        for row in rows:
+            try:
+                stocks_list_data = json.loads(row[0]) if row[0] else []
+                for stock in stocks_list_data:
+                    stock_counts[stock] = stock_counts.get(stock, 0) + 1
+            except json.JSONDecodeError:
+                continue
+
+        if not stock_counts:
+            console.print("[yellow]暂无股票数据[/yellow]")
+            return
+
+        # 按出现次数排序
+        sorted_stocks = sorted(stock_counts.items(), key=lambda x: x[1], reverse=True)[:limit]
+
+        table = Table(title=f"股票列表（共 {len(stock_counts)} 只，显示前 {len(sorted_stocks)} 只）")
+        table.add_column("股票名称", style="cyan")
+        table.add_column("出现次数", style="green", justify="right")
+
+        for stock, count in sorted_stocks:
+            table.add_row(stock, str(count))
+
+        console.print(table)
+
+    run_async(_stocks_list())
+
+
+@stocks.command()
+@click.argument('keyword')
+def search(keyword: str) -> None:
+    """根据关键词搜索股票。
+
+    KEYWORD: 搜索关键词
+    """
+    import json
+
+    async def _search() -> None:
+        db = await get_db()
+
+        from sqlalchemy import select
+        from src.models.schema import Article, ArticleProcessing
+
+        async with db.get_session() as session:
+            query = (
+                select(ArticleProcessing.result, ArticleProcessing.article_id)
+                .join(Article, ArticleProcessing.article_id == Article.id)
+                .where(
+                    ArticleProcessing.task_type == "extract_stocks",
+                    ArticleProcessing.status == "success",
+                )
+            )
+            result = await session.execute(query)
+            rows = result.all()
+
+        # 搜索匹配的股票
+        matched_stocks: dict[str, int] = {}
+        for row in rows:
+            try:
+                stocks_list_data = json.loads(row[0]) if row[0] else []
+                for stock in stocks_list_data:
+                    if keyword.lower() in stock.lower():
+                        matched_stocks[stock] = matched_stocks.get(stock, 0) + 1
+            except json.JSONDecodeError:
+                continue
+
+        if not matched_stocks:
+            console.print(f"[yellow]未找到包含 '{keyword}' 的股票[/yellow]")
+            return
+
+        # 按出现次数排序
+        sorted_stocks = sorted(matched_stocks.items(), key=lambda x: x[1], reverse=True)
+
+        table = Table(title=f"搜索结果: '{keyword}'（找到 {len(sorted_stocks)} 只）")
+        table.add_column("股票名称", style="cyan")
+        table.add_column("出现次数", style="green", justify="right")
+
+        for stock, count in sorted_stocks:
+            table.add_row(stock, str(count))
+
+        console.print(table)
+
+    run_async(_search())
+
+
+@stocks.command()
+@click.argument('stock_name')
+@click.option('--limit', '-n', type=int, default=20, help='显示文章数量（默认 20）')
+def show(stock_name: str, limit: int) -> None:
+    """显示某股票出现在哪些文章中。
+
+    STOCK_NAME: 股票名称（支持模糊匹配）
+    """
+    import json
+
+    async def _show() -> None:
+        db = await get_db()
+
+        from sqlalchemy import select
+        from src.models.schema import Article, ArticleProcessing
+
+        async with db.get_session() as session:
+            query = (
+                select(ArticleProcessing.result, ArticleProcessing.article_id, Article.title, Article.publish_time)
+                .join(Article, ArticleProcessing.article_id == Article.id)
+                .where(
+                    ArticleProcessing.task_type == "extract_stocks",
+                    ArticleProcessing.status == "success",
+                )
+                .order_by(Article.publish_time.desc())
+            )
+            result = await session.execute(query)
+            rows = result.all()
+
+        # 查找包含该股票的文章
+        matched_articles = []
+        for row in rows:
+            try:
+                stocks_list_data = json.loads(row[0]) if row[0] else []
+                # 模糊匹配
+                for stock in stocks_list_data:
+                    if stock_name.lower() in stock.lower():
+                        matched_articles.append({
+                            "title": row[2],
+                            "publish_time": row[3],
+                            "stocks": stocks_list_data,
+                        })
+                        break
+            except json.JSONDecodeError:
+                continue
+
+        if not matched_articles:
+            console.print(f"[yellow]未找到包含 '{stock_name}' 的文章[/yellow]")
+            return
+
+        matched_articles = matched_articles[:limit]
+
+        console.print(f"[cyan]股票: {stock_name}[/cyan]")
+        console.print(f"[blue]出现在 {len(matched_articles)} 篇文章中:[/blue]\n")
+
+        for article in matched_articles:
+            publish_str = article["publish_time"].strftime("%Y-%m-%d") if article["publish_time"] else "未知日期"
+            title = article["title"][:40] + "..." if len(article["title"]) > 40 else article["title"]
+            console.print(f"  • 《{title}》 {publish_str}")
+
+        if len(matched_articles) == limit:
+            console.print(f"\n[dim]显示前 {limit} 篇，使用 --limit 查看更多[/dim]")
+
+    run_async(_show())
+
+
+def _format_market_data_summary(market_data: dict[str, Any]) -> str:
+    """格式化市场数据为一行摘要。
+
+    Args:
+        market_data: 市场数据字典
+
+    Returns:
+        格式化的摘要字符串
+    """
+    indices = market_data.get("indices", {})
+    volume = market_data.get("volume", {})
+    stats = market_data.get("statistics", {})
+
+    # 指数摘要
+    index_parts = []
+    for key in ["sh", "sz", "cy"]:
+        if key in indices:
+            data = indices[key]
+            name = data.get("name", key)
+            close = data.get("close", 0)
+            change = data.get("change", 0)
+            sign = "+" if change >= 0 else ""
+            index_parts.append(f"{name[:2]} {close:.2f} ({sign}{change*100:.2f}%)")
+
+    indices_str = " | ".join(index_parts) if index_parts else "无数据"
+
+    # 成交额摘要
+    total_volume = volume.get("total_volume", 0)
+    if total_volume >= 10000:
+        volume_str = f"{total_volume/10000:.1f}万亿"
+    else:
+        volume_str = f"{total_volume:.0f}亿"
+
+    # 涨跌摘要
+    up = stats.get("up_count", 0)
+    down = stats.get("down_count", 0)
+    flat = stats.get("flat_count", 0)
+
+    return f"指数: {indices_str}  |  成交: {volume_str}  |  涨跌: {up}/{down}/{flat}"
+
+
+def _format_articles_summary(articles: list[dict[str, Any]], days_back: int = 3) -> str:
+    """格式化文章统计摘要。
+
+    Args:
+        articles: 文章列表
+        days_back: 查找天数
+
+    Returns:
+        格式化的摘要字符串
+    """
+    count = len(articles)
+    return f"找到 {count} 篇文章 (最近 {days_back} 天)"
+
+
+def _format_elapsed_time(elapsed: float) -> str:
+    """格式化耗时。
+
+    Args:
+        elapsed: 耗时（秒）
+
+    Returns:
+        格式化的耗时字符串
+    """
+    return f"{elapsed:.1f}s"
 
 
 @ai.command('market-summary')
@@ -732,6 +1061,9 @@ def market_summary(target_date: str | None, offline: bool, list_summaries: bool,
             trade_date = analyzer.get_latest_trade_date()
 
         console.print(f"[bold blue]交易日: {trade_date}[/bold blue]")
+        if offline:
+            console.print("[yellow]离线模式[/yellow]")
+        console.print()
 
         # 检查是否已有总结
         existing = await analyzer.get_existing_summary(trade_date)
@@ -740,18 +1072,32 @@ def market_summary(target_date: str | None, offline: bool, list_summaries: bool,
             console.print(f"\n已保存到: output/market_summaries/{trade_date}.md")
             return
 
-        # 获取市场数据
-        with console.status("[bold blue]获取市场数据...[/bold blue]"):
+        # [1/3] 获取市场数据
+        offline_label = " [yellow](离线模式)[/yellow]" if offline else ""
+        with console.status(f"[bold blue][1/3] 获取市场数据...{offline_label}[/bold blue]"):
             market_data = await analyzer.collect_market_data(offline=offline)
 
-        # 获取相关文章
-        with console.status("[bold blue]获取相关文章...[/bold blue]"):
+        # 显示市场数据摘要
+        if market_data.get("offline"):
+            console.print("      [green]✓[/green] [yellow]离线模式: 无实时数据[/yellow]")
+        else:
+            summary = _format_market_data_summary(market_data)
+            console.print(f"      [green]✓[/green] {summary}")
+        console.print()
+
+        # [2/3] 获取相关文章
+        with console.status("[bold blue][2/3] 获取相关文章...[/bold blue]"):
             articles = await analyzer.get_related_articles(trade_date)
 
-        console.print(f"[green]获取到 {len(articles)} 篇相关文章[/green]")
+        # 显示文章统计
+        articles_summary = _format_articles_summary(articles)
+        console.print(f"      [green]✓[/green] {articles_summary}")
+        console.print()
 
-        # 生成总结
-        with console.status("[bold blue]AI 生成市场总结...[/bold blue]"):
+        # [3/3] AI 生成市场总结
+        with console.status("[bold blue][3/3] AI 生成市场总结...[/bold blue]"):
+            start_time = time.perf_counter()
+            ai_failed = False
             try:
                 content = await processor.generate_market_summary(
                     str(trade_date),
@@ -759,9 +1105,17 @@ def market_summary(target_date: str | None, offline: bool, list_summaries: bool,
                     articles,
                 )
             except Exception as e:
-                console.print(f"[red]AI 生成失败: {e}[/red]")
-                console.print("[yellow]使用基础模板生成...[/yellow]")
+                ai_failed = True
                 content = await analyzer.generate_summary(trade_date, market_data, articles)
+            elapsed = time.perf_counter() - start_time
+
+        # 显示 AI 生成结果
+        elapsed_str = _format_elapsed_time(elapsed)
+        if ai_failed:
+            console.print(f"      [green]✓[/green] [yellow]AI 生成失败，使用基础模板[/yellow] (耗时 {elapsed_str})")
+        else:
+            console.print(f"      [green]✓[/green] 完成 (耗时 {elapsed_str})")
+        console.print()
 
         # 保存总结
         await analyzer.save_summary(trade_date, content, market_data)
@@ -773,7 +1127,7 @@ def market_summary(target_date: str | None, offline: bool, list_summaries: bool,
             border_style="green",
         ))
 
-        console.print(f"\n[green]总结已保存到: output/market_summaries/{trade_date}.md[/green]")
+        console.print(f"\n[green]✓[/green] 总结已保存到: output/market_summaries/{trade_date}.md")
 
     run_async(_market_summary())
 

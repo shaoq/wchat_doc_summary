@@ -1,4 +1,4 @@
-# 微信公众号文章订阅系统 - 项目规约
+# 订阅文章系统 - 项目规约
 
 ## 技术栈
 
@@ -92,8 +92,8 @@ wchat_doc/
 ## 常用命令
 
 ```bash
-./scripts/start.sh init       # 初始化系统
-./scripts/start.sh fetch      # 抓取文章
-./scripts/start.sh status     # 查看状态
-./scripts/start.sh help       # 帮助信息
+wchat --help                  # 查看帮助
+wchat init                    # 初始化系统
+wchat fetch                   # 抓取文章
+wchat status                  # 查看状态
 ```

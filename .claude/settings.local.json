@@ -24,7 +24,26 @@
       "Bash(find:*)",
       "Bash(git init:*)",
       "Bash(git remote add:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git branch:*)",
+      "Bash(git push:*)",
+      "Bash(cat:*)",
+      "Bash(for change in optimize-market-summary-logging add-stocks-query-command add-extract-stocks-progress optimize-extract-stocks fix-retry-failed-extract-stocks rename-list-command-to-ls add-market-summary add-extract-stocks-feature)",
+      "Bash(do echo \"=== $change ===\" cat openspec/changes/$change/tasks.md)",
+      "Bash(done)",
+      "Bash(env)",
+      "Bash(ping:*)",
+      "Bash(nslookup:*)",
+      "Bash(route:*)",
+      "Bash(networksetup:*)",
+      "Bash(pip show:*)",
+      "mcp__web-search-prime__web_search_prime",
+      "Bash(echo:*)",
+      "Bash(# 检查 7890 端口是否真的在监听 lsof -i :7890)",
+      "Bash(unset:*)",
+      "Bash(__NEW_LINE_ab8e9d73ea58444a__ echo -e \"\\\\nPython requests 代理设置:\")",
+      "Bash(__NEW_LINE_ab8e9d73ea58444a__ echo -e \"\\\\n测试不走代理的 curl:\")"
     ]
   }
 }
