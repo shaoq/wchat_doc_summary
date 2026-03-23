@@ -206,7 +206,9 @@ class MarketAnalyzer:
     ) -> MarketSummary:
         """保存市场总结。
 
-        同时保存到数据库和文件。
+        同时保存到数据库和文件。使用 upsert 模式：
+        - 如果记录已存在，更新内容
+        - 如果记录不存在，插入新记录
 
         Args:
             trade_date: 交易日期
@@ -216,14 +218,31 @@ class MarketAnalyzer:
         Returns:
             保存的 MarketSummary 对象
         """
-        # 保存到数据库
+        from sqlalchemy import select
+
+        # 保存到数据库 (upsert 模式)
         async with self.db.get_session() as session:
-            summary = MarketSummary(
-                trade_date=trade_date,
-                content=content,
-                data_sources=json.dumps(data_sources, ensure_ascii=False),
+            # 先查询是否存在
+            result = await session.execute(
+                select(MarketSummary).where(MarketSummary.trade_date == trade_date)
             )
-            session.add(summary)
+            summary = result.scalar_one_or_none()
+
+            if summary:
+                # 更新已有记录
+                summary.content = content
+                summary.data_sources = json.dumps(data_sources, ensure_ascii=False)
+                logger.info(f"更新已有市场总结: {trade_date}")
+            else:
+                # 插入新记录
+                summary = MarketSummary(
+                    trade_date=trade_date,
+                    content=content,
+                    data_sources=json.dumps(data_sources, ensure_ascii=False),
+                )
+                session.add(summary)
+                logger.info(f"创建新市场总结: {trade_date}")
+
             await session.flush()
             await session.refresh(summary)
 
