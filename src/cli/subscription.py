@@ -1,0 +1,260 @@
+"""订阅命令模块 - subscribe, unsubscribe, ls, info, fetch。"""
+
+import click
+from rich.panel import Panel
+from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.table import Table
+
+from src.api.weread import WeReadClient
+from src.cli.utils import console, run_async
+from src.services.auth import AuthService
+from src.services.fetcher import FetcherService
+from src.services.subscription import SubscriptionService
+from src.storage.database import get_db
+
+
+@click.command()
+@click.argument('url')
+def subscribe(url: str) -> None:
+    """订阅公众号（通过文章 URL）。
+
+    URL: 微信公众号文章链接
+    """
+    async def _subscribe() -> None:
+        db = await get_db()
+        client = WeReadClient()
+        auth_service = AuthService(client, db)
+        subscription_service = SubscriptionService(db)
+        fetcher_service = FetcherService(client, db, subscription_service)
+
+        # 检查登录状态
+        token = await auth_service.get_current_token()
+        if not token:
+            console.print("[red]请先登录: wchat login[/red]")
+            return
+
+        with console.status("[bold blue]获取公众号信息...[/bold blue]"):
+            try:
+                mp_info = await fetcher_service.get_mp_info_from_article(url)
+            except Exception as e:
+                console.print(f"[red]获取公众号信息失败: {e}[/red]")
+                return
+
+        mp_id = mp_info.get("mp_id")
+        name = mp_info.get("name")
+        intro = mp_info.get("intro", "")
+        cover = mp_info.get("cover", "")
+
+        if not mp_id or not name:
+            console.print("[red]无法获取公众号信息[/red]")
+            return
+
+        # 添加订阅
+        feed = await subscription_service.add_subscription(
+            mp_id=mp_id,
+            name=name,
+            intro=intro,
+            cover=cover,
+        )
+
+        console.print(Panel(
+            f"[bold]公众号名称:[/bold] {name}\n"
+            f"[bold]公众号 ID:[/bold] {mp_id}\n"
+            f"[bold]简介:[/bold] {intro[:100] + '...' if len(intro) > 100 else intro}",
+            title="[green]订阅成功[/green]",
+            border_style="green",
+        ))
+
+    run_async(_subscribe())
+
+
+@click.command()
+@click.argument('mp_id')
+def unsubscribe(mp_id: str) -> None:
+    """取消订阅。
+
+    MP_ID: 公众号 ID
+    """
+    async def _unsubscribe() -> None:
+        db = await get_db()
+        subscription_service = SubscriptionService(db)
+
+        success = await subscription_service.remove_subscription(mp_id)
+
+        if success:
+            console.print(f"[green]已取消订阅: {mp_id}[/green]")
+        else:
+            console.print(f"[yellow]订阅不存在: {mp_id}[/yellow]")
+
+    run_async(_unsubscribe())
+
+
+@click.command()
+@click.option('--active-only', is_flag=True, default=True, help='只显示活跃订阅')
+def ls(active_only: bool) -> None:
+    """查看订阅列表。"""
+    async def _ls() -> None:
+        db = await get_db()
+        subscription_service = SubscriptionService(db)
+
+        # 使用新方法获取订阅及统计数据
+        feeds_with_stats = await subscription_service.list_subscriptions_with_stats(active_only=active_only)
+
+        if not feeds_with_stats:
+            console.print("[yellow]暂无订阅[/yellow]")
+            return
+
+        table = Table(title="订阅列表")
+        table.add_column("ID", style="cyan", no_wrap=True)
+        table.add_column("公众号名称", style="green")
+        table.add_column("公众号 ID", style="blue")
+        table.add_column("文章数", style="magenta", justify="right")
+        table.add_column("最近文章", style="yellow")
+        table.add_column("状态", style="dim")
+        table.add_column("最后同步", style="dim")
+
+        for feed, article_count, latest_article_time in feeds_with_stats:
+            status = "[green]活跃[/green]" if feed.status == 1 else "[red]停用[/red]"
+            sync_time = feed.sync_time.strftime("%Y-%m-%d %H:%M") if feed.sync_time else "从未同步"
+            latest_time = latest_article_time.strftime("%Y-%m-%d") if latest_article_time else "-"
+            table.add_row(
+                str(feed.id),
+                feed.name[:20] + "..." if len(feed.name) > 20 else feed.name,
+                feed.mp_id[:25] + "..." if len(feed.mp_id) > 25 else feed.mp_id,
+                str(article_count),
+                latest_time,
+                status,
+                sync_time,
+            )
+
+        console.print(table)
+
+    run_async(_ls())
+
+
+@click.command()
+@click.argument('mp_id')
+def info(mp_id: str) -> None:
+    """查看公众号详细信息。
+
+    MP_ID: 公众号 ID
+    """
+    async def _info() -> None:
+        db = await get_db()
+        subscription_service = SubscriptionService(db)
+
+        feed = await subscription_service.get_subscription(mp_id)
+
+        if not feed:
+            console.print(f"[red]订阅不存在: {mp_id}[/red]")
+            return
+
+        from sqlalchemy import func, select
+
+        from src.models.schema import Article
+
+        # 获取文章统计
+        async with db.get_session() as session:
+            count_result = await session.execute(
+                select(func.count(Article.id)).where(Article.feed_id == feed.id)
+            )
+            article_count = count_result.scalar() or 0
+
+            latest_result = await session.execute(
+                select(Article)
+                .where(Article.feed_id == feed.id)
+                .order_by(Article.publish_time.desc())
+                .limit(5)
+            )
+            latest_articles = list(latest_result.scalars().all())
+
+        console.print(Panel(
+            f"[bold]名称:[/bold] {feed.name}\n"
+            f"[bold]公众号 ID:[/bold] {feed.mp_id}\n"
+            f"[bold]简介:[/bold] {feed.intro or '无'}\n"
+            f"[bold]状态:[/bold] {'活跃' if feed.status == 1 else '停用'}\n"
+            f"[bold]文章数量:[/bold] {article_count}\n"
+            f"[bold]创建时间:[/bold] {feed.created_at.strftime('%Y-%m-%d %H:%M') if feed.created_at else '未知'}\n"
+            f"[bold]最后同步:[/bold] {feed.sync_time.strftime('%Y-%m-%d %H:%M') if feed.sync_time else '从未同步'}",
+            title="[cyan]公众号信息[/cyan]",
+            border_style="cyan",
+        ))
+
+        if latest_articles:
+            console.print("\n[bold]最新文章:[/bold]")
+            for article in latest_articles:
+                pub_time = article.publish_time.strftime("%Y-%m-%d") if article.publish_time else "未知时间"
+                console.print(f"  - [{pub_time}] {article.title[:50]}...")
+
+    run_async(_info())
+
+
+@click.command()
+@click.option('--all', 'fetch_all', is_flag=True, help='抓取所有订阅')
+@click.option('--days', 'days', type=int, default=5, help='抓取最近 N 天的文章（默认 5 天）')
+@click.option('--full', 'full', is_flag=True, help='抓取全部历史文章')
+@click.argument('mp_id', required=False)
+def fetch(fetch_all: bool, days: int, full: bool, mp_id: str | None) -> None:
+    """拉取文章。
+
+    MP_ID: 公众号 ID（可选，不指定时需使用 --all）
+
+    默认抓取最近 5 天的文章，
+    """
+    # full 参数优先级高于 days
+    if full:
+        days = None
+
+    async def _fetch() -> None:
+        db = await get_db()
+        client = WeReadClient()
+        auth_service = AuthService(client, db)
+        subscription_service = SubscriptionService(db)
+        fetcher_service = FetcherService(client, db, subscription_service)
+
+        # 检查登录状态
+        token = await auth_service.get_current_token()
+        if not token:
+            console.print("[red]请先登录: wchat login[/red]")
+            return
+
+        # 显示抓取范围
+        if days:
+            console.print(f"[cyan]抓取范围: 最近 {days} 天[/cyan]")
+        else:
+            console.print("[cyan]抓取范围: 全部历史[/cyan]")
+
+        if fetch_all:
+            # 抓取所有订阅
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=console,
+            ) as progress:
+                task = progress.add_task("抓取所有订阅...", total=None)
+
+                results = await fetcher_service.fetch_all(days=days)
+
+            for feed_mp_id, articles in results.items():
+                if articles:
+                    console.print(f"  {feed_mp_id}: {len(articles)} 篇")
+
+        elif mp_id:
+            # 抓取指定公众号
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=console,
+            ) as progress:
+                task = progress.add_task(f"抓取 {mp_id}...", total=None)
+                articles = await fetcher_service.fetch_feed(mp_id, days=days)
+
+            console.print(f"\n[green]抓取完成，共 {len(articles)} 篇文章[/green]")
+
+        else:
+            console.print("[red]请指定公众号 ID 或使用 --all 参数[/red]")
+            console.print("用法:")
+            console.print("  wchat fetch MP_WXS_xxx    # 抓取指定公众号")
+            console.print("  wchat fetch --all         # 抓取所有订阅")
+
+    run_async(_fetch())

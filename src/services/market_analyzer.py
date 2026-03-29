@@ -14,8 +14,9 @@ from src.storage.database import Database, CRUDOperations
 
 logger = logging.getLogger(__name__)
 
-# 默认模板路径
-DEFAULT_TEMPLATE_PATH = Path("templates/market_summary.md")
+# 新闻聚合结果结构
+NewsAggregationResult = dict[str, Any]
+
 OUTPUT_DIR = Path("output/market_summaries")
 
 
@@ -37,36 +38,16 @@ class MarketAnalyzer:
         self._summary_crud = CRUDOperations(MarketSummary)
         self._article_crud = CRUDOperations(Article)
 
-    def get_latest_trade_date(self, target_date: date | None = None) -> date:
-        """获取最近的交易日。
-
-        如果 target_date 是交易日，返回 target_date。
-        如果 target_date 是非交易日（周末/节假日），返回最近一个已过去的交易日。
-
-        Args:
-            target_date: 目标日期，默认为今天
-
-        Returns:
-            最近的交易日
-        """
-        if target_date is None:
-            target_date = date.today()
-
-        # 从目标日期往前找交易日
-        check_date = target_date
-        max_days_back = 30  # 最多往前找 30 天
-
-        for _ in range(max_days_back):
-            if calendar.is_workday(check_date):
-                return check_date
-            check_date -= timedelta(days=1)
-
-        # 如果 30 天内找不到，返回 target_date（降级处理）
-        logger.warning(f"30 天内未找到交易日，使用 {target_date}")
-        return target_date
+        # 添加缓存服务
+        from src.services.market_data_cache_service import MarketDataCacheService
+        self._cache_service = MarketDataCacheService(self.db, self.finance_client)
 
     def is_trade_day(self, check_date: date | None = None) -> bool:
-        """判断是否为交易日。
+        """判断是否为 A 股交易日。
+
+        保守规则（排除调休工作日周末）：
+        - 周末一律不是交易日（即使调休上班日）
+        - 法定节假日不是交易日
 
         Args:
             check_date: 待判断日期，默认为今天
@@ -76,19 +57,213 @@ class MarketAnalyzer:
         """
         if check_date is None:
             check_date = date.today()
+        # 周末一律不是交易日（排除调休工作日周末）
+        if check_date.weekday() >= 5:
+            return False
+        # 法定节假日不是交易日
         return calendar.is_workday(check_date)
 
-    async def collect_market_data(self, offline: bool = False) -> dict[str, Any]:
-        """收集市场数据。
+    def get_next_trade_date(self, trade_date: date) -> date:
+        """获取下一个交易日。
 
         Args:
-            offline: 是否仅使用本地数据（不联网获取行情）
+            trade_date: 当前交易日
+
+        Returns:
+            下一个交易日
+
+        Raises:
+            ValueError: 30 天内未找到下一个交易日
+        """
+        check_date = trade_date + timedelta(days=1)
+        for _ in range(30):
+            if self.is_trade_day(check_date):
+                return check_date
+            check_date += timedelta(days=1)
+        raise ValueError(f"30 天内未找到下一个交易日: {trade_date}")
+
+    def get_previous_trade_date(self, trade_date: date) -> date:
+        """获取上一个交易日。
+
+        Args:
+            trade_date: 当前交易日
+
+        Returns:
+            上一个交易日
+
+        Raises:
+            ValueError: 30 天内未找到上一个交易日
+        """
+        check_date = trade_date - timedelta(days=1)
+        for _ in range(30):
+            if self.is_trade_day(check_date):
+                return check_date
+            check_date -= timedelta(days=1)
+        raise ValueError(f"30 天内未找到上一个交易日: {trade_date}")
+
+    def calculate_article_time_window(self, trade_date: date) -> tuple[datetime, datetime]:
+        """计算文章时间窗口。
+
+        精确窗口: trade_date 15:00 ~ next_trading_date 09:15
+
+        Args:
+            trade_date: 交易日期
+
+        Returns:
+            (start_datetime, end_datetime) 时间窗口
+        """
+        next_trade_date = self.get_next_trade_date(trade_date)
+        start = datetime.combine(trade_date, datetime.min.time().replace(hour=15, minute=0))
+        end = datetime.combine(next_trade_date, datetime.min.time().replace(hour=9, minute=15))
+        return start, end
+
+    def calculate_watch_time_window(self, trade_date: date) -> tuple[datetime, datetime]:
+        """计算看盘数据时间窗口。
+
+        看盘窗口: trade_date 09:00 ~ trade_date 15:00
+
+        Args:
+            trade_date: 交易日期
+
+        Returns:
+            (start_datetime, end_datetime) 时间窗口
+        """
+        start = datetime.combine(trade_date, datetime.min.time().replace(hour=9, minute=0))
+        end = datetime.combine(trade_date, datetime.min.time().replace(hour=15, minute=0))
+        return start, end
+
+    def calculate_telegraph_time_window(self, trade_date: date) -> tuple[datetime, datetime]:
+        """计算电报时间窗口。
+
+        电报窗口: trade_date 09:00 ~ next_trade_date 09:15
+
+        Args:
+            trade_date: 交易日期
+
+        Returns:
+            (start_datetime, end_datetime) 时间窗口
+        """
+        next_trade_date = self.get_next_trade_date(trade_date)
+        start = datetime.combine(trade_date, datetime.min.time().replace(hour=9, minute=0))
+        end = datetime.combine(next_trade_date, datetime.min.time().replace(hour=9, minute=15))
+        return start, end
+
+    def get_latest_trade_date(self, target_date: date | None = None) -> date:
+        """获取最近的交易日。
+
+        智能判断逻辑:
+        - 交易日 09:00 前 -> 返回上一个交易日(市场尚未开市)
+        - 交易日 09:00 后 -> 返回今天
+        - 非交易日 -> 返回最近交易日(往前回溯)
+
+        Args:
+            target_date: 目标日期, 默认为今天
+
+        Returns:
+            最近的交易日
+        """
+        if target_date is None:
+            target_date = date.today()
+
+        # 非交易日: 往前找最近的交易日
+        if not self.is_trade_day(target_date):
+            check_date = target_date - timedelta(days=1)
+            for _ in range(30):
+                if self.is_trade_day(check_date):
+                    logger.info(f"非交易日 {target_date}, 回退到最近交易日: {check_date}")
+                    return check_date
+                check_date -= timedelta(days=1)
+            logger.warning(f"30 天内未找到交易日, 使用 {target_date}")
+            return target_date
+
+        # 今天是交易日: 判断是否开盘前
+        if target_date == date.today():
+            now = datetime.now()
+            market_open_time = now.replace(hour=9, minute=0, second=0, microsecond=0)
+
+            if now < market_open_time:
+                try:
+                    prev = self.get_previous_trade_date(target_date)
+                    logger.info(f"市场尚未开市({now.strftime('%H:%M')}), 使用上一个交易日: {prev}")
+                    return prev
+                except ValueError:
+                    logger.warning(f"未找到上一个交易日, 使用 {target_date}")
+                    return target_date
+
+            return target_date
+
+        # 交易日且非今天
+        return target_date
+
+    def _is_historical_trade_date(self, trade_date: date) -> bool:
+        """判断是否为历史交易日（早于当前可用交易日）。"""
+        current_trade_date = self.get_latest_trade_date()
+        return trade_date < current_trade_date
+
+    async def collect_market_data(
+        self,
+        offline: bool = False,
+        trade_date: date | None = None,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """收集市场数据。
+
+        数据源策略:
+        - 当前交易日: 缓存优先，缓存缺失则从 API 获取
+        - 历史交易日: 只从缓存获取，无缓存则明确报告不可用
+        - force=True: 仅对当前交易日跳过缓存；历史日期不支持强制刷新
+        - offline=True: 只读取本地缓存，不触发任何网络请求
+
+        Args:
+            offline: 是否仅使用本地数据
+            trade_date: 交易日期（可选）
+            force: 是否强制刷新（跳过缓存）
 
         Returns:
             市场数据字典
         """
+        if trade_date is None:
+            trade_date = self.get_latest_trade_date()
+
+        cache_service = self._cache_service
+        is_historical = self._is_historical_trade_date(trade_date)
+
+        # ========== 离线模式 ==========
         if offline:
-            logger.info("离线模式：跳过网络数据获取")
+            logger.info(f"离线模式: 仅使用本地缓存数据 ({trade_date})")
+            cached_data = await cache_service.get_cached(trade_date)
+            if cached_data:
+                cached_data["offline"] = True
+                cached_data["data_source"] = "cache"
+                logger.info(f"离线模式命中缓存: {trade_date}")
+                return cached_data
+            else:
+                logger.warning(f"离线模式: 无可用本地市场数据 ({trade_date})")
+                return {
+                    "indices": {},
+                    "volume": {},
+                    "statistics": {},
+                    "sectors": {},
+                    "limit_up": [],
+                    "fetch_time": datetime.now().isoformat(),
+                    "offline": True,
+                    "data_source": "none",
+                    "error": "离线模式: 无可用本地市场数据",
+                }
+
+        # ========== 历史交易日（仅缓存） ==========
+        if is_historical:
+            logger.info(f"历史交易日: 仅使用缓存数据 ({trade_date})")
+            cached_data = await cache_service.get_cached(trade_date)
+            if cached_data:
+                cached_data["data_source"] = "cache"
+                logger.info(f"历史交易日缓存命中: {trade_date}")
+                return cached_data
+
+            msg = f"历史交易日 {trade_date} 无可用市场数据（无缓存且无历史数据源）"
+            if force:
+                msg = f"历史交易日 {trade_date} 不支持强制刷新（无历史数据源）"
+            logger.warning(msg)
             return {
                 "indices": {},
                 "volume": {},
@@ -96,13 +271,55 @@ class MarketAnalyzer:
                 "sectors": {},
                 "limit_up": [],
                 "fetch_time": datetime.now().isoformat(),
-                "offline": True,
+                "data_source": "none",
+                "error": msg,
             }
 
+        # ========== 当前交易日 - 强制刷新模式 ==========
+        if force:
+            logger.info(f"强制刷新模式: 跳过缓存，直接获取在线数据 ({trade_date})")
+            try:
+                market_data = await self.finance_client.get_all_market_data(trade_date=trade_date)
+
+                if cache_service.should_cache(trade_date):
+                    await cache_service.save_market_data(trade_date, market_data)
+                    logger.info(f"已覆盖缓存: {trade_date}")
+
+                market_data["data_source"] = "api"
+                return market_data
+            except Exception as e:
+                logger.error(f"获取在线数据失败: {e}")
+                return {
+                    "indices": {},
+                    "volume": {},
+                    "statistics": {},
+                    "sectors": {},
+                    "limit_up": [],
+                    "fetch_time": datetime.now().isoformat(),
+                    "data_source": "error",
+                    "error": str(e),
+                }
+
+        # ========== 当前交易日 - 缓存优先模式 ==========
+        cached_data = await cache_service.get_cached(trade_date)
+        if cached_data:
+            logger.info(f"缓存命中: {trade_date}")
+            cached_data["data_source"] = "cache"
+            return cached_data
+
+        # 缓存未命中，从 API 获取
+        logger.info(f"缓存未命中，从 API 获取: {trade_date}")
         try:
-            return await self.finance_client.get_all_market_data()
-        except FinanceAPIError as e:
-            logger.error(f"获取市场数据失败: {e}")
+            market_data = await self.finance_client.get_all_market_data(trade_date=trade_date)
+
+            if cache_service.should_cache(trade_date):
+                await cache_service.save_market_data(trade_date, market_data)
+                logger.info(f"已缓存市场数据: {trade_date}")
+
+            market_data["data_source"] = "api"
+            return market_data
+        except Exception as e:
+            logger.error(f"获取在线数据失败: {e}")
             return {
                 "indices": {},
                 "volume": {},
@@ -110,32 +327,196 @@ class MarketAnalyzer:
                 "sectors": {},
                 "limit_up": [],
                 "fetch_time": datetime.now().isoformat(),
+                "data_source": "error",
                 "error": str(e),
             }
+
+    async def collect_news_data(
+        self,
+        trade_date: date,
+        offline: bool = False,
+    ) -> NewsAggregationResult:
+        """聚合新闻数据（财联社电报、看盘数据、相关文章）。
+
+        单一新闻源缺失时仍可继续生成总结。
+
+        Args:
+            trade_date: 交易日期
+            offline: 是否仅使用本地数据
+
+        Returns:
+            新闻聚合结果:
+            {
+                "status": "success" | "degraded" | "failed",
+                "telegraphs": [...],      # 财联社重要电报
+                "watch_items": [...],     # 财联社看盘数据
+                "articles": [...],        # 相关市场文章
+                "sources_status": {       # 各来源状态
+                    "telegraphs": "ok" | "empty" | "error",
+                    "watch_items": "ok" | "empty" | "error",
+                    "articles": "ok" | "empty" | "error",
+                },
+                "time_windows": {         # 各资料类型的时间窗口
+                    "watch": {"start": "...", "end": "..."},
+                    "telegraph": {"start": "...", "end": "..."},
+                    "article": {"start": "...", "end": "..."},
+                },
+            }
+        """
+        # 计算各资料类型的时间窗口
+        watch_window = self.calculate_watch_time_window(trade_date)
+        telegraph_window = self.calculate_telegraph_time_window(trade_date)
+        article_window = self.calculate_article_time_window(trade_date)
+
+        result: NewsAggregationResult = {
+            "telegraphs": [],
+            "watch_items": [],
+            "articles": [],
+            "sources_status": {
+                "telegraphs": "empty",
+                "watch_items": "empty",
+                "articles": "empty",
+            },
+            "time_windows": {
+                "watch": {
+                    "start": watch_window[0].strftime("%Y-%m-%d %H:%M"),
+                    "end": watch_window[1].strftime("%Y-%m-%d %H:%M"),
+                },
+                "telegraph": {
+                    "start": telegraph_window[0].strftime("%Y-%m-%d %H:%M"),
+                    "end": telegraph_window[1].strftime("%Y-%m-%d %H:%M"),
+                },
+                "article": {
+                    "start": article_window[0].strftime("%Y-%m-%d %H:%M"),
+                    "end": article_window[1].strftime("%Y-%m-%d %H:%M"),
+                },
+            },
+            # 保留 time_window 兼容旧接口
+            "time_window": {
+                "start": article_window[0].strftime("%Y-%m-%d %H:%M"),
+                "end": article_window[1].strftime("%Y-%m-%d %H:%M"),
+            },
+        }
+
+        # ========== 1. 收集财联社重要电报 ==========
+        try:
+            from src.services.cls_telegraph_service import CLSTelegraphService
+
+            telegraph_service = CLSTelegraphService(self.db)
+
+            # 使用电报专用窗口: trade_date 09:00 ~ next_trade_date 09:15
+            start_dt, end_dt = telegraph_window
+
+            telegraphs = await telegraph_service.list_telegraphs(
+                start_time=int(start_dt.timestamp()),
+                end_time=int(end_dt.timestamp()),
+                min_level="B",  # 只获取 B 级以上重要电报
+                limit=100,
+            )
+
+            if telegraphs:
+                result["telegraphs"] = [
+                    {
+                        "title": t.title,
+                        "content": t.content,
+                        "level": t.level,
+                        "ctime": t.ctime,
+                        "publish_time": datetime.fromtimestamp(t.ctime).strftime("%Y-%m-%d %H:%M") if t.ctime else None,
+                    }
+                    for t in telegraphs
+                ]
+                result["sources_status"]["telegraphs"] = "ok"
+                logger.info(f"获取财联社电报: {len(telegraphs)} 条")
+            else:
+                result["sources_status"]["telegraphs"] = "empty"
+                logger.info(f"财联社电报: 无数据 ({trade_date})")
+
+        except Exception as e:
+            result["sources_status"]["telegraphs"] = "error"
+            logger.warning(f"获取财联社电报失败: {e}")
+
+        # ========== 2. 收集财联社看盘数据 ==========
+        try:
+            from src.services.cls_watch_service import CLSWatchService
+
+            watch_service = CLSWatchService(self.db)
+
+            # 使用看盘专用窗口: trade_date 09:00 ~ trade_date 15:00
+            watch_items = await watch_service.get_watch_data_for_summary(
+                trade_date,
+                time_window=watch_window,
+            )
+
+            if watch_items:
+                result["watch_items"] = watch_items
+                result["sources_status"]["watch_items"] = "ok"
+                logger.info(f"获取财联社看盘数据: {len(watch_items)} 条")
+            else:
+                result["sources_status"]["watch_items"] = "empty"
+                logger.info(f"财联社看盘数据: 无数据 ({trade_date})")
+
+        except Exception as e:
+            result["sources_status"]["watch_items"] = "error"
+            logger.warning(f"获取财联社看盘数据失败: {e}")
+
+        # ========== 3. 收集相关市场文章 ==========
+        try:
+            articles = await self.get_related_articles(trade_date, time_window=article_window)
+
+            if articles:
+                result["articles"] = articles
+                result["sources_status"]["articles"] = "ok"
+                logger.info(f"获取相关文章: {len(articles)} 篇")
+            else:
+                result["sources_status"]["articles"] = "empty"
+                logger.info(f"相关文章: 无数据 ({trade_date})")
+
+        except Exception as e:
+            result["sources_status"]["articles"] = "error"
+            logger.warning(f"获取相关文章失败: {e}")
+
+        # 计算聚合状态: success / degraded / failed
+        statuses = list(result["sources_status"].values())
+        error_count = statuses.count("error")
+        if error_count == len(statuses):
+            result["status"] = "failed"
+        elif error_count > 0:
+            result["status"] = "degraded"
+        else:
+            result["status"] = "success"
+
+        return result
 
     async def get_related_articles(
         self,
         trade_date: date,
-        days_back: int = 3,
+        time_window: tuple[datetime, datetime] | None = None,
     ) -> list[dict[str, Any]]:
-        """获取与交易日相关的文章。
+        """获取与交易日相关的文章（精确时间窗口）。
+
+        时间窗口: trade_date 15:00 ~ next_trading_date 09:15。
+        如果未提供 time_window，则自动计算。
 
         Args:
             trade_date: 交易日期
-            days_back: 往前查找天数
+            time_window: 精确时间窗口 (start, end)，如未提供则自动计算
 
         Returns:
             文章列表（包含标题、摘要、内容）
         """
-        start_date = trade_date - timedelta(days=days_back)
+        if time_window is None:
+            time_window = self.calculate_article_time_window(trade_date)
+
+        start_dt, end_dt = time_window
+        logger.info(f"文章时间窗口: {start_dt.strftime('%Y-%m-%d %H:%M')} ~ {end_dt.strftime('%Y-%m-%d %H:%M')}")
 
         async with self.db.get_session() as session:
             from sqlalchemy import select
 
             result = await session.execute(
                 select(Article)
-                .where(Article.publish_time >= start_date)
-                .where(Article.publish_time <= trade_date + timedelta(days=1))
+                .where(Article.publish_time >= start_dt)
+                .where(Article.publish_time <= end_dt)
                 .order_by(Article.publish_time.desc())
                 .limit(50)
             )
@@ -145,58 +526,11 @@ class MarketAnalyzer:
             {
                 "title": a.title,
                 "summary": a.summary or "",
-                "content": (a.content or "")[:1000] if a.content else "",  # 限制长度
+                "content": (a.content or "")[:1000] if a.content else "",
                 "publish_time": a.publish_time.isoformat() if a.publish_time else None,
             }
             for a in articles
         ]
-
-    async def generate_summary(
-        self,
-        trade_date: date,
-        market_data: dict[str, Any],
-        articles: list[dict[str, Any]],
-        template_content: str | None = None,
-    ) -> str:
-        """生成市场总结（不使用 AI，仅格式化数据）。
-
-        注意：实际的 AI 生成逻辑在 AIProcessor.generate_market_summary() 中。
-
-        Args:
-            trade_date: 交易日期
-            market_data: 市场数据
-            articles: 相关文章
-            template_content: 模板内容（可选）
-
-        Returns:
-            格式化的市场总结
-        """
-        # 加载模板
-        if template_content is None:
-            template_content = self._load_template()
-
-        # 格式化数据
-        indices_summary = self._format_indices(market_data.get("indices", {}))
-        volume = market_data.get("volume", {}).get("total_volume", "N/A")
-        statistics = market_data.get("statistics", {})
-        sectors = market_data.get("sectors", {})
-        limit_up = market_data.get("limit_up", [])
-
-        # 填充模板
-        content = template_content.format(
-            indices_summary=indices_summary,
-            volume=volume,
-            up_count=statistics.get("up_count", "N/A"),
-            down_count=statistics.get("down_count", "N/A"),
-            flat_count=statistics.get("flat_count", "N/A"),
-            top_sectors=self._format_sectors(sectors.get("top_sectors", [])),
-            bottom_sectors=self._format_sectors(sectors.get("bottom_sectors", [])),
-            limit_up_stocks=self._format_stocks(limit_up),
-            leading_stocks=self._format_stocks(limit_up[:5]),  # 龙头取前 5
-            market_news=self._format_articles(articles[:10]),  # 取前 10 篇文章
-        )
-
-        return content
 
     async def save_summary(
         self,
@@ -206,9 +540,10 @@ class MarketAnalyzer:
     ) -> MarketSummary:
         """保存市场总结。
 
-        同时保存到数据库和文件。使用 upsert 模式：
+        同时保存到文件和数据库。使用 upsert 模式：
         - 如果记录已存在，更新内容
         - 如果记录不存在，插入新记录
+        - 先写文件再提交数据库，确保两者都成功
 
         Args:
             trade_date: 交易日期
@@ -217,10 +552,24 @@ class MarketAnalyzer:
 
         Returns:
             保存的 MarketSummary 对象
+
+        Raises:
+            RuntimeError: 文件或数据库持久化失败
         """
         from sqlalchemy import select
 
-        # 保存到数据库 (upsert 模式)
+        # 1. 先保存到文件（非事务性，容易重试）
+        try:
+            OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+            file_path = OUTPUT_DIR / f"{trade_date}.md"
+            file_path.write_text(content, encoding="utf-8")
+            logger.info(f"市场总结文件已保存: {file_path}")
+        except OSError as e:
+            msg = f"市场总结文件保存失败: {e}"
+            logger.error(msg)
+            raise RuntimeError(msg) from e
+
+        # 2. 再保存到数据库 (upsert 模式)
         async with self.db.get_session() as session:
             # 先查询是否存在
             result = await session.execute(
@@ -246,12 +595,6 @@ class MarketAnalyzer:
             await session.flush()
             await session.refresh(summary)
 
-        # 保存到文件
-        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        file_path = OUTPUT_DIR / f"{trade_date}.md"
-        file_path.write_text(content, encoding="utf-8")
-
-        logger.info(f"市场总结已保存: {file_path}")
         return summary
 
     async def get_existing_summary(self, trade_date: date) -> MarketSummary | None:
@@ -292,45 +635,6 @@ class MarketAnalyzer:
                 .limit(limit)
             )
             return list(result.scalars().all())
-
-    def _load_template(self) -> str:
-        """加载模板文件。"""
-        if DEFAULT_TEMPLATE_PATH.exists():
-            return DEFAULT_TEMPLATE_PATH.read_text(encoding="utf-8")
-
-        # 返回默认模板
-        return """# 市场概览
-
-## 指数表现
-{indices_summary}
-
-## 成交情况
-两市成交额：{volume} 亿元
-
-## 涨跌统计
-- 上涨：{up_count} 家
-- 下跌：{down_count} 家
-- 平盘：{flat_count} 家
-
-## 板块表现
-### 涨幅榜
-{top_sectors}
-
-### 跌幅榜
-{bottom_sectors}
-
-## 连板个股
-{limit_up_stocks}
-
-## 龙头个股
-{leading_stocks}
-
----
-
-# 市场消息
-
-{market_news}
-"""
 
     def _format_indices(self, indices: dict[str, Any]) -> str:
         """格式化指数数据。"""

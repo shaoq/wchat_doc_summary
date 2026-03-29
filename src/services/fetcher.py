@@ -1,14 +1,14 @@
 """文章抓取服务 - 从微信公众号抓取文章并保存到数据库。"""
 
 import logging
-from datetime import datetime, timedelta, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import select
 
 from src.api.article import fetch_article_content, parse_article_html
 from src.api.weread import WeReadAPIError, WeReadClient
-from src.models.schema import Article, Feed
+from src.models.schema import Article
 from src.services.subscription import SubscriptionService
 from src.storage.database import Database
 
@@ -79,6 +79,19 @@ def _get_publish_time_from_info(article_info: dict[str, Any]) -> datetime | None
     return _parse_publish_time(time_str)
 
 
+def _to_naive_utc(dt: datetime | None) -> datetime | None:
+    """统一时间比较语义。
+
+    - aware datetime -> 转为 UTC 后去掉 tzinfo
+    - naive datetime -> 原样返回
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt
+    return dt.astimezone(timezone.utc).replace(tzinfo=None)
+
+
 class FetcherService:
     """文章抓取服务。
 
@@ -101,6 +114,59 @@ class FetcherService:
         self.weread_client = weread_client
         self.db = db
         self.subscription_service = subscription_service
+
+    async def _get_feed_or_raise(self, mp_id: str):
+        """获取订阅对象，不存在则抛错。"""
+        feed = await self.subscription_service.get_subscription(mp_id)
+        if not feed:
+            logger.error(f"未找到订阅: {mp_id}")
+            raise ValueError(f"未找到订阅: {mp_id}")
+        return feed
+
+    def _extract_article_list(
+        self,
+        response: dict[str, Any] | list[dict[str, Any]],
+        fallback_page_size: int,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """从响应中提取文章列表与页大小。"""
+        if isinstance(response, list):
+            return response, len(response)
+
+        if not isinstance(response, dict):
+            return [], fallback_page_size
+
+        page_size = response.get("page_size") or response.get("pageSize") or fallback_page_size
+        return response.get("articles", []), page_size
+
+    def _page_all_older_than_cutoff(
+        self,
+        article_list: list[dict[str, Any]],
+        cutoff_time: datetime,
+    ) -> bool:
+        """判断一页内可解析时间的文章是否全部早于 cutoff。"""
+        comparable_times = [
+            _to_naive_utc(_get_publish_time_from_info(article_info))
+            for article_info in article_list
+        ]
+        comparable_times = [dt for dt in comparable_times if dt is not None]
+
+        if not comparable_times:
+            return False
+
+        return all(dt < cutoff_time for dt in comparable_times)
+
+    async def _get_latest_publish_time(self, feed_id: int) -> datetime | None:
+        """获取指定订阅已保存文章中的最新发布时间。"""
+        async with self.db.get_session() as session:
+            result = await session.execute(
+                select(Article)
+                .where(Article.feed_id == feed_id, Article.publish_time.is_not(None))
+                .order_by(Article.publish_time.desc())
+                .limit(1)
+            )
+            latest_article = result.scalar_one_or_none()
+
+        return _to_naive_utc(latest_article.publish_time) if latest_article else None
 
     async def fetch_feed(
         self,
@@ -125,51 +191,27 @@ class FetcherService:
 
         logger.info(f"开始抓取公众号文章: mp_id={mp_id}, max_pages={max_pages}, page_size={page_size}, days={days}")
 
-        # 获取订阅信息
-        feed = await self.subscription_service.get_subscription(mp_id)
-        if not feed:
-            logger.error(f"未找到订阅: {mp_id}")
-            raise ValueError(f"未找到订阅: {mp_id}")
+        feed = await self._get_feed_or_raise(mp_id)
 
         articles: list[Article] = []
 
         # 计算时间截止点
         cutoff_time = None
         if days is not None:
-            cutoff_time = datetime.now(timezone.utc) - timedelta(days=days)
+            cutoff_time = _to_naive_utc(datetime.now(timezone.utc) - timedelta(days=days))
 
         try:
             for page in range(1, max_pages + 1):
                 # 获取文章列表
                 response = await self.weread_client.get_articles(mp_id, page, page_size)
-
-                # 处理 API 返回列表或字典的情况
-                if isinstance(response, list):
-                    article_list = response
-                    page_size = len(response)
-                else:
-                    article_list = response.get("articles", [])
-                    page_size = response.get("page_size", 10)
+                article_list, current_page_size = self._extract_article_list(response, page_size)
 
                 if not article_list:
                     logger.info(f"第 {page} 页无文章，停止抓取")
                     break
 
                 # 时间过滤：检查是否所有文章都早于截止时间
-                if cutoff_time:
-                    all_older = True
-                    for article_info in article_list:
-                        publish_time = _get_publish_time_from_info(article_info)
-                        if publish_time is None:
-                            continue
-                        if publish_time >= cutoff_time:
-                            all_older = False
-                            break
-                        else:
-                            all_older = False
-                            break
-
-                    if all_older:
+                if cutoff_time and self._page_all_older_than_cutoff(article_list, cutoff_time):
                         logger.info(f"第 {page} 页所有文章都已超出时间范围，停止抓取")
                         break
 
@@ -177,10 +219,8 @@ class FetcherService:
                 for article_info in article_list:
                     # 时间过滤：跳过早于截止时间的文章
                     if cutoff_time:
-                        publish_time = _get_publish_time_from_info(article_info)
-                        if publish_time is None:
-                            continue
-                        if publish_time < cutoff_time:
+                        publish_time = _to_naive_utc(_get_publish_time_from_info(article_info))
+                        if publish_time is not None and publish_time < cutoff_time:
                             logger.debug(f"跳过早期文章: {article_info.get('title', '')}")
                             continue
 
@@ -189,7 +229,7 @@ class FetcherService:
                         articles.append(article)
 
                 # 检查是否还有更多页
-                if len(article_list) < page_size:
+                if len(article_list) < current_page_size:
                     logger.info(f"已获取所有文章，共 {page} 页")
                     break
 
@@ -199,7 +239,7 @@ class FetcherService:
             logger.info(f"抓取完成: {len(articles)} 篇文章")
 
             # Backfill publish_time for existing articles
-            await self.backfill_publish_time(feed.id)
+            await self.backfill_publish_time(mp_id)
 
         except WeReadAPIError as e:
             logger.error(f"API 错误: {e}")
@@ -295,14 +335,58 @@ class FetcherService:
         total = sum(len(a) for a in results.values())
         logger.info(f"全部抓取完成: {total} 篇文章")
 
-        # Backfill publish_time for all feeds
-        for feed_mp_id in results:
-            if results[feed_mp_id]:
-                await self.backfill_publish_time(feed_mp_id)
-
         return results
 
-    async def backfill_publish_time(self, mp_id: str | None) -> None:
+    async def fetch_incremental(
+        self,
+        mp_id: str,
+        max_pages: int = 5,
+        page_size: int | None = None,
+    ) -> list[Article]:
+        """增量抓取（只获取新文章）。"""
+        if page_size is None:
+            page_size = get_settings().fetch_page_size
+
+        feed = await self._get_feed_or_raise(mp_id)
+        latest_time = await self._get_latest_publish_time(feed.id)
+
+        if latest_time is None:
+            logger.info(f"未找到已抓取文章，增量抓取退化为全量抓取: {mp_id}")
+            return await self.fetch_feed(mp_id, max_pages=max_pages, days=None, page_size=page_size)
+
+        logger.info(f"开始增量抓取: mp_id={mp_id}, latest_time={latest_time.isoformat()}")
+
+        articles: list[Article] = []
+        should_stop = False
+
+        for page in range(1, max_pages + 1):
+            response = await self.weread_client.get_articles(mp_id, page, page_size)
+            article_list, current_page_size = self._extract_article_list(response, page_size)
+
+            if not article_list:
+                break
+
+            for article_info in article_list:
+                publish_time = _to_naive_utc(_get_publish_time_from_info(article_info))
+
+                # 保守策略：缺失发布时间不作为停止依据，但仍尝试抓取和后续回填
+                if publish_time is not None and publish_time <= latest_time:
+                    should_stop = True
+                    continue
+
+                article = await self._fetch_and_save_article(feed.id, article_info)
+                if article:
+                    articles.append(article)
+
+            if should_stop or len(article_list) < current_page_size:
+                break
+
+        await self.subscription_service.update_sync_time(mp_id)
+        await self.backfill_publish_time(mp_id)
+        logger.info(f"增量抓取完成: {len(articles)} 篇新文章")
+        return articles
+
+    async def backfill_publish_time(self, mp_id: str) -> int:
         """批量更新已存在文章的发布时间。
 
         Args:
@@ -311,18 +395,15 @@ class FetcherService:
         Returns:
             更新的文章数量
         """
-        # 获取订阅
-        feed = await self.subscription_service.get_subscription(mp_id)
-        if not feed:
-            logger.error(f"未找到订阅: {mp_id}")
-            return 0
+        feed = await self._get_feed_or_raise(mp_id)
+        page_size = get_settings().fetch_page_size
 
-        # 获取该公众号下 publish_time 为空的文章
+        # 先取出需要回填的 article_id 集合，避免持有失效 session 中的 ORM 对象
         async with self.db.get_session() as session:
             result = await session.execute(
                 select(Article).where(
                     Article.feed_id == feed.id,
-                    Article.publish_time.is_(None)
+                    Article.publish_time.is_(None),
                 )
             )
             articles = list(result.scalars().all())
@@ -332,106 +413,55 @@ class FetcherService:
             return 0
 
         logger.info(f"开始更新 {len(articles)} 篇文章的发布时间")
+        updates: dict[str, datetime] = {}
+        unresolved_ids = {article.article_id for article in articles}
 
-        updated = 0
-        for article in articles:
+        for page in range(1, 6):
             try:
-                # 获取文章信息（从 API）
-                response = await self.weread_client.get_articles(mp_id, 1)
-                if isinstance(response, list):
-                    article_list = response
-                else:
-                    article_list = response.get("articles", [])
+                response = await self.weread_client.get_articles(mp_id, page, page_size)
+                article_list, current_page_size = self._extract_article_list(response, page_size)
 
-                # 查找匹配的文章
+                if not article_list:
+                    break
+
                 for article_info in article_list:
                     info_id = article_info.get("id") or article_info.get("article_id")
-                    if info_id == article.article_id:
-                        # 获取发布时间
-                        new_time = _get_publish_time_from_info(article_info)
-                        if new_time:
-                            article.publish_time = new_time
-                            updated += 1
-                        break
+                    if info_id not in unresolved_ids:
+                        continue
+
+                    new_time = _get_publish_time_from_info(article_info)
+                    if new_time:
+                        updates[info_id] = new_time
+                        unresolved_ids.remove(info_id)
+
+                if not unresolved_ids or len(article_list) < current_page_size:
+                    break
 
             except Exception as e:
-                logger.error(f"更新文章发布时间失败: {article.title[:30]}... - {e}")
-
-        await session.flush()
-        logger.info(f"更新完成: {updated}/{len(articles)} 篇文章")
-        return updated
-
-    async def get_mp_info_from_article(self, article_url: str) -> dict[str, Any]:
-        """增量抓取（只获取新文章）。
-
-        检查数据库中已有的最新文章时间，只获取更新的文章。
-
-        Args:
-            mp_id: 公众号 ID
-
-        Returns:
-            新抓取的文章列表
-        """
-        logger.info(f"增量抓取: {mp_id}")
-
-        # 获取订阅信息
-        feed = await self.subscription_service.get_subscription(mp_id)
-        if not feed:
-            raise ValueError(f"未找到订阅: {mp_id}")
-
-        # 获取数据库中最新的文章时间
-        async with self.db.get_session() as session:
-            result = await session.execute(
-                select(Article)
-                .where(Article.feed_id == feed.id)
-                .order_by(Article.publish_time.desc())
-                .limit(1)
-            )
-            latest_article = result.scalar_one_or_none()
-
-        latest_time = latest_article.publish_time.replace(tzinfo=None) if latest_article else None
-        logger.debug(f"最新文章时间: {latest_time}")
-
-        articles: list[Article] = []
-        page = 1
-        should_stop = False
-
-        while not should_stop:
-            response = await self.weread_client.get_articles(mp_id, page)
-
-            # 处理 API 返回列表或字典的情况
-            if isinstance(response, list):
-                article_list = response
-            else:
-                article_list = response.get("articles", [])
-
-            if not article_list:
+                logger.error(f"批量回填发布时间失败: page={page}, mp_id={mp_id}, error={e}")
                 break
 
-            for article_info in article_list:
-                # 检查文章时间
-                publish_time = _get_publish_time_from_info(article_info)
-                if publish_time is None:
-                    continue
-                # 移除时区信息进行比较
-                publish_time_naive = publish_time.replace(tzinfo=None) if publish_time else None
-                latest_time_naive = latest_time.replace(tzinfo=None) if latest_time else None
+        if not updates:
+            logger.info(f"未找到可回填的发布时间: {mp_id}")
+            return 0
 
-                if publish_time_naive <= latest_time_naive:
-                    should_stop = True
-                    continue
+        async with self.db.get_session() as session:
+            result = await session.execute(
+                select(Article).where(
+                    Article.feed_id == feed.id,
+                    Article.article_id.in_(list(updates.keys())),
+                )
+            )
+            db_articles = list(result.scalars().all())
 
-                article = await self._fetch_and_save_article(feed.id, article_info)
-                if article:
-                    articles.append(article)
+            for article in db_articles:
+                article.publish_time = updates[article.article_id]
 
-            page += 1
+            await session.flush()
 
-        # 更新同步时间
-        await self.subscription_service.update_sync_time(mp_id)
-        logger.info(f"增量抓取完成: {len(articles)} 篇新文章")
-
-        return articles
+        updated = len(updates)
+        logger.info(f"更新完成: {updated}/{len(articles)} 篇文章")
+        return updated
 
     async def get_mp_info_from_article(self, article_url: str) -> dict[str, Any]:
         """从文章链接获取公众号信息。

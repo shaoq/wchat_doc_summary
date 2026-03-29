@@ -42,8 +42,8 @@ class AuthService:
         logger.info("开始登录流程")
 
         response = await self.weread_client.get_login_qrcode()
-        login_id = response.get("login_id") or response.get("id") or response.get("uuid")
-        qrcode_url = response.get("qrcode_url") or response.get("url") or response.get("scanUrl")
+        login_id = response.get("login_id")
+        qrcode_url = response.get("qrcode_url")
 
         if not login_id or not qrcode_url:
             logger.error(f"登录响应格式错误: {response}")
@@ -92,7 +92,7 @@ class AuthService:
             if status in ("waiting", "pending", "scanned"):
                 return {
                     "success": False,
-                    "message": "等待扫码或确认",
+                    "message": response.get("message", "等待扫码或确认"),
                     "status": status,
                 }
 

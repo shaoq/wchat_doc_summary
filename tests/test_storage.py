@@ -1,8 +1,11 @@
 """存储层测试 - 测试数据库操作和 CRUD 功能。"""
 
-import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+import asyncio
 from pathlib import Path
+from typing import Generator
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from src.storage.database import Database, CRUDOperations
 from src.models.schema import Base, Feed, Article, Auth
@@ -12,9 +15,15 @@ class TestDatabase:
     """数据库管理测试。"""
 
     @pytest.fixture
-    def database(self) -> Database:
+    def database(self) -> Generator[Database, None, None]:
         """创建数据库实例。"""
-        return Database(database_url="sqlite+aiosqlite:///:memory:")
+        database = Database(database_url="sqlite+aiosqlite:///:memory:")
+        yield database
+        cleanup_loop = asyncio.new_event_loop()
+        try:
+            cleanup_loop.run_until_complete(database.close())
+        finally:
+            cleanup_loop.close()
 
     def test_database_init(self, database: Database) -> None:
         """测试数据库初始化。"""
@@ -76,9 +85,15 @@ class TestCRUDOperations:
     """CRUD 操作测试。"""
 
     @pytest.fixture
-    def mock_session(self) -> AsyncMock:
+    def mock_session(self) -> MagicMock:
         """创建模拟会话。"""
-        return AsyncMock()
+        session = MagicMock()
+        session.execute = AsyncMock()
+        session.flush = AsyncMock()
+        session.refresh = AsyncMock()
+        session.delete = AsyncMock()
+        session.add = MagicMock()
+        return session
 
     @pytest.fixture
     def feed_crud(self) -> CRUDOperations[Feed]:
@@ -87,12 +102,9 @@ class TestCRUDOperations:
 
     @pytest.mark.asyncio
     async def test_create(
-        self, feed_crud: CRUDOperations[Feed], mock_session: AsyncMock
+        self, feed_crud: CRUDOperations[Feed], mock_session: MagicMock
     ) -> None:
         """测试创建记录。"""
-        mock_session.flush = AsyncMock()
-        mock_session.refresh = AsyncMock()
-
         feed = await feed_crud.create(
             mock_session,
             {"mp_id": "MP_test", "name": "测试公众号"},
@@ -104,7 +116,7 @@ class TestCRUDOperations:
 
     @pytest.mark.asyncio
     async def test_get(
-        self, feed_crud: CRUDOperations[Feed], mock_session: AsyncMock
+        self, feed_crud: CRUDOperations[Feed], mock_session: MagicMock
     ) -> None:
         """测试获取记录。"""
         mock_feed = Feed(id=1, mp_id="MP_test", name="测试公众号")
@@ -120,7 +132,7 @@ class TestCRUDOperations:
 
     @pytest.mark.asyncio
     async def test_get_not_found(
-        self, feed_crud: CRUDOperations[Feed], mock_session: AsyncMock
+        self, feed_crud: CRUDOperations[Feed], mock_session: MagicMock
     ) -> None:
         """测试获取不存在的记录。"""
         mock_result = MagicMock()
@@ -133,7 +145,7 @@ class TestCRUDOperations:
 
     @pytest.mark.asyncio
     async def test_get_all(
-        self, feed_crud: CRUDOperations[Feed], mock_session: AsyncMock
+        self, feed_crud: CRUDOperations[Feed], mock_session: MagicMock
     ) -> None:
         """测试获取所有记录。"""
         feeds = [
@@ -151,13 +163,10 @@ class TestCRUDOperations:
 
     @pytest.mark.asyncio
     async def test_update(
-        self, feed_crud: CRUDOperations[Feed], mock_session: AsyncMock
+        self, feed_crud: CRUDOperations[Feed], mock_session: MagicMock
     ) -> None:
         """测试更新记录。"""
         feed = Feed(id=1, mp_id="MP_test", name="旧名称")
-
-        mock_session.flush = AsyncMock()
-        mock_session.refresh = AsyncMock()
 
         updated_feed = await feed_crud.update(
             mock_session, feed, {"name": "新名称"}
@@ -167,7 +176,7 @@ class TestCRUDOperations:
 
     @pytest.mark.asyncio
     async def test_delete(
-        self, feed_crud: CRUDOperations[Feed], mock_session: AsyncMock
+        self, feed_crud: CRUDOperations[Feed], mock_session: MagicMock
     ) -> None:
         """测试删除记录。"""
         feed = Feed(id=1, mp_id="MP_test", name="测试")
@@ -175,8 +184,6 @@ class TestCRUDOperations:
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = feed
         mock_session.execute = AsyncMock(return_value=mock_result)
-        mock_session.delete = AsyncMock()
-
         success = await feed_crud.delete(mock_session, 1)
 
         assert success is True
@@ -184,7 +191,7 @@ class TestCRUDOperations:
 
     @pytest.mark.asyncio
     async def test_delete_not_found(
-        self, feed_crud: CRUDOperations[Feed], mock_session: AsyncMock
+        self, feed_crud: CRUDOperations[Feed], mock_session: MagicMock
     ) -> None:
         """测试删除不存在的记录。"""
         mock_result = MagicMock()

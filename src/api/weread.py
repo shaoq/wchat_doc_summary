@@ -53,8 +53,11 @@ class WeReadClient:
         self,
         method: str,
         endpoint: str,
+        *,
+        allowed_status_codes: set[int] | None = None,
+        include_status_code: bool = False,
         **kwargs: Any,
-    ) -> dict[str, Any]:
+    ) -> Any:
         """发送 HTTP 请求。
 
         Args:
@@ -63,7 +66,8 @@ class WeReadClient:
             **kwargs: 传递给 httpx 的其他参数
 
         Returns:
-            JSON 响应数据
+            JSON 响应数据；当 include_status_code=True 时，返回
+            {"status_code": int, "data": Any}
 
         Raises:
             WeReadAPIError: API 请求失败
@@ -72,13 +76,23 @@ class WeReadClient:
         headers = self._get_headers()
         kwargs.setdefault("headers", headers)
         kwargs.setdefault("timeout", self.timeout)
+        allowed_status_codes = allowed_status_codes or set()
 
         async with httpx.AsyncClient() as client:
             for attempt in range(self.max_retries + 1):
                 try:
                     response = await client.request(method, url, **kwargs)
+                    if response.status_code in allowed_status_codes:
+                        data = response.json()
+                        if include_status_code:
+                            return {"status_code": response.status_code, "data": data}
+                        return data
+
                     response.raise_for_status()
-                    return response.json()
+                    data = response.json()
+                    if include_status_code:
+                        return {"status_code": response.status_code, "data": data}
+                    return data
                 except httpx.HTTPStatusError as e:
                     logger.error(
                         f"HTTP 错误: {e.response.status_code} - {e.response.text}"
@@ -105,7 +119,16 @@ class WeReadClient:
             - qrcode_url: 二维码图片 URL
         """
         logger.info("获取登录二维码")
-        return await self._request("GET", "/api/v2/login/platform")
+        response = await self._request("GET", "/api/v2/login/platform")
+
+        if not isinstance(response, dict):
+            return {}
+
+        return {
+            "login_id": response.get("login_id") or response.get("id") or response.get("uuid"),
+            "qrcode_url": response.get("qrcode_url") or response.get("url") or response.get("scanUrl"),
+            "message": response.get("message"),
+        }
 
     async def get_login_result(self, login_id: str) -> dict[str, Any]:
         """获取登录结果。
@@ -127,28 +150,68 @@ class WeReadClient:
             - user_info: 用户信息（成功时）
         """
         logger.info(f"检查登录状态: {login_id}")
-        url = f"{self.base_url}/api/v2/login/platform/{login_id}"
-        headers = self._get_headers()
+        response = await self._request(
+            "GET",
+            f"/api/v2/login/platform/{login_id}",
+            allowed_status_codes={500},
+            include_status_code=True,
+        )
 
-        async with httpx.AsyncClient() as client:
-            try:
-                response = await client.get(url, headers=headers, timeout=self.timeout)
-                data = response.json()
+        status_code = response.get("status_code", 200)
+        data = response.get("data", {})
+        if not isinstance(data, dict):
+            data = {}
 
-                # 处理 HTTP 500 但包含登录状态的情况
-                if response.status_code == 500:
-                    error_code = data.get("message", "")
-                    if "402" in str(error_code):
-                        return {"status": "waiting", "message": "等待扫码"}
-                    elif "666" in str(error_code):
-                        return {"status": "expired", "message": "二维码已过期"}
-                    else:
-                        return {"status": "error", "message": error_code}
+        # 处理 HTTP 500 但包含登录状态的情况
+        if status_code == 500:
+            error_code = data.get("message", "")
+            if "402" in str(error_code):
+                return {
+                    "status": "waiting",
+                    "message": "等待扫码",
+                    "token": None,
+                    "user_info": None,
+                }
+            if "666" in str(error_code):
+                return {
+                    "status": "expired",
+                    "message": "二维码已过期",
+                    "token": None,
+                    "user_info": None,
+                }
+            return {
+                "status": "error",
+                "message": str(error_code) or "登录失败",
+                "token": None,
+                "user_info": None,
+            }
 
-                return data
-            except httpx.RequestError as e:
-                logger.error(f"请求错误: {e}")
-                return {"status": "error", "message": str(e)}
+        token = data.get("token")
+        user_info = data.get("user_info") or data.get("userInfo")
+        status = data.get("status")
+
+        if token:
+            return {
+                "status": "success",
+                "message": data.get("message", "登录成功"),
+                "token": token,
+                "user_info": user_info or {},
+            }
+
+        if status in ("waiting", "pending", "scanned", "expired", "error"):
+            return {
+                "status": status,
+                "message": data.get("message", ""),
+                "token": None,
+                "user_info": user_info,
+            }
+
+        return {
+            "status": "error",
+            "message": data.get("message", "登录失败"),
+            "token": None,
+            "user_info": user_info,
+        }
 
     async def get_mp_info(self, article_url: str) -> dict[str, Any]:
         """通过文章链接获取公众号信息。
@@ -218,11 +281,34 @@ class WeReadClient:
         """
         logger.info(f"获取公众号文章列表: mp_id={mp_id}, page={page}, page_size={page_size}")
         params = {"page": page, "pageSize": page_size}
-        return await self._request(
+        response = await self._request(
             "GET",
             f"/api/v2/platform/mps/{mp_id}/articles",
             params=params,
         )
+
+        if isinstance(response, list):
+            return {
+                "articles": response,
+                "total": len(response),
+                "page": page,
+                "page_size": len(response),
+            }
+
+        if not isinstance(response, dict):
+            return {
+                "articles": [],
+                "total": 0,
+                "page": page,
+                "page_size": page_size,
+            }
+
+        return {
+            "articles": response.get("articles", []),
+            "total": response.get("total", 0),
+            "page": response.get("page", page),
+            "page_size": response.get("page_size") or response.get("pageSize", page_size),
+        }
 
     def set_token(self, token: str) -> None:
         """设置认证令牌。

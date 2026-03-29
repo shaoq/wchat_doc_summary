@@ -2,7 +2,7 @@
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from src.services.subscription import SubscriptionService
 from src.services.fetcher import FetcherService
@@ -34,6 +34,7 @@ class TestSubscriptionService:
         """测试添加新订阅。"""
         mock_session = AsyncMock()
         mock_session.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=None)))
+        mock_session.add = MagicMock()
         mock_session.flush = AsyncMock()
         mock_session.refresh = AsyncMock()
 
@@ -65,6 +66,7 @@ class TestSubscriptionService:
         mock_session.execute = AsyncMock(
             return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=existing_feed))
         )
+        mock_session.add = MagicMock()
         mock_session.flush = AsyncMock()
         mock_session.refresh = AsyncMock()
 
@@ -192,6 +194,81 @@ class TestFetcherService:
                 "https://mp.weixin.qq.com/s/test"
             )
 
+    @pytest.mark.asyncio
+    async def test_fetch_feed_filters_old_articles(
+        self,
+        fetcher_service: FetcherService,
+        mock_weread_client: MagicMock,
+        mock_subscription_service: MagicMock,
+    ) -> None:
+        """测试按天数抓取时会跳过过旧文章。"""
+        now = datetime.now(timezone.utc)
+        recent_time = (now - timedelta(hours=1)).isoformat()
+        old_time = (now - timedelta(days=10)).isoformat()
+
+        mock_subscription_service.get_subscription = AsyncMock(
+            return_value=Feed(id=1, mp_id="MP_WXS_test", name="测试公众号", status=1)
+        )
+        mock_subscription_service.update_sync_time = AsyncMock()
+        mock_weread_client.get_articles = AsyncMock(
+            return_value={
+                "articles": [
+                    {"id": "article_new", "title": "新文章", "publish_time": recent_time},
+                    {"id": "article_old", "title": "旧文章", "publish_time": old_time},
+                ],
+                "page_size": 50,
+            }
+        )
+
+        saved_article = Article(id=1, feed_id=1, article_id="article_new", title="新文章")
+        fetcher_service._fetch_and_save_article = AsyncMock(return_value=saved_article)
+        fetcher_service.backfill_publish_time = AsyncMock(return_value=0)
+
+        articles = await fetcher_service.fetch_feed("MP_WXS_test", days=5, max_pages=1)
+
+        assert len(articles) == 1
+        assert fetcher_service._fetch_and_save_article.await_count == 1
+        fetcher_service._fetch_and_save_article.assert_awaited_with(
+            1,
+            {"id": "article_new", "title": "新文章", "publish_time": recent_time},
+        )
+
+    @pytest.mark.asyncio
+    async def test_fetch_incremental_stops_at_existing_publish_time(
+        self,
+        fetcher_service: FetcherService,
+        mock_weread_client: MagicMock,
+        mock_subscription_service: MagicMock,
+    ) -> None:
+        """测试增量抓取遇到旧文章时停止。"""
+        mock_subscription_service.get_subscription = AsyncMock(
+            return_value=Feed(id=1, mp_id="MP_WXS_test", name="测试公众号", status=1)
+        )
+        mock_subscription_service.update_sync_time = AsyncMock()
+        fetcher_service._get_latest_publish_time = AsyncMock(
+            return_value=datetime(2026, 1, 2, 9, 0, 0)
+        )
+
+        mock_weread_client.get_articles = AsyncMock(
+            return_value={
+                "articles": [
+                    {"id": "article_new", "title": "新文章", "publish_time": "2026-01-03T09:00:00+00:00"},
+                    {"id": "article_old", "title": "旧文章", "publish_time": "2026-01-02T09:00:00+00:00"},
+                ],
+                "page_size": 2,
+            }
+        )
+
+        saved_article = Article(id=1, feed_id=1, article_id="article_new", title="新文章")
+        fetcher_service._fetch_and_save_article = AsyncMock(return_value=saved_article)
+        fetcher_service.backfill_publish_time = AsyncMock(return_value=0)
+
+        articles = await fetcher_service.fetch_incremental("MP_WXS_test", max_pages=3, page_size=2)
+
+        assert len(articles) == 1
+        assert mock_weread_client.get_articles.await_count == 1
+        fetcher_service._fetch_and_save_article.assert_awaited_once()
+
 
 class TestAuthService:
     """认证服务测试。"""
@@ -247,6 +324,8 @@ class TestAuthService:
         """测试检查登录成功。"""
         mock_weread_client.get_login_result = AsyncMock(
             return_value={
+                "status": "success",
+                "message": "登录成功",
                 "token": "test_token",
                 "user_info": {"name": "test_user"},
             }
@@ -264,6 +343,34 @@ class TestAuthService:
 
         assert result["success"] is True
         assert result["token"] == "test_token"
+
+    @pytest.mark.asyncio
+    async def test_check_login_expired(
+        self, auth_service: AuthService, mock_weread_client: MagicMock
+    ) -> None:
+        """测试检查登录二维码过期。"""
+        mock_weread_client.get_login_result = AsyncMock(
+            return_value={"status": "expired", "message": "二维码已过期", "token": None, "user_info": None}
+        )
+
+        result = await auth_service.check_login("test_login_id")
+
+        assert result["success"] is False
+        assert result["status"] == "expired"
+
+    @pytest.mark.asyncio
+    async def test_check_login_error(
+        self, auth_service: AuthService, mock_weread_client: MagicMock
+    ) -> None:
+        """测试检查登录失败。"""
+        mock_weread_client.get_login_result = AsyncMock(
+            return_value={"status": "error", "message": "网络异常", "token": None, "user_info": None}
+        )
+
+        result = await auth_service.check_login("test_login_id")
+
+        assert result["success"] is False
+        assert result["status"] == "error"
 
     @pytest.mark.asyncio
     async def test_check_login_waiting(

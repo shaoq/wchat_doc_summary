@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     # 微信读书代理 API 配置
     weread_api_base: str = Field(
         default="https://weread.111965.xyz",
-        description="微信读书代理 API 地址",
+        description="微信读书 API 基础 URL",
     )
 
     # 数据库配置
@@ -77,12 +77,6 @@ class Settings(BaseSettings):
     data_dir: Path = Field(
         default=Path("./data"),
         description="数据存储目录",
-    )
-
-    # 微信读书 API 配置
-    weread_api_base: str = Field(
-        default="https://weread.111965.xyz",
-        description="微信读书 API 基础 URL",
     )
 
     def get_db_path(self) -> Path:

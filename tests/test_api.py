@@ -75,8 +75,11 @@ class TestWeReadClient:
         client = WeReadClient(base_url="https://api.example.com")
 
         mock_response = {
-            "token": "test_token",
-            "user_info": {"name": "test_user"},
+            "status_code": 200,
+            "data": {
+                "token": "test_token",
+                "user_info": {"name": "test_user"},
+            },
         }
 
         with patch.object(
@@ -84,8 +87,45 @@ class TestWeReadClient:
         ):
             result = await client.get_login_result("test_login_id")
 
+            assert result["status"] == "success"
             assert result["token"] == "test_token"
             assert result["user_info"]["name"] == "test_user"
+
+    @pytest.mark.asyncio
+    async def test_get_login_result_waiting(self) -> None:
+        """测试获取登录结果 - 等待扫码。"""
+        client = WeReadClient(base_url="https://api.example.com")
+
+        mock_response = {
+            "status_code": 500,
+            "data": {"message": "402 waiting"},
+        }
+
+        with patch.object(
+            client, "_request", new_callable=AsyncMock, return_value=mock_response
+        ):
+            result = await client.get_login_result("test_login_id")
+
+            assert result["status"] == "waiting"
+            assert result["token"] is None
+
+    @pytest.mark.asyncio
+    async def test_get_login_result_expired(self) -> None:
+        """测试获取登录结果 - 二维码过期。"""
+        client = WeReadClient(base_url="https://api.example.com")
+
+        mock_response = {
+            "status_code": 500,
+            "data": {"message": "666 expired"},
+        }
+
+        with patch.object(
+            client, "_request", new_callable=AsyncMock, return_value=mock_response
+        ):
+            result = await client.get_login_result("test_login_id")
+
+            assert result["status"] == "expired"
+            assert result["token"] is None
 
     @pytest.mark.asyncio
     async def test_get_mp_info(self) -> None:
@@ -127,6 +167,7 @@ class TestWeReadClient:
 
             assert len(result["articles"]) == 2
             assert result["total"] == 2
+            assert result["page_size"] == 50
 
     def test_set_token(self) -> None:
         """测试设置 token。"""

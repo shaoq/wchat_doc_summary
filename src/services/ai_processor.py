@@ -2,7 +2,10 @@
 
 import asyncio
 import logging
+import re
+from collections import Counter
 from collections.abc import Callable
+from pathlib import Path
 
 from anthropic import AsyncAnthropic
 
@@ -75,46 +78,10 @@ EXTRACT_STOCKS_PROMPT = """请从以下文章中提取所有提到的A股股票�
 
 股票信息："""
 
-MARKET_SUMMARY_PROMPT = """你是一位专业的 A 股市场分析师。请根据以下数据和新闻，生成一份结构化的市场总结报告。
-
-## 交易日期
-{trade_date}
-
-## 市场数据
-### 指数表现
-{indices_summary}
-
-### 成交情况
-两市成交额：{volume} 亿元
-
-### 涨跌统计
-- 上涨：{up_count} 家
-- 下跌：{down_count} 家
-- 平盘：{flat_count} 家
-
-### 板块表现
-涨幅榜：{top_sectors}
-跌幅榜：{bottom_sectors}
-
-### 涨停个股
-{limit_up_stocks}
-
-## 相关新闻
-{articles}
-
-请生成一份专业的市场总结报告，包含以下部分：
-1. 市场概览（指数表现、成交情况、涨跌统计）
-2. 板块分析（热点板块、弱势板块）
-3. 个股亮点（涨停股、龙头股）
-4. 市场消息（核心新闻摘要）
-
-报告要求：
-- 语言简洁专业
-- 突出重点信息
-- 结合数据和市场消息进行分析
-- 总字数控制在 500-800 字
-
-市场总结报告："""
+# 市场总结模板路径
+MARKET_SUMMARY_TEMPLATE_PATH = Path("templates/market_summary.md")
+MARKET_SUMMARY_MAX_TOKENS = 2200
+MARKET_STRATEGY_ENHANCEMENT_MAX_TOKENS = 1200
 
 
 class AIProcessor:
@@ -557,11 +524,29 @@ class AIProcessor:
 
         raise RuntimeError("不应该到达这里")
 
+    def _load_market_summary_template(self) -> str:
+        """加载市场总结模板。
+
+        从 templates/market_summary.md 文件加载模板。
+
+        Returns:
+            模板内容
+
+        Raises:
+            FileNotFoundError: 模板文件不存在
+        """
+        if not MARKET_SUMMARY_TEMPLATE_PATH.exists():
+            raise FileNotFoundError(f"市场总结模板文件不存在: {MARKET_SUMMARY_TEMPLATE_PATH}")
+
+        return MARKET_SUMMARY_TEMPLATE_PATH.read_text(encoding="utf-8")
+
     async def generate_market_summary(
         self,
         trade_date: str,
         market_data: dict,
         articles: list[dict],
+        telegraphs: list[dict] | None = None,
+        watch_items: list[dict] | None = None,
     ) -> str:
         """生成市场总结。
 
@@ -569,10 +554,15 @@ class AIProcessor:
             trade_date: 交易日期 (YYYY-MM-DD)
             market_data: 行情数据（指数、板块、个股等）
             articles: 相关文章列表
+            telegraphs: 财联社重要电报列表（可选）
+            watch_items: 财联社看盘数据列表（可选）
 
         Returns:
             市场总结文本
         """
+        # 加载模板
+        template = self._load_market_summary_template()
+
         # 格式化数据
         indices = market_data.get("indices", {})
         indices_summary = self._format_indices_for_prompt(indices)
@@ -592,8 +582,27 @@ class AIProcessor:
         # 格式化文章
         articles_text = self._format_articles_for_prompt(articles[:10])
 
+        # 格式化电报
+        telegraphs_text = self._format_telegraphs_for_prompt(telegraphs[:30] if telegraphs else [])
+
+        # 格式化看盘数据
+        watch_items_text = self._format_watch_items_for_prompt(watch_items[:50] if watch_items else [])
+
+        # 构建数据缺口提示
+        data_gaps = self._build_data_gaps(
+            indices=indices,
+            volume=market_data.get("volume"),
+            stats=stats,
+            top_sectors=sectors.get("top_sectors", []),
+            bottom_sectors=sectors.get("bottom_sectors", []),
+            limit_up=limit_up,
+            telegraphs=telegraphs,
+            watch_items=watch_items,
+            articles=articles,
+        )
+
         # 构建提示词
-        prompt = MARKET_SUMMARY_PROMPT.format(
+        prompt = template.format(
             trade_date=trade_date,
             indices_summary=indices_summary,
             volume=volume,
@@ -603,15 +612,300 @@ class AIProcessor:
             top_sectors=top_sectors,
             bottom_sectors=bottom_sectors,
             limit_up_stocks=limit_up_stocks,
+            cls_telegraphs=telegraphs_text,
+            cls_watch_items=watch_items_text,
             articles=articles_text,
+            data_gaps=data_gaps,
         )
 
         # 调用 API
         logger.info(f"开始生成市场总结: {trade_date}")
-        summary = await self._call_api(prompt, max_tokens=1500)
+        summary = await self._call_api(prompt, max_tokens=MARKET_SUMMARY_MAX_TOKENS)
+
+        if self._strategy_section_needs_enhancement(summary):
+            logger.info("检测到“后续策略建议与风险提示”内容偏弱，开始二次增强")
+            strategy_prompt = self._build_strategy_enhancement_prompt(
+                trade_date=trade_date,
+                summary=summary,
+                indices_summary=indices_summary,
+                volume=volume,
+                stats=stats,
+                top_sectors=sectors.get("top_sectors", []),
+                bottom_sectors=sectors.get("bottom_sectors", []),
+                limit_up=limit_up,
+                telegraphs=telegraphs or [],
+                watch_items=watch_items or [],
+                articles=articles,
+                data_gaps=data_gaps,
+            )
+            enhanced_strategy = await self._call_api(
+                strategy_prompt,
+                max_tokens=MARKET_STRATEGY_ENHANCEMENT_MAX_TOKENS,
+            )
+            summary = self._merge_strategy_section(summary, enhanced_strategy)
+
         logger.info(f"市场总结生成完成")
 
         return summary
+
+    def _build_strategy_enhancement_prompt(
+        self,
+        trade_date: str,
+        summary: str,
+        indices_summary: str,
+        volume: str,
+        stats: dict,
+        top_sectors: list,
+        bottom_sectors: list,
+        limit_up: list,
+        telegraphs: list,
+        watch_items: list,
+        articles: list,
+        data_gaps: str,
+    ) -> str:
+        """构建第六节后续策略增强 prompt。"""
+        summary_without_strategy = self._remove_strategy_section(summary).strip()
+        strategy_digest = self._build_strategy_evidence_digest(
+            indices_summary=indices_summary,
+            volume=volume,
+            stats=stats,
+            top_sectors=top_sectors,
+            bottom_sectors=bottom_sectors,
+            limit_up=limit_up,
+            telegraphs=telegraphs,
+            watch_items=watch_items,
+            articles=articles,
+            data_gaps=data_gaps,
+        )
+
+        return f"""你正在补写并强化一份 A 股市场总结的最后一节。交易日期：{trade_date}
+
+现有总结前五节如下，请保持其判断口径一致，不要重复前五节内容：
+{summary_without_strategy}
+
+以下是只允许使用的策略辅助证据，请围绕这些信号展开，不要脱离证据泛化发挥：
+{strategy_digest}
+
+硬性输出要求：
+1. 你只输出一个完整章节：`## 六、后续策略建议与风险提示`，不要输出其他章节、开场白或结束语。
+2. 该章节下必须按固定顺序包含以下三个小节：
+   - `### 6.1 主线与板块策略`
+   - `### 6.2 个股与情绪策略`
+   - `### 6.3 关键消息与事件策略`
+3. 整个第六节至少输出 4 条策略，其中：
+   - 主线与板块策略至少 2 条
+   - 个股与情绪策略至少 1 条
+   - 关键消息与事件策略至少 1 条
+4. 每条策略都必须严格使用以下格式：
+   - **观察/策略**: [具体方向、板块、个股或事件]
+     - **依据**: [明确引用指数/成交额/板块/涨停/电报/看盘/文章中的具体证据]
+     - **应对**: [次日触发条件、确认信号、节奏或仓位表达]
+     - **风险**: [风险点、失效条件、何时放弃]
+5. 不得出现“继续关注”“值得留意”“主线清晰”等无证据支撑的空话。
+6. 必须明确策略态度是“看多 / 观察 / 回避”中的哪一种，不能模糊。
+7. 若某类证据不足，必须写成“观察 / 等待验证 / 暂不下判断”，不能强行给出进攻性结论。
+8. 主线与板块策略要回答持续性、分歧回流预期、跟风与主线的区分。
+9. 个股与情绪策略要回答高标带动性、涨停溢价、炸板反馈、接力还是等待。
+10. 关键消息与事件策略要回答隔夜发酵可能、日内刺激还是中期催化，以及确认信号。
+
+现在只输出完整的第六节正文："""
+
+    def _build_strategy_evidence_digest(
+        self,
+        indices_summary: str,
+        volume: str,
+        stats: dict,
+        top_sectors: list,
+        bottom_sectors: list,
+        limit_up: list,
+        telegraphs: list,
+        watch_items: list,
+        articles: list,
+        data_gaps: str,
+    ) -> str:
+        """构建策略增强用的压缩证据摘要。"""
+        lines = [
+            "### 策略辅助信号",
+            f"- 指数概览: {indices_summary}",
+            f"- 两市成交额: {volume} 亿元",
+            (
+                f"- 市场宽度: 上涨 {stats.get('up_count', 'N/A')} 家，"
+                f"下跌 {stats.get('down_count', 'N/A')} 家，"
+                f"平盘 {stats.get('flat_count', 'N/A')} 家"
+            ),
+            f"- 强势板块候选: {self._format_sectors_for_prompt(top_sectors[:5])}",
+            f"- 弱势板块候选: {self._format_sectors_for_prompt(bottom_sectors[:5])}",
+            f"- 涨停与核心个股样本: {self._format_stocks_for_prompt(limit_up[:12])}",
+        ]
+
+        watch_sector_counter: Counter[str] = Counter()
+        watch_stock_counter: Counter[str] = Counter()
+        for item in watch_items[:20]:
+            for sector in item.get("sectors", []) or []:
+                if sector:
+                    watch_sector_counter[sector] += 1
+            for stock in item.get("stocks", []) or []:
+                if stock:
+                    watch_stock_counter[stock] += 1
+
+        if watch_sector_counter:
+            sector_summary = "、".join(
+                f"{name}({count}次提及)"
+                for name, count in watch_sector_counter.most_common(5)
+            )
+            lines.append(f"- 盘中轮动高频板块: {sector_summary}")
+        else:
+            lines.append("- 盘中轮动高频板块: 无明显高频板块线索")
+
+        if watch_stock_counter:
+            stock_summary = "、".join(
+                f"{name}({count}次提及)"
+                for name, count in watch_stock_counter.most_common(5)
+            )
+            lines.append(f"- 盘中高频个股: {stock_summary}")
+        else:
+            lines.append("- 盘中高频个股: 无明显重复提及个股")
+
+        if telegraphs:
+            telegraph_titles = "；".join(
+                t.get("title", "").strip()
+                for t in telegraphs[:6]
+                if t.get("title", "").strip()
+            )
+            if telegraph_titles:
+                lines.append(f"- 财联社电报关键标题: {telegraph_titles}")
+
+        if articles:
+            article_titles = "；".join(
+                a.get("title", "").strip()
+                for a in articles[:5]
+                if a.get("title", "").strip()
+            )
+            if article_titles:
+                lines.append(f"- 文章观点标题: {article_titles}")
+
+        lines.append(f"- 数据缺口与降级约束: {data_gaps}")
+        return "\n".join(lines)
+
+    def _extract_strategy_section(self, summary: str) -> str | None:
+        """提取第六节后续策略建议与风险提示。"""
+        match = re.search(
+            r"(?ms)^##\s*六、后续策略建议与风险提示\s*\n.*?(?=^##\s|\Z)",
+            summary.strip(),
+        )
+        return match.group(0).strip() if match else None
+
+    def _remove_strategy_section(self, summary: str) -> str:
+        """移除第六节，保留前文内容。"""
+        return re.sub(
+            r"(?ms)\n*^##\s*六、后续策略建议与风险提示\s*\n.*?(?=^##\s|\Z)",
+            "",
+            summary.strip(),
+        ).strip()
+
+    def _strategy_section_needs_enhancement(self, summary: str) -> bool:
+        """判断第六节是否过于简单，需要二次增强。"""
+        strategy_section = self._extract_strategy_section(summary)
+        if not strategy_section:
+            return True
+
+        required_subsections = [
+            "### 6.1 主线与板块策略",
+            "### 6.2 个股与情绪策略",
+            "### 6.3 关键消息与事件策略",
+        ]
+        if any(subsection not in strategy_section for subsection in required_subsections):
+            return True
+
+        strategy_item_count = len(re.findall(r"(?m)^- \*\*观察/策略\*\*:", strategy_section))
+        if strategy_item_count < 4:
+            return True
+
+        if len(strategy_section.strip()) < 500:
+            return True
+
+        return False
+
+    def _normalize_strategy_section(self, strategy_section: str) -> str:
+        """标准化第六节文本，确保包含章节标题。"""
+        normalized = strategy_section.strip()
+        if not normalized.startswith("## 六、后续策略建议与风险提示"):
+            normalized = (
+                "## 六、后续策略建议与风险提示\n" + normalized.lstrip("#").strip()
+            )
+        return normalized.strip()
+
+    def _merge_strategy_section(self, summary: str, strategy_section: str) -> str:
+        """将增强后的第六节合并回完整总结。"""
+        normalized_strategy = self._normalize_strategy_section(strategy_section)
+
+        if self._extract_strategy_section(summary):
+            return re.sub(
+                r"(?ms)^##\s*六、后续策略建议与风险提示\s*\n.*?(?=^##\s|\Z)",
+                normalized_strategy,
+                summary.strip(),
+            ).strip()
+
+        summary_without_strategy = summary.rstrip()
+        if summary_without_strategy:
+            return f"{summary_without_strategy}\n\n{normalized_strategy}"
+        return normalized_strategy
+
+    def _build_data_gaps(
+        self,
+        indices: dict,
+        volume: dict | None,
+        stats: dict,
+        top_sectors: list,
+        bottom_sectors: list,
+        limit_up: list,
+        telegraphs: list | None,
+        watch_items: list | None,
+        articles: list,
+    ) -> str:
+        """构建数据缺口提示文本。
+
+        检查各证据组是否为空或明显不足，为模型提供降级依据。
+
+        Args:
+            indices: 指数数据
+            volume: 成交额数据
+            stats: 涨跌统计数据
+            top_sectors: 涨幅板块列表
+            bottom_sectors: 跌幅板块列表
+            limit_up: 涨停个股列表
+            telegraphs: 电报列表
+            watch_items: 看盘数据列表
+            articles: 文章列表
+
+        Returns:
+            数据缺口描述文本，无缺口时返回"无"
+        """
+        gaps: list[str] = []
+
+        if not indices:
+            gaps.append("指数行情数据缺失")
+        if not volume or not volume.get("total_volume"):
+            gaps.append("成交额数据缺失")
+        if not stats:
+            gaps.append("涨跌统计数据缺失")
+        if not top_sectors and not bottom_sectors:
+            gaps.append("板块强弱数据缺失")
+        if not limit_up:
+            gaps.append("涨停个股数据缺失")
+        if not telegraphs:
+            gaps.append("财联社电报数据缺失")
+        if not watch_items:
+            gaps.append("盘中看盘数据缺失")
+        if not articles:
+            gaps.append("文章观点数据缺失")
+
+        if not gaps:
+            return "无"
+
+        return "⚠️ 以下证据组数据不足，请在生成时进入观察模式：\n" + "\n".join(
+            f"- {gap}" for gap in gaps
+        )
 
     def _format_indices_for_prompt(self, indices: dict) -> str:
         """格式化指数数据用于 prompt。"""
@@ -660,5 +954,57 @@ class AIProcessor:
             lines.append(f"{i}. {title}")
             if summary:
                 lines.append(f"   摘要：{summary}...")
+
+        return "\n".join(lines)
+
+    def _format_telegraphs_for_prompt(self, telegraphs: list) -> str:
+        """格式化财联社电报数据用于 prompt。"""
+        if not telegraphs:
+            return "无重要电报"
+
+        lines = []
+        for t in telegraphs:
+            time_str = t.get("publish_time", "")
+            title = t.get("title", "")
+            content = t.get("content", "")[:150] if t.get("content") else ""
+
+            if title and content:
+                lines.append(f"- [{time_str}] {title}: {content}")
+            elif title:
+                lines.append(f"- [{time_str}] {title}")
+            elif content:
+                lines.append(f"- [{time_str}] {content}")
+
+        return "\n".join(lines)
+
+    def _format_watch_items_for_prompt(self, watch_items: list) -> str:
+        """格式化看盘数据用于 prompt。"""
+        if not watch_items:
+            return "无看盘数据"
+
+        lines = []
+        for item in watch_items:
+            time_str = item.get("publish_time", "")
+            title = item.get("title", "")
+            content = item.get("content", "")[:200] if item.get("content") else ""
+
+            # 提取涉及的股票和板块
+            stocks = item.get("stocks", [])
+            sectors = item.get("sectors", [])
+
+            extra_info = []
+            if stocks:
+                extra_info.append(f"个股: {', '.join(stocks[:5])}")
+            if sectors:
+                extra_info.append(f"板块: {', '.join(sectors[:3])}")
+
+            extra_str = f" [{', '.join(extra_info)}]" if extra_info else ""
+
+            if title and content:
+                lines.append(f"- [{time_str}] {title}: {content}{extra_str}")
+            elif title:
+                lines.append(f"- [{time_str}] {title}{extra_str}")
+            elif content:
+                lines.append(f"- [{time_str}] {content}{extra_str}")
 
         return "\n".join(lines)

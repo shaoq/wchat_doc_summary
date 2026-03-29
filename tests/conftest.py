@@ -1,12 +1,14 @@
 """pytest 配置和共享 fixtures。"""
 
 import asyncio
-import pytest
-from typing import AsyncGenerator, Generator
-from unittest.mock import MagicMock, AsyncMock
-from pathlib import Path
-import tempfile
 import os
+import tempfile
+from pathlib import Path
+from typing import Generator
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+import pytest_asyncio
 
 # 设置测试环境变量
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
@@ -107,3 +109,14 @@ async def async_session():
         yield session
 
     await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def integration_db():
+    """真实 SQLite 异步数据库。"""
+    from src.storage.database import Database
+
+    db = Database(database_url="sqlite+aiosqlite:///:memory:")
+    await db.init_db()
+    yield db
+    await db.close()
