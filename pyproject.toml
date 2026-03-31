@@ -23,6 +23,7 @@ dependencies = [
     "anthropic>=0.18.0",
     "chinese-calendar>=4.0.0",
     "akshare>=1.12.0",
+    "pytdx>=1.72",
 ]
 
 [project.optional-dependencies]

@@ -608,6 +608,72 @@ def test_data_source_label_displayed():
     assert "数据来源: API 实时数据" in result.output
 
 
+class _BreadthPrimarySourceAnalyzer(_FakeAnalyzer):
+    """宽度数据命中官方成交额 + pytdx 主源的 analyzer。"""
+
+    async def collect_market_data(self, offline=False, trade_date=None, force=False):
+        return {
+            "indices": {"sh": {"name": "上证指数", "close": 3089.26, "change": 0.0045}},
+            "volume": {"sh_volume": 5000.0, "sz_volume": 7000.0, "total_volume": 12000.0},
+            "statistics": {"up_count": 2500, "down_count": 1800, "flat_count": 200},
+            "sectors": {"top_sectors": [], "bottom_sectors": []},
+            "limit_up": [],
+            "fetch_time": "2026-03-27T10:00:00",
+            "data_source": "api",
+            "breadth_quality": {
+                "volume": {"status": "ok", "source": "official_exchange_turnover", "actual_count": 2, "expected_count": 2},
+                "statistics": {"status": "ok", "source": "pytdx_quotes", "actual_count": 5518, "expected_count": 5518},
+            },
+        }
+
+
+class _BreadthFallbackSourceAnalyzer(_FakeAnalyzer):
+    """宽度数据命中旧链路兜底的 analyzer。"""
+
+    async def collect_market_data(self, offline=False, trade_date=None, force=False):
+        return {
+            "indices": {"sh": {"name": "上证指数", "close": 3089.26, "change": 0.0045}},
+            "volume": {"sh_volume": 5000.0, "sz_volume": 7000.0, "total_volume": 12000.0},
+            "statistics": {"up_count": 2500, "down_count": 1800, "flat_count": 200},
+            "sectors": {"top_sectors": [], "bottom_sectors": []},
+            "limit_up": [],
+            "fetch_time": "2026-03-27T10:00:00",
+            "data_source": "api",
+            "breadth_quality": {
+                "volume": {"status": "ok", "source": "akshare_spot_em", "actual_count": 5518, "expected_count": 5518},
+                "statistics": {"status": "ok", "source": "akshare_spot_em", "actual_count": 5518, "expected_count": 5518},
+            },
+        }
+
+
+def test_breadth_primary_source_label_displayed():
+    """阶段 1 应展示官方成交额 + pytdx 宽度标签。"""
+    runner = CliRunner()
+    with patch("src.cli.ai.get_db", new=_fake_get_db):
+        with patch("src.cli.ai.MarketAnalyzer", _BreadthPrimarySourceAnalyzer):
+            with patch("src.cli.ai.AIProcessor", _FakeProcessor):
+                result = runner.invoke(
+                    main,
+                    ["ai", "market-summary", "--date", "2026-03-27", "--force"],
+                )
+
+    assert "宽度来源: 官方成交额 + pytdx 统计" in result.output
+
+
+def test_breadth_fallback_source_label_displayed():
+    """阶段 1 应展示旧链路兜底宽度标签。"""
+    runner = CliRunner()
+    with patch("src.cli.ai.get_db", new=_fake_get_db):
+        with patch("src.cli.ai.MarketAnalyzer", _BreadthFallbackSourceAnalyzer):
+            with patch("src.cli.ai.AIProcessor", _FakeProcessor):
+                result = runner.invoke(
+                    main,
+                    ["ai", "market-summary", "--date", "2026-03-27", "--force"],
+                )
+
+    assert "宽度来源: 旧链路兜底 (AKShare)" in result.output
+
+
 def test_market_stage_shows_component_level_statuses():
     """阶段 1 应在进入生成前展示市场数据逐项状态。"""
     runner = CliRunner()
@@ -1103,6 +1169,7 @@ def test_breadth_error_shows_failure_wording():
     # 应显示失败措辞
     assert "成交额: 获取失败" in output
     assert "涨跌统计: 获取失败" in output
+    assert "宽度来源: 降级为空值" in output
 
 
 def test_breadth_partial_shows_sample_incomplete():

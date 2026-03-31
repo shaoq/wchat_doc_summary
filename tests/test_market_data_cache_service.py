@@ -409,6 +409,26 @@ class TestBreadthQualityCacheProtection:
         assert cached["statistics"]["up_count"] == 2000
 
     @pytest.mark.asyncio
+    async def test_ok_breadth_with_official_and_pytdx_sources_still_writes(self, integration_db, sample_data):
+        """breadth_quality source 切换为 official / pytdx 时，缓存门控仍只看 status。"""
+        service = MarketDataCacheService(integration_db)
+        trade_date = date(2026, 3, 27)
+
+        data = {
+            **sample_data,
+            "breadth_quality": {
+                "volume": {"status": "ok", "source": "official_exchange_turnover"},
+                "statistics": {"status": "ok", "source": "pytdx_quotes"},
+            },
+        }
+        await service.save_market_data(trade_date, data)
+
+        cached = await service.get_cached(trade_date)
+        assert cached is not None
+        assert cached["volume"]["total_volume"] == 7000.0
+        assert cached["statistics"]["up_count"] == 2000
+
+    @pytest.mark.asyncio
     async def test_error_breadth_skips_volume_and_statistics_write(self, integration_db, sample_data):
         """breadth_quality 为 error 时，成交额和涨跌统计不应写库。"""
         service = MarketDataCacheService(integration_db)

@@ -28,8 +28,20 @@ logger = logging.getLogger(__name__)
 # 是否禁用网络请求（用于测试或离线模式）
 _DISABLE_NETWORK = os.environ.get("WCHAT_DISABLE_NETWORK", "").lower() in ("1", "true", "yes")
 
-# 缓存配置
-_CACHE_TTL_SECONDS = 300  # 5 分钟缓存
+_PYTDX_BATCH_SIZE = 80
+_PYTDX_HOSTS = (
+    ("218.6.170.47", 7709),
+    ("123.125.108.14", 7709),
+    ("180.153.18.170", 7709),
+    ("180.153.18.171", 7709),
+    ("101.227.73.20", 7709),
+    ("14.17.75.71", 7709),
+)
+_SSE_TURNOVER_SOURCE = "official_sse_turnover"
+_SZSE_TURNOVER_SOURCE = "official_szse_turnover"
+_OFFICIAL_TURNOVER_SOURCE = "official_exchange_turnover"
+_PYTDX_STATS_SOURCE = "pytdx_quotes"
+_AKSHARE_BREADTH_SOURCE = "akshare_spot_em"
 
 
 @contextlib.contextmanager
@@ -276,6 +288,8 @@ class FinanceClient:
     MAX_TIMEOUT = 60
     SOURCE_STRATEGIES: dict[str, tuple[str, ...]] = {
         "indices": ("tencent_realtime", "akshare_index_spot"),
+        "volume": (_OFFICIAL_TURNOVER_SOURCE, _AKSHARE_BREADTH_SOURCE),
+        "statistics": (_PYTDX_STATS_SOURCE, _AKSHARE_BREADTH_SOURCE),
         "snapshot": ("eastmoney_stock_snapshot", "akshare_a_spot"),
         "sectors": (
             "akshare_sector_spot",
@@ -301,6 +315,238 @@ class FinanceClient:
         self._semaphore = asyncio.Semaphore(2)
         self._tencent = TencentFinanceClient()
         self._eastmoney = EastMoneyCurlClient()
+
+    def _build_quality(
+        self,
+        *,
+        status: str,
+        source: str,
+        actual_count: int = 0,
+        expected_count: int = 0,
+    ) -> dict[str, Any]:
+        return {
+            "status": status,
+            "source": source,
+            "actual_count": actual_count,
+            "expected_count": expected_count,
+        }
+
+    def _requests_session(self, *, referer: str | None = None) -> requests.Session:
+        session = requests.Session()
+        session.trust_env = False
+        session.headers.update(
+            {
+                "User-Agent": "Mozilla/5.0",
+                "Accept": "*/*",
+            }
+        )
+        if referer:
+            session.headers["Referer"] = referer
+        return session
+
+    def _parse_jsonp_payload(self, payload: str) -> Any:
+        text = payload.strip()
+        if not text:
+            raise ValueError("empty payload")
+        match = re.fullmatch(r"[^(]+\((.*)\)", text, re.S)
+        if not match:
+            raise ValueError("invalid jsonp payload")
+        return json.loads(match.group(1))
+
+    def _parse_numeric_text(self, value: Any) -> float | None:
+        if value in (None, ""):
+            return None
+        text = str(value).replace(",", "").strip()
+        return self._to_float(text)
+
+    def _extract_sse_stock_turnover(self, payload: dict[str, Any]) -> tuple[float, str]:
+        rows = payload.get("result") or []
+        if not isinstance(rows, list):
+            raise ValueError("invalid SSE response rows")
+        for row in rows:
+            if not isinstance(row, Mapping):
+                continue
+            if str(row.get("PRODUCT_CODE", "")) == "17":
+                turnover = self._parse_numeric_text(row.get("TRADE_AMT"))
+                trade_date = str(row.get("TRADE_DATE", "")).strip()
+                if turnover is None or not trade_date:
+                    break
+                return turnover, trade_date
+        raise ValueError("SSE turnover row not found")
+
+    def _extract_szse_stock_turnover(self, payload: Any) -> tuple[float, str]:
+        if not isinstance(payload, list) or not payload:
+            raise ValueError("invalid SZSE payload")
+        first = payload[0] if isinstance(payload[0], Mapping) else {}
+        metadata = first.get("metadata") if isinstance(first, Mapping) else {}
+        rows = first.get("data") if isinstance(first, Mapping) else None
+        if not isinstance(rows, list):
+            raise ValueError("invalid SZSE response rows")
+        for row in rows:
+            if not isinstance(row, Mapping):
+                continue
+            if "成交金额" in str(row.get("zbmc", "")):
+                turnover = self._parse_numeric_text(row.get("gp"))
+                if turnover is None:
+                    break
+                trade_date = ""
+                conditions = metadata.get("conditions") if isinstance(metadata, Mapping) else None
+                if isinstance(conditions, list):
+                    for item in conditions:
+                        if isinstance(item, Mapping) and item.get("name") == "txtQueryDate":
+                            trade_date = str(item.get("defaultValue", "")).replace("-", "")
+                            break
+                return turnover, trade_date
+        raise ValueError("SZSE turnover row not found")
+
+    def _fetch_sse_official_turnover_sync(self, trade_date: date) -> tuple[float, str]:
+        session = self._requests_session(referer="https://www.sse.com.cn/market/stockdata/overview/day/")
+        try:
+            response = session.get(
+                "https://query.sse.com.cn/commonQuery.do",
+                params={
+                    "jsonCallBack": "jsonpCallback",
+                    "sqlId": "COMMON_SSE_SJ_GPSJ_CJGK_MRGK_C",
+                    "PRODUCT_CODE": "01,02,03,11,17",
+                    "type": "inParams",
+                    "SEARCH_DATE": trade_date.isoformat(),
+                },
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            payload = self._parse_jsonp_payload(response.text)
+            return self._extract_sse_stock_turnover(payload)
+        finally:
+            session.close()
+
+    def _fetch_szse_official_turnover_sync(self, trade_date: date) -> tuple[float, str]:
+        session = self._requests_session(referer="https://www.szse.cn/www/market/stock/situation/daily/index.html")
+        try:
+            response = session.get(
+                "https://www.szse.cn/api/report/ShowReport/data",
+                params={
+                    "SHOWTYPE": "JSON",
+                    "CATALOGID": "scsj_gprdgk_after",
+                    "txtQueryDate": trade_date.isoformat(),
+                },
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            return self._extract_szse_stock_turnover(payload)
+        finally:
+            session.close()
+
+    async def _fetch_sse_official_turnover(self, trade_date: date) -> tuple[float, str]:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, lambda: self._fetch_sse_official_turnover_sync(trade_date))
+
+    async def _fetch_szse_official_turnover(self, trade_date: date) -> tuple[float, str]:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, lambda: self._fetch_szse_official_turnover_sync(trade_date))
+
+    def _is_pytdx_a_share(self, market: int, code: str) -> bool:
+        if market == 0:
+            return code.startswith(("00", "30"))
+        if market == 1:
+            return code.startswith(("60", "68"))
+        return False
+
+    def _build_pytdx_a_share_universe(self, api: Any) -> list[tuple[int, str]]:
+        universe: list[tuple[int, str]] = []
+        for market in (0, 1):
+            total = int(api.get_security_count(market) or 0)
+            for start in range(0, total, 1000):
+                rows = api.get_security_list(market, start)
+                if not isinstance(rows, list):
+                    continue
+                for row in rows:
+                    if not isinstance(row, Mapping):
+                        continue
+                    code = str(row.get("code", "")).strip()
+                    if self._is_pytdx_a_share(market, code):
+                        universe.append((market, code))
+        return universe
+
+    def _compute_statistics_from_pytdx_quotes(self, rows: list[dict[str, Any]]) -> tuple[dict[str, int], int]:
+        up_count = 0
+        down_count = 0
+        flat_count = 0
+        actual_count = 0
+
+        for item in rows:
+            if not isinstance(item, Mapping):
+                continue
+            price = self._to_float(item.get("price"))
+            last_close = self._to_float(item.get("last_close"))
+            if price is None or last_close in (None, 0):
+                continue
+            actual_count += 1
+            if price > last_close:
+                up_count += 1
+            elif price < last_close:
+                down_count += 1
+            else:
+                flat_count += 1
+
+        return {
+            "up_count": up_count,
+            "down_count": down_count,
+            "flat_count": flat_count,
+        }, actual_count
+
+    def _fetch_pytdx_statistics_sync(self) -> tuple[dict[str, int], dict[str, Any]]:
+        error_quality = self._build_quality(status="error", source=_PYTDX_STATS_SOURCE)
+        try:
+            from pytdx.hq import TdxHq_API
+        except ImportError:
+            logger.info("pytdx 未安装，跳过涨跌统计主源")
+            return {"up_count": 0, "down_count": 0, "flat_count": 0}, error_quality
+
+        expected_count = 0
+        for host, port in _PYTDX_HOSTS:
+            api = TdxHq_API(heartbeat=False, multithread=False)
+            try:
+                with api.connect(host, port, time_out=min(self.timeout, 5)):
+                    universe = self._build_pytdx_a_share_universe(api)
+                    expected_count = len(universe)
+                    if expected_count == 0:
+                        break
+
+                    quotes_rows: list[dict[str, Any]] = []
+                    for start in range(0, expected_count, _PYTDX_BATCH_SIZE):
+                        batch = universe[start:start + _PYTDX_BATCH_SIZE]
+                        quotes = api.get_security_quotes(batch)
+                        if isinstance(quotes, list):
+                            quotes_rows.extend(quotes)
+
+                    statistics, actual_count = self._compute_statistics_from_pytdx_quotes(quotes_rows)
+                    status = "ok" if actual_count >= expected_count else ("partial" if actual_count > 0 else "error")
+                    return statistics, self._build_quality(
+                        status=status,
+                        source=_PYTDX_STATS_SOURCE,
+                        actual_count=actual_count,
+                        expected_count=expected_count,
+                    )
+            except Exception as e:
+                logger.warning("pytdx 主站 %s:%s 失败: %s", host, port, e)
+
+        fallback_quality = self._build_quality(
+            status="error" if expected_count == 0 else "partial",
+            source=_PYTDX_STATS_SOURCE,
+            actual_count=0,
+            expected_count=expected_count,
+        )
+        return {"up_count": 0, "down_count": 0, "flat_count": 0}, fallback_quality
+
+    async def _fetch_pytdx_statistics(self) -> tuple[dict[str, int], dict[str, Any]]:
+        if _DISABLE_NETWORK:
+            return {"up_count": 0, "down_count": 0, "flat_count": 0}, self._build_quality(
+                status="error",
+                source="disabled",
+            )
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._fetch_pytdx_statistics_sync)
 
     async def _run_source_strategy(
         self,
@@ -819,59 +1065,127 @@ class FinanceClient:
         result = await self._run_source_strategy("indices", adapters, lambda data: bool(data))
         return result or {}
 
-    async def get_volume_data(self, stocks: list[dict] | None = None) -> dict[str, float]:
-        """获取两市成交额数据。
-
-        优先使用全市场快照计算，失败时回退到 akshare。
-        """
+    async def _get_volume_with_quality(
+        self,
+        trade_date: date | None = None,
+    ) -> tuple[dict[str, float], dict[str, Any]]:
+        """获取成交额及其质量状态。"""
         if _DISABLE_NETWORK:
+            return {"sh_volume": 0, "sz_volume": 0, "total_volume": 0}, self._build_quality(
+                status="error",
+                source="disabled",
+            )
+
+        if trade_date is None:
+            trade_date = date.today()
+
+        sse_turnover = None
+        szse_turnover = None
+        success_count = 0
+
+        try:
+            sse_turnover, _ = await self._fetch_sse_official_turnover(trade_date)
+            success_count += 1
+        except Exception as e:
+            logger.warning("上交所官方成交额获取失败: %s", e)
+
+        try:
+            szse_turnover, _ = await self._fetch_szse_official_turnover(trade_date)
+            success_count += 1
+        except Exception as e:
+            logger.warning("深交所官方成交额获取失败: %s", e)
+
+        if success_count == 2 and sse_turnover is not None and szse_turnover is not None:
+            return {
+                "sh_volume": round(sse_turnover, 2),
+                "sz_volume": round(szse_turnover, 2),
+                "total_volume": round(sse_turnover + szse_turnover, 2),
+            }, self._build_quality(
+                status="ok",
+                source=_OFFICIAL_TURNOVER_SOURCE,
+                actual_count=2,
+                expected_count=2,
+            )
+
+        try:
+            fallback = await self._get_volume_data_from_spot_em()
+            if fallback.get("total_volume", 0) > 0:
+                return fallback, self._build_quality(
+                    status="ok",
+                    source=_AKSHARE_BREADTH_SOURCE,
+                    actual_count=success_count,
+                    expected_count=2,
+                )
+        except Exception as e:
+            logger.warning("成交额旧链路兜底失败: %s", e)
+
+        status = "partial" if success_count > 0 else "error"
+        return {
+            "sh_volume": 0,
+            "sz_volume": 0,
+            "total_volume": 0,
+        }, self._build_quality(
+            status=status,
+            source=_OFFICIAL_TURNOVER_SOURCE,
+            actual_count=success_count,
+            expected_count=2,
+        )
+
+    async def _get_statistics_with_quality(self) -> tuple[dict[str, int], dict[str, Any]]:
+        """获取涨跌统计及其质量状态。"""
+        if _DISABLE_NETWORK:
+            return {"up_count": 0, "down_count": 0, "flat_count": 0}, self._build_quality(
+                status="error",
+                source="disabled",
+            )
+
+        statistics, quality = await self._fetch_pytdx_statistics()
+        if quality["status"] == "ok":
+            return statistics, quality
+
+        try:
+            fallback = await self._get_statistics_from_spot_em()
+            total = fallback.get("up_count", 0) + fallback.get("down_count", 0) + fallback.get("flat_count", 0)
+            if total > 0:
+                return fallback, self._build_quality(
+                    status="ok",
+                    source=_AKSHARE_BREADTH_SOURCE,
+                    actual_count=quality.get("actual_count", 0),
+                    expected_count=quality.get("expected_count", 0),
+                )
+        except Exception as e:
+            logger.warning("涨跌统计旧链路兜底失败: %s", e)
+
+        if quality.get("status") == "partial" and quality.get("actual_count", 0) > 0:
+            return statistics, quality
+
+        return {"up_count": 0, "down_count": 0, "flat_count": 0}, quality
+
+    async def get_volume_data(
+        self,
+        stocks: list[dict] | None = None,
+        trade_date: date | None = None,
+    ) -> dict[str, float]:
+        """获取两市成交额数据。"""
+        if stocks is not None:
+            return self.compute_volume_data(stocks)
+        try:
+            volume, _ = await self._get_volume_with_quality(trade_date=trade_date)
+            return volume
+        except Exception as e:
+            logger.warning("获取成交额失败: %s", e)
             return {"sh_volume": 0, "sz_volume": 0, "total_volume": 0}
 
-        try:
-            if stocks is None:
-                stocks, _ = await self._fetch_stock_snapshot()
-        except Exception as e:
-            logger.warning(f"全市场快照获取失败，成交额切换备用源: {e}")
-            stocks = []
-        volume_data = await self._run_source_strategy(
-            "volume",
-            [
-                (
-                    self.SOURCE_STRATEGIES["snapshot"][0],
-                    lambda: self.compute_volume_data(stocks) if stocks else None,
-                ),
-                (self.SOURCE_STRATEGIES["snapshot"][1], self._get_volume_data_from_spot_em),
-            ],
-            lambda data: bool(data and all(key in data for key in ("sh_volume", "sz_volume", "total_volume"))),
-        )
-        return volume_data or {"sh_volume": 0, "sz_volume": 0, "total_volume": 0}
-
     async def get_statistics(self, stocks: list[dict] | None = None) -> dict[str, int]:
-        """获取涨跌统计数据。
-
-        优先使用全市场快照计算，失败时回退到 akshare。
-        """
-        if _DISABLE_NETWORK:
-            return {"up_count": 0, "down_count": 0, "flat_count": 0}
-
+        """获取涨跌统计数据。"""
+        if stocks is not None:
+            return self.compute_statistics(stocks)
         try:
-            if stocks is None:
-                stocks, _ = await self._fetch_stock_snapshot()
+            statistics, _ = await self._get_statistics_with_quality()
+            return statistics
         except Exception as e:
-            logger.warning(f"全市场快照获取失败，涨跌统计切换备用源: {e}")
-            stocks = []
-        stats = await self._run_source_strategy(
-            "statistics",
-            [
-                (
-                    self.SOURCE_STRATEGIES["snapshot"][0],
-                    lambda: self.compute_statistics(stocks) if stocks else None,
-                ),
-                (self.SOURCE_STRATEGIES["snapshot"][1], self._get_statistics_from_spot_em),
-            ],
-            lambda data: bool(data and all(key in data for key in ("up_count", "down_count", "flat_count"))),
-        )
-        return stats or {"up_count": 0, "down_count": 0, "flat_count": 0}
+            logger.warning("获取涨跌统计失败: %s", e)
+            return {"up_count": 0, "down_count": 0, "flat_count": 0}
 
     async def get_sector_data(self, top_n: int = 5) -> dict[str, list]:
         """获取板块涨跌数据。
@@ -913,51 +1227,10 @@ class FinanceClient:
         )
         return result or []
 
-    def _determine_breadth_quality(
-        self,
-        snapshot_quality: dict[str, Any],
-        result_data: dict[str, Any],
-        data_type: str,
-    ) -> dict[str, Any]:
-        """基于快照质量和最终结果确定宽度数据质量。"""
-        if snapshot_quality["status"] == "ok":
-            return {
-                "status": "ok",
-                "source": snapshot_quality["source"],
-                "actual_count": snapshot_quality["actual_count"],
-                "expected_count": snapshot_quality["expected_count"],
-            }
-
-        # 快照不完整或失败，检查备用源是否成功
-        if data_type == "volume":
-            has_data = result_data.get("total_volume", 0) > 0
-        else:
-            has_data = (
-                result_data.get("up_count", 0)
-                + result_data.get("down_count", 0)
-                + result_data.get("flat_count", 0)
-            ) > 0
-
-        if has_data:
-            return {
-                "status": "ok",
-                "source": "akshare_spot_em",
-                "actual_count": 0,
-                "expected_count": snapshot_quality.get("expected_count", 0),
-            }
-
-        return {
-            "status": snapshot_quality["status"],
-            "source": snapshot_quality["source"],
-            "actual_count": snapshot_quality["actual_count"],
-            "expected_count": snapshot_quality.get("expected_count", 0),
-        }
-
     async def get_all_market_data(self, trade_date: Optional[date | datetime] = None) -> dict[str, Any]:
         """获取所有市场数据。
 
-        成交额和涨跌统计基于同一轮全市场股票快照计算，避免重复抓取。
-        快照不完整时自动降级到备用源，并在返回结果中附带宽度数据质量状态。
+        成交额和涨跌统计允许来自不同主源，但必须共享同一交易日语义。
         """
         if _DISABLE_NETWORK:
             logger.warning("网络请求已禁用，返回空数据")
@@ -976,9 +1249,12 @@ class FinanceClient:
 
         logger.info("开始获取市场数据...")
 
-        # 并行：获取快照 + 其他不依赖快照的数据
-        (stock_snapshot, snapshot_quality), other_results = await asyncio.gather(
-            self._fetch_stock_snapshot(),
+        if isinstance(trade_date, datetime):
+            trade_date = trade_date.date()
+
+        (volume_result, statistics_result, other_results) = await asyncio.gather(
+            self._get_volume_with_quality(trade_date=trade_date),
+            self._get_statistics_with_quality(),
             asyncio.gather(
                 self.get_index_data(),
                 self.get_sector_data(),
@@ -986,27 +1262,8 @@ class FinanceClient:
                 return_exceptions=True,
             ),
         )
-
-        # 基于快照质量决定成交额和涨跌统计的获取路径
-        if snapshot_quality["status"] == "ok":
-            volume = self.compute_volume_data(stock_snapshot)
-            statistics = self.compute_statistics(stock_snapshot)
-        else:
-            # 快照不完整/失败，使用共享备用快照（一次 akshare 抓取，同时计算成交额和涨跌统计）
-            logger.info("快照不完整(%s)，尝试共享备用源获取成交额和涨跌统计", snapshot_quality["status"])
-            try:
-                spot_df = await self._fetch_spot_em_dataframe()
-                volume = self._compute_volume_from_spot_em_df(spot_df)
-                statistics = self._compute_statistics_from_spot_em_df(spot_df)
-            except Exception as e:
-                logger.warning("共享备用源获取失败: %s", e)
-                volume = {"sh_volume": 0, "sz_volume": 0, "total_volume": 0}
-                statistics = {"up_count": 0, "down_count": 0, "flat_count": 0}
-
-        breadth_quality = {
-            "volume": self._determine_breadth_quality(snapshot_quality, volume, "volume"),
-            "statistics": self._determine_breadth_quality(snapshot_quality, statistics, "statistics"),
-        }
+        volume, volume_quality = volume_result
+        statistics, statistics_quality = statistics_result
 
         market_data = {
             "indices": other_results[0] if not isinstance(other_results[0], Exception) else {},
@@ -1015,7 +1272,10 @@ class FinanceClient:
             "sectors": other_results[1] if not isinstance(other_results[1], Exception) else {},
             "limit_up": other_results[2] if not isinstance(other_results[2], Exception) else [],
             "fetch_time": datetime.now().isoformat(),
-            "breadth_quality": breadth_quality,
+            "breadth_quality": {
+                "volume": volume_quality,
+                "statistics": statistics_quality,
+            },
         }
 
         logger.info("市场数据获取完成")

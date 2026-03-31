@@ -9,6 +9,7 @@
 - 聚合数据: {indices, volume, statistics, sectors, limit_up, fetch_time}
 """
 
+from datetime import date
 import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -135,8 +136,11 @@ class TestVolumeDataContract:
     async def test_normal_returns_dict_with_keys(self, finance_client, mock_stock_snapshot):
         """Contract: 返回 dict，包含 sh_volume/sz_volume/total_volume (float)。"""
         with patch.object(
-            finance_client, "_fetch_stock_snapshot",
-            return_value=(mock_stock_snapshot, {"status": "ok", "source": "eastmoney_curl", "actual_count": len(mock_stock_snapshot), "expected_count": len(mock_stock_snapshot)})
+            finance_client, "_get_volume_with_quality",
+            return_value=(
+                {"sh_volume": 5000.0, "sz_volume": 7000.0, "total_volume": 12000.0},
+                {"status": "ok", "source": "official_exchange_turnover", "actual_count": 2, "expected_count": 2},
+            ),
         ):
             result = await finance_client.get_volume_data()
 
@@ -152,12 +156,13 @@ class TestVolumeDataContract:
     async def test_empty_snapshot_returns_zero(self, finance_client):
         """Contract: 快照为空时返回零值。"""
         with patch.object(
-            finance_client, "_fetch_stock_snapshot",
-            return_value=([], {"status": "error", "source": "eastmoney_curl", "actual_count": 0, "expected_count": 0})
+            finance_client, "_get_volume_with_quality",
+            return_value=(
+                {"sh_volume": 0, "sz_volume": 0, "total_volume": 0},
+                {"status": "error", "source": "official_exchange_turnover", "actual_count": 0, "expected_count": 2},
+            ),
         ):
-            # 空快照 → compute_volume_data 返回零值 → 不满足 >0 → 回退 akshare
-            with patch("akshare.stock_zh_a_spot_em", side_effect=Exception("fail")):
-                result = await finance_client.get_volume_data()
+            result = await finance_client.get_volume_data()
 
         assert result == {"sh_volume": 0, "sz_volume": 0, "total_volume": 0}
 
@@ -165,10 +170,10 @@ class TestVolumeDataContract:
     async def test_all_sources_fail_returns_zero(self, finance_client):
         """Contract: 所有数据源失败时返回零值。"""
         with patch.object(
-            finance_client, "_fetch_stock_snapshot", side_effect=Exception("fail")
+            finance_client, "_get_volume_with_quality",
+            side_effect=Exception("fail"),
         ):
-            with patch("akshare.stock_zh_a_spot_em", side_effect=Exception("fail")):
-                result = await finance_client.get_volume_data()
+            result = await finance_client.get_volume_data()
 
         assert result == {"sh_volume": 0, "sz_volume": 0, "total_volume": 0}
 
@@ -194,8 +199,11 @@ class TestStatisticsContract:
     async def test_normal_returns_dict_with_keys(self, finance_client, mock_stock_snapshot):
         """Contract: 返回 dict，包含 up_count/down_count/flat_count (int)。"""
         with patch.object(
-            finance_client, "_fetch_stock_snapshot",
-            return_value=(mock_stock_snapshot, {"status": "ok", "source": "eastmoney_curl", "actual_count": len(mock_stock_snapshot), "expected_count": len(mock_stock_snapshot)})
+            finance_client, "_get_statistics_with_quality",
+            return_value=(
+                {"up_count": 2500, "down_count": 1800, "flat_count": 200},
+                {"status": "ok", "source": "pytdx_quotes", "actual_count": 5518, "expected_count": 5518},
+            ),
         ):
             result = await finance_client.get_statistics()
 
@@ -211,10 +219,10 @@ class TestStatisticsContract:
     async def test_all_sources_fail_returns_zero(self, finance_client):
         """Contract: 所有数据源失败时返回零值。"""
         with patch.object(
-            finance_client, "_fetch_stock_snapshot", side_effect=Exception("fail")
+            finance_client, "_get_statistics_with_quality",
+            side_effect=Exception("fail"),
         ):
-            with patch("akshare.stock_zh_a_spot_em", side_effect=Exception("fail")):
-                result = await finance_client.get_statistics()
+            result = await finance_client.get_statistics()
 
         assert result == {"up_count": 0, "down_count": 0, "flat_count": 0}
 
@@ -251,6 +259,50 @@ class TestEastMoneyCurlParsing:
 
         stocks, quality = result
         assert stocks == []
+
+
+class TestOfficialAndPytdxHelpers:
+    """官方成交额与 pytdx 聚合辅助测试。"""
+
+    def test_extract_sse_stock_turnover(self, finance_client):
+        payload = {
+            "result": [
+                {"PRODUCT_CODE": "01", "TRADE_AMT": "100.00", "TRADE_DATE": "20260330"},
+                {"PRODUCT_CODE": "17", "TRADE_AMT": "8409.45", "TRADE_DATE": "20260330"},
+            ]
+        }
+        turnover, trade_date = finance_client._extract_sse_stock_turnover(payload)
+        assert turnover == pytest.approx(8409.45)
+        assert trade_date == "20260330"
+
+    def test_extract_szse_stock_turnover(self, finance_client):
+        payload = [
+            {
+                "metadata": {
+                    "conditions": [
+                        {"name": "txtQueryDate", "defaultValue": "2026-03-30"},
+                    ]
+                },
+                "data": [
+                    {"zbmc": "成交量（亿）", "gp": "653.79"},
+                    {"zbmc": "成交金额（亿元）", "gp": "10,762.98"},
+                ],
+            }
+        ]
+        turnover, trade_date = finance_client._extract_szse_stock_turnover(payload)
+        assert turnover == pytest.approx(10762.98)
+        assert trade_date == "20260330"
+
+    def test_compute_statistics_from_pytdx_quotes(self, finance_client):
+        rows = [
+            {"price": 10.0, "last_close": 9.5},
+            {"price": 8.0, "last_close": 8.2},
+            {"price": 5.0, "last_close": 5.0},
+            {"price": None, "last_close": 5.0},
+        ]
+        statistics, actual_count = finance_client._compute_statistics_from_pytdx_quotes(rows)
+        assert statistics == {"up_count": 1, "down_count": 1, "flat_count": 1}
+        assert actual_count == 3
 
 
 # ── 板块数据 contract ─────────────────────────────────────────
@@ -529,23 +581,28 @@ class TestAllMarketDataContract:
         self, finance_client, mock_indices_data, mock_stock_snapshot
     ):
         """Contract: 返回 dict 包含 indices/volume/statistics/sectors/limit_up/fetch_time。"""
-        snapshot_quality = {
-            "status": "ok", "source": "eastmoney_curl",
-            "actual_count": len(mock_stock_snapshot),
-            "expected_count": len(mock_stock_snapshot),
-        }
         with patch.object(
-            finance_client, "_fetch_stock_snapshot",
-            return_value=(mock_stock_snapshot, snapshot_quality),
+            finance_client, "_get_volume_with_quality",
+            return_value=(
+                {"sh_volume": 8409.45, "sz_volume": 10762.98, "total_volume": 19172.43},
+                {"status": "ok", "source": "official_exchange_turnover", "actual_count": 2, "expected_count": 2},
+            ),
         ):
-            with patch.object(finance_client, "get_index_data", return_value=mock_indices_data):
-                with patch.object(
-                    finance_client,
-                    "get_sector_data",
-                    return_value={"top_sectors": [], "bottom_sectors": []},
-                ):
-                    with patch.object(finance_client, "get_limit_up_stocks", return_value=[]):
-                        result = await finance_client.get_all_market_data()
+            with patch.object(
+                finance_client, "_get_statistics_with_quality",
+                return_value=(
+                    {"up_count": 2500, "down_count": 1800, "flat_count": 200},
+                    {"status": "ok", "source": "pytdx_quotes", "actual_count": 5518, "expected_count": 5518},
+                ),
+            ):
+                with patch.object(finance_client, "get_index_data", return_value=mock_indices_data):
+                    with patch.object(
+                        finance_client,
+                        "get_sector_data",
+                        return_value={"top_sectors": [], "bottom_sectors": []},
+                    ):
+                        with patch.object(finance_client, "get_limit_up_stocks", return_value=[]):
+                            result = await finance_client.get_all_market_data()
 
         assert "indices" in result
         assert "volume" in result
@@ -560,28 +617,30 @@ class TestAllMarketDataContract:
         self, finance_client, mock_indices_data, mock_volume_data
     ):
         """Contract: 部分数据源异常时整体结构不变，失败部分返回降级值。"""
-        # 新实现中 get_all_market_data 使用 _fetch_stock_snapshot + 直接计算，
-        # 而非调用 get_volume_data / get_statistics
-        mock_snapshot = [
-            {"f12": "600000", "f14": "浦发银行", "f3": 1.83, "f6": 611456194.0},
-            {"f12": "000001", "f14": "平安银行", "f3": -0.56, "f6": 823456789.0},
-        ]
-        mock_quality = {"status": "ok", "source": "eastmoney_curl", "actual_count": 2, "expected_count": 2}
         with patch.object(
-            finance_client, "_fetch_stock_snapshot",
-            return_value=(mock_snapshot, mock_quality),
+            finance_client, "_get_volume_with_quality",
+            return_value=(
+                {"sh_volume": 8409.45, "sz_volume": 10762.98, "total_volume": 19172.43},
+                {"status": "ok", "source": "official_exchange_turnover", "actual_count": 2, "expected_count": 2},
+            ),
         ):
-            with patch.object(finance_client, "get_index_data", return_value=mock_indices_data):
-                with patch.object(
-                    finance_client, "get_sector_data", side_effect=Exception("Sector error")
-                ):
+            with patch.object(
+                finance_client, "_get_statistics_with_quality",
+                return_value=(
+                    {"up_count": 2500, "down_count": 1800, "flat_count": 200},
+                    {"status": "ok", "source": "pytdx_quotes", "actual_count": 5518, "expected_count": 5518},
+                ),
+            ):
+                with patch.object(finance_client, "get_index_data", return_value=mock_indices_data):
                     with patch.object(
-                        finance_client, "get_limit_up_stocks", return_value=[]
+                        finance_client, "get_sector_data", side_effect=Exception("Sector error")
                     ):
-                        result = await finance_client.get_all_market_data()
+                        with patch.object(
+                            finance_client, "get_limit_up_stocks", return_value=[]
+                        ):
+                            result = await finance_client.get_all_market_data()
 
         assert result["indices"] == mock_indices_data
-        # 成交额从快照计算
         assert result["volume"]["total_volume"] > 0
         assert result["statistics"]["up_count"] + result["statistics"]["down_count"] > 0
         assert result["sectors"] == {}
@@ -593,23 +652,29 @@ class TestAllMarketDataContract:
         from datetime import date
 
         trade_date = date(2026, 3, 27)
-        mock_snapshot = [
-            {"f12": "600000", "f14": "浦发银行", "f3": 1.83, "f6": 100000000.0},
-        ]
-        mock_quality = {"status": "ok", "source": "eastmoney_curl", "actual_count": 1, "expected_count": 1}
         with patch.object(
-            finance_client, "_fetch_stock_snapshot",
-            return_value=(mock_snapshot, mock_quality),
+            finance_client, "_get_volume_with_quality",
+            return_value=(
+                {"sh_volume": 1.0, "sz_volume": 2.0, "total_volume": 3.0},
+                {"status": "ok", "source": "official_exchange_turnover", "actual_count": 2, "expected_count": 2},
+            ),
         ):
-            with patch.object(finance_client, "get_index_data", return_value={}):
-                with patch.object(finance_client, "get_sector_data", return_value={"top_sectors": [], "bottom_sectors": []}):
-                    with patch.object(
-                        finance_client,
-                        "get_limit_up_stocks",
-                        new_callable=AsyncMock,
-                        return_value=[],
-                    ) as mock_limit:
-                        await finance_client.get_all_market_data(trade_date=trade_date)
+            with patch.object(
+                finance_client, "_get_statistics_with_quality",
+                return_value=(
+                    {"up_count": 1, "down_count": 1, "flat_count": 0},
+                    {"status": "ok", "source": "pytdx_quotes", "actual_count": 2, "expected_count": 2},
+                ),
+            ):
+                with patch.object(finance_client, "get_index_data", return_value={}):
+                    with patch.object(finance_client, "get_sector_data", return_value={"top_sectors": [], "bottom_sectors": []}):
+                        with patch.object(
+                            finance_client,
+                            "get_limit_up_stocks",
+                            new_callable=AsyncMock,
+                            return_value=[],
+                        ) as mock_limit:
+                            await finance_client.get_all_market_data(trade_date=trade_date)
 
         assert mock_limit.await_args.kwargs["trade_date"] == trade_date
 
@@ -617,11 +682,18 @@ class TestAllMarketDataContract:
     async def test_all_failure_returns_degraded_structure(self, finance_client):
         """Contract: 所有数据源异常时返回正确的降级结构。"""
         with patch.object(
-            finance_client, "_fetch_stock_snapshot",
-            return_value=([], {"status": "error", "source": "eastmoney_curl", "actual_count": 0, "expected_count": 0}),
+            finance_client, "_get_volume_with_quality",
+            return_value=(
+                {"sh_volume": 0, "sz_volume": 0, "total_volume": 0},
+                {"status": "error", "source": "official_exchange_turnover", "actual_count": 0, "expected_count": 2},
+            ),
         ):
             with patch.object(
-                finance_client, "_fetch_spot_em_dataframe", side_effect=Exception("Error")
+                finance_client, "_get_statistics_with_quality",
+                return_value=(
+                    {"up_count": 0, "down_count": 0, "flat_count": 0},
+                    {"status": "error", "source": "pytdx_quotes", "actual_count": 0, "expected_count": 5518},
+                ),
             ):
                 with patch.object(finance_client, "get_index_data", side_effect=Exception("Error")):
                     with patch.object(finance_client, "get_sector_data", side_effect=Exception("Error")):
@@ -772,30 +844,81 @@ class TestBreadthQualityContract:
         assert len(stocks) == 3
         assert quality["actual_count"] == 3
 
-    def test_determine_breadth_quality_ok_from_snapshot(self, finance_client):
-        """Contract: 完整快照 → ok。"""
-        sq = {"status": "ok", "source": "eastmoney_curl", "actual_count": 5518, "expected_count": 5518}
-        result = finance_client._determine_breadth_quality(sq, {"total_volume": 1000}, "volume")
-        assert result["status"] == "ok"
+    @pytest.mark.asyncio
+    async def test_get_volume_with_quality_prefers_official_sources(self, finance_client):
+        with patch.object(
+            finance_client, "_fetch_sse_official_turnover",
+            new_callable=AsyncMock,
+            return_value=(8409.45, "20260330"),
+        ):
+            with patch.object(
+                finance_client, "_fetch_szse_official_turnover",
+                new_callable=AsyncMock,
+                return_value=(10762.98, "20260330"),
+            ):
+                volume, quality = await finance_client._get_volume_with_quality(date(2026, 3, 30))
 
-    def test_determine_breadth_quality_ok_from_fallback(self, finance_client):
-        """Contract: 快照失败但备用源成功 → ok。"""
-        sq = {"status": "error", "source": "eastmoney_curl", "actual_count": 0, "expected_count": 5518}
-        result = finance_client._determine_breadth_quality(sq, {"total_volume": 5000}, "volume")
-        assert result["status"] == "ok"
-        assert result["source"] == "akshare_spot_em"
+        assert volume["total_volume"] == pytest.approx(19172.43)
+        assert quality["status"] == "ok"
+        assert quality["source"] == "official_exchange_turnover"
 
-    def test_determine_breadth_quality_error(self, finance_client):
-        """Contract: 所有源失败 → error。"""
-        sq = {"status": "error", "source": "eastmoney_curl", "actual_count": 0, "expected_count": 5518}
-        result = finance_client._determine_breadth_quality(sq, {"total_volume": 0}, "volume")
-        assert result["status"] == "error"
+    @pytest.mark.asyncio
+    async def test_get_volume_with_quality_falls_back_to_akshare(self, finance_client):
+        with patch.object(
+            finance_client, "_fetch_sse_official_turnover",
+            new_callable=AsyncMock,
+            side_effect=Exception("sse fail"),
+        ):
+            with patch.object(
+                finance_client, "_fetch_szse_official_turnover",
+                new_callable=AsyncMock,
+                side_effect=Exception("szse fail"),
+            ):
+                with patch.object(
+                    finance_client, "_get_volume_data_from_spot_em",
+                    new_callable=AsyncMock,
+                    return_value={"sh_volume": 1.0, "sz_volume": 2.0, "total_volume": 3.0},
+                ):
+                    volume, quality = await finance_client._get_volume_with_quality(date(2026, 3, 30))
 
-    def test_determine_breadth_quality_partial(self, finance_client):
-        """Contract: 部分样本且备用源失败 → partial。"""
-        sq = {"status": "partial", "source": "eastmoney_curl", "actual_count": 100, "expected_count": 5518}
-        result = finance_client._determine_breadth_quality(sq, {"total_volume": 0}, "volume")
-        assert result["status"] == "partial"
+        assert volume["total_volume"] == 3.0
+        assert quality["status"] == "ok"
+        assert quality["source"] == "akshare_spot_em"
+
+    @pytest.mark.asyncio
+    async def test_get_statistics_with_quality_prefers_pytdx(self, finance_client):
+        with patch.object(
+            finance_client, "_fetch_pytdx_statistics",
+            new_callable=AsyncMock,
+            return_value=(
+                {"up_count": 1, "down_count": 1, "flat_count": 0},
+                {"status": "ok", "source": "pytdx_quotes", "actual_count": 2, "expected_count": 2},
+            ),
+        ):
+            statistics, quality = await finance_client._get_statistics_with_quality()
+
+        assert statistics["up_count"] == 1
+        assert quality["source"] == "pytdx_quotes"
+
+    @pytest.mark.asyncio
+    async def test_get_statistics_with_quality_returns_partial_when_fallback_fails(self, finance_client):
+        with patch.object(
+            finance_client, "_fetch_pytdx_statistics",
+            new_callable=AsyncMock,
+            return_value=(
+                {"up_count": 1, "down_count": 1, "flat_count": 0},
+                {"status": "partial", "source": "pytdx_quotes", "actual_count": 100, "expected_count": 5518},
+            ),
+        ):
+            with patch.object(
+                finance_client, "_get_statistics_from_spot_em",
+                new_callable=AsyncMock,
+                side_effect=Exception("fail"),
+            ):
+                statistics, quality = await finance_client._get_statistics_with_quality()
+
+        assert statistics == {"up_count": 1, "down_count": 1, "flat_count": 0}
+        assert quality["status"] == "partial"
 
     @pytest.mark.asyncio
     async def test_get_all_market_data_includes_breadth_quality(
@@ -803,29 +926,47 @@ class TestBreadthQualityContract:
     ):
         """Contract: get_all_market_data 返回 breadth_quality 字段。"""
         with patch.object(
-            finance_client, "_fetch_stock_snapshot",
-            return_value=(mock_stock_snapshot, {"status": "ok", "source": "eastmoney_curl", "actual_count": len(mock_stock_snapshot), "expected_count": len(mock_stock_snapshot)})
+            finance_client, "_get_volume_with_quality",
+            return_value=(
+                {"sh_volume": 8409.45, "sz_volume": 10762.98, "total_volume": 19172.43},
+                {"status": "ok", "source": "official_exchange_turnover", "actual_count": 2, "expected_count": 2},
+            ),
         ):
-            with patch.object(finance_client, "get_index_data", return_value=mock_indices_data):
-                with patch.object(finance_client, "get_sector_data", return_value={"top_sectors": [], "bottom_sectors": []}):
-                    with patch.object(finance_client, "get_limit_up_stocks", return_value=[]):
-                        result = await finance_client.get_all_market_data()
+            with patch.object(
+                finance_client, "_get_statistics_with_quality",
+                return_value=(
+                    {"up_count": 2500, "down_count": 1800, "flat_count": 200},
+                    {"status": "ok", "source": "pytdx_quotes", "actual_count": 5518, "expected_count": 5518},
+                ),
+            ):
+                with patch.object(finance_client, "get_index_data", return_value=mock_indices_data):
+                    with patch.object(finance_client, "get_sector_data", return_value={"top_sectors": [], "bottom_sectors": []}):
+                        with patch.object(finance_client, "get_limit_up_stocks", return_value=[]):
+                            result = await finance_client.get_all_market_data()
 
         assert "breadth_quality" in result
         assert "volume" in result["breadth_quality"]
         assert "statistics" in result["breadth_quality"]
         assert result["breadth_quality"]["volume"]["status"] == "ok"
         assert result["breadth_quality"]["statistics"]["status"] == "ok"
+        assert result["breadth_quality"]["volume"]["source"] == "official_exchange_turnover"
 
     @pytest.mark.asyncio
-    async def test_get_all_market_data_breadth_error_when_snapshot_fails(self, finance_client):
-        """Contract: 快照失败且共享备用源也失败时 breadth_quality 为 error。"""
+    async def test_get_all_market_data_breadth_error_when_primary_and_fallback_fail(self, finance_client):
+        """Contract: 主路径与兜底链路都失败时 breadth_quality 为 error。"""
         with patch.object(
-            finance_client, "_fetch_stock_snapshot",
-            return_value=([], {"status": "error", "source": "eastmoney_curl", "actual_count": 0, "expected_count": 5518})
+            finance_client, "_get_volume_with_quality",
+            return_value=(
+                {"sh_volume": 0, "sz_volume": 0, "total_volume": 0},
+                {"status": "error", "source": "official_exchange_turnover", "actual_count": 0, "expected_count": 2},
+            ),
         ):
             with patch.object(
-                finance_client, "_fetch_spot_em_dataframe", side_effect=Exception("fail")
+                finance_client, "_get_statistics_with_quality",
+                return_value=(
+                    {"up_count": 0, "down_count": 0, "flat_count": 0},
+                    {"status": "error", "source": "pytdx_quotes", "actual_count": 0, "expected_count": 5518},
+                ),
             ):
                 with patch.object(finance_client, "get_index_data", return_value={}):
                     with patch.object(finance_client, "get_sector_data", return_value={"top_sectors": [], "bottom_sectors": []}):
@@ -991,93 +1132,68 @@ class TestSnapshotPaginationRegression:
 # ── 共享备用快照回归测试 ──────────────────────────────────────
 
 
-class TestSharedFallbackSnapshotRegression:
-    """回归测试：宽度数据备用链路共享同一次 akshare 全市场抓取。"""
+class TestLegacyFallbackRegression:
+    """回归测试：成交额和涨跌统计分别回退到旧链路。"""
 
     @pytest.mark.asyncio
-    async def test_fallback_fetches_spot_em_only_once(self, finance_client):
-        """Regression: get_all_market_data 在快照失败时应只调用 _fetch_spot_em_dataframe 一次。"""
-        import pandas as pd
-
-        mock_df = pd.DataFrame({
-            "代码": ["600000", "000001", "300001"],
-            "名称": ["浦发银行", "平安银行", "特锐德"],
-            "涨跌幅": [1.5, -0.8, 0.0],
-            "成交额": [500000000, 300000000, 200000000],
-        })
-
+    async def test_volume_fallback_uses_akshare(self, finance_client):
         with patch.object(
-            finance_client, "_fetch_stock_snapshot",
-            return_value=([], {"status": "error", "source": "eastmoney_curl", "actual_count": 0, "expected_count": 5518}),
+            finance_client, "_fetch_sse_official_turnover",
+            new_callable=AsyncMock,
+            side_effect=Exception("sse fail"),
         ):
             with patch.object(
-                finance_client, "_fetch_spot_em_dataframe",
+                finance_client, "_fetch_szse_official_turnover",
                 new_callable=AsyncMock,
-                return_value=mock_df,
-            ) as mock_fetch:
-                with patch.object(finance_client, "get_index_data", return_value={}):
-                    with patch.object(finance_client, "get_sector_data", return_value={"top_sectors": [], "bottom_sectors": []}):
-                        with patch.object(finance_client, "get_limit_up_stocks", return_value=[]):
-                            result = await finance_client.get_all_market_data()
-
-        # _fetch_spot_em_dataframe 只调用一次（不是两次）
-        mock_fetch.assert_awaited_once()
-        assert result["volume"]["total_volume"] > 0
-        assert result["statistics"]["up_count"] + result["statistics"]["down_count"] + result["statistics"]["flat_count"] == 3
-
-    @pytest.mark.asyncio
-    async def test_fallback_shared_snapshot_consistent_results(self, finance_client):
-        """Regression: 共享备用快照应使成交额和涨跌统计来自同一份数据。"""
-        import pandas as pd
-
-        mock_df = pd.DataFrame({
-            "代码": ["600000", "000001"],
-            "名称": ["浦发银行", "平安银行"],
-            "涨跌幅": [2.0, -1.0],
-            "成交额": [1000000000, 500000000],
-        })
-
-        with patch.object(
-            finance_client, "_fetch_stock_snapshot",
-            return_value=([], {"status": "error", "source": "eastmoney_curl", "actual_count": 0, "expected_count": 5518}),
-        ):
-            with patch.object(
-                finance_client, "_fetch_spot_em_dataframe",
-                new_callable=AsyncMock,
-                return_value=mock_df,
+                side_effect=Exception("szse fail"),
             ):
-                with patch.object(finance_client, "get_index_data", return_value={}):
-                    with patch.object(finance_client, "get_sector_data", return_value={"top_sectors": [], "bottom_sectors": []}):
-                        with patch.object(finance_client, "get_limit_up_stocks", return_value=[]):
-                            result = await finance_client.get_all_market_data()
+                with patch.object(
+                    finance_client, "_get_volume_data_from_spot_em",
+                    new_callable=AsyncMock,
+                    return_value={"sh_volume": 10.0, "sz_volume": 5.0, "total_volume": 15.0},
+                ):
+                    volume, quality = await finance_client._get_volume_with_quality(date(2026, 3, 30))
 
-        volume = result["volume"]
-        statistics = result["statistics"]
-        assert volume["sh_volume"] == 10.0  # 600000 -> SH
-        assert volume["sz_volume"] == 5.0   # 000001 -> SZ
         assert volume["total_volume"] == 15.0
-        assert statistics["up_count"] == 1
-        assert statistics["down_count"] == 1
-        assert statistics["flat_count"] == 0
+        assert quality["source"] == "akshare_spot_em"
 
     @pytest.mark.asyncio
-    async def test_fallback_failure_returns_zeros(self, finance_client):
-        """Regression: 共享备用源也失败时返回零值。"""
+    async def test_statistics_fallback_uses_akshare(self, finance_client):
         with patch.object(
-            finance_client, "_fetch_stock_snapshot",
-            return_value=([], {"status": "error", "source": "eastmoney_curl", "actual_count": 0, "expected_count": 5518}),
+            finance_client, "_fetch_pytdx_statistics",
+            new_callable=AsyncMock,
+            return_value=(
+                {"up_count": 1, "down_count": 1, "flat_count": 0},
+                {"status": "partial", "source": "pytdx_quotes", "actual_count": 100, "expected_count": 5518},
+            ),
         ):
             with patch.object(
-                finance_client, "_fetch_spot_em_dataframe",
+                finance_client, "_get_statistics_from_spot_em",
+                new_callable=AsyncMock,
+                return_value={"up_count": 2, "down_count": 1, "flat_count": 0},
+            ):
+                statistics, quality = await finance_client._get_statistics_with_quality()
+
+        assert statistics["up_count"] == 2
+        assert quality["source"] == "akshare_spot_em"
+
+    @pytest.mark.asyncio
+    async def test_statistics_fallback_failure_returns_zeros(self, finance_client):
+        """Regression: pytdx 与旧链路都失败时返回零值。"""
+        with patch.object(
+            finance_client, "_fetch_pytdx_statistics",
+            new_callable=AsyncMock,
+            return_value=(
+                {"up_count": 1, "down_count": 1, "flat_count": 0},
+                {"status": "error", "source": "pytdx_quotes", "actual_count": 0, "expected_count": 5518},
+            ),
+        ):
+            with patch.object(
+                finance_client, "_get_statistics_from_spot_em",
                 new_callable=AsyncMock,
                 side_effect=Exception("akshare fail"),
             ):
-                with patch.object(finance_client, "get_index_data", return_value={}):
-                    with patch.object(finance_client, "get_sector_data", return_value={"top_sectors": [], "bottom_sectors": []}):
-                        with patch.object(finance_client, "get_limit_up_stocks", return_value=[]):
-                            result = await finance_client.get_all_market_data()
+                statistics, quality = await finance_client._get_statistics_with_quality()
 
-        assert result["volume"] == {"sh_volume": 0, "sz_volume": 0, "total_volume": 0}
-        assert result["statistics"] == {"up_count": 0, "down_count": 0, "flat_count": 0}
-        assert result["breadth_quality"]["volume"]["status"] == "error"
-        assert result["breadth_quality"]["statistics"]["status"] == "error"
+        assert statistics == {"up_count": 0, "down_count": 0, "flat_count": 0}
+        assert quality["status"] == "error"
