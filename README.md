@@ -54,6 +54,9 @@ python -m src.cli --help
 
 ```bash
 WEREAD_API_BASE=https://weread.111965.xyz
+ARTICLE_LIST_PROVIDER=weread
+WECHAT2RSS_BASE_URL=https://wechat2rss.xlab.app
+WECHAT2RSS_TOKEN=
 DATABASE_URL=sqlite+aiosqlite:///./data/wchat.db
 
 LLM_BASE_URL=https://api.anthropic.com
@@ -64,8 +67,10 @@ LLM_MODEL=claude-3-5-haiku-latest
 说明：
 
 - `DATABASE_URL` 默认就是 `sqlite+aiosqlite:///./data/wchat.db`
+- `ARTICLE_LIST_PROVIDER` 默认为 `weread`，可切换为 `wechat2rss`
+- 使用 `wechat2rss` 时，`subscribe` / `fetch` 不再依赖 `wchat login`
 - 只有 `wchat ai ...` 相关命令需要 `LLM_API_KEY`
-- `wchat login`、`subscribe`、`fetch` 依赖微信读书代理接口可用
+- `wchat login` 以及 `ARTICLE_LIST_PROVIDER=weread` 时的 `subscribe` / `fetch` 依赖微信读书代理接口可用
 
 ## 初始化
 
@@ -105,6 +110,16 @@ wchat logout
 wchat subscribe "https://mp.weixin.qq.com/s/xxxx"
 ```
 
+如果你想避开 WeRead 列表接口，可以在 `.env` 中配置：
+
+```bash
+ARTICLE_LIST_PROVIDER=wechat2rss
+WECHAT2RSS_BASE_URL=https://wechat2rss.xlab.app
+WECHAT2RSS_TOKEN=你的 token
+```
+
+此时 `subscribe` / `fetch` 会优先走 `Wechat2RSS` Provider。
+
 查看订阅列表：
 
 ```bash
@@ -125,7 +140,7 @@ wchat unsubscribe MP_WXS_xxx
 
 ### 3. 抓取文章
 
-抓取单个公众号最近 5 天文章：
+默认抓取单个公众号最新 10 条文章：
 
 ```bash
 wchat fetch MP_WXS_xxx

@@ -868,6 +868,64 @@ class _PreflightSummaryAnalyzer(_FakeAnalyzer):
         }
 
 
+class _AutoFetchedNewsAnalyzer(_FakeAnalyzer):
+    """返回包含自动补抓摘要的新闻结果。"""
+
+    async def collect_news_data(self, trade_date, offline=False):
+        self.collect_news_data_calls.append({"trade_date": trade_date, "offline": offline})
+        return {
+            "status": "success",
+            "telegraphs": [{"title": "Telegraph 1"}, {"title": "Telegraph 2"}],
+            "watch_items": [],
+            "articles": [{"title": "Article"}],
+            "sources_status": {
+                "telegraphs": "ok",
+                "watch_items": "empty",
+                "articles": "ok",
+            },
+            "source_details": {
+                "telegraphs": {"mode": "auto_fetch_ok", "message": "已获取 2 条（自动补抓）"},
+                "watch_items": {"mode": "auto_fetch_empty", "message": "0 条（已自动抓取）"},
+                "articles": {"mode": "local", "message": "已获取 1 篇"},
+            },
+            "time_windows": {
+                "watch": {"start": "2026-03-27 09:00", "end": "2026-03-27 15:00"},
+                "telegraph": {"start": "2026-03-27 09:00", "end": "2026-03-30 09:15"},
+                "article": {"start": "2026-03-27 15:00", "end": "2026-03-30 09:15"},
+            },
+            "time_window": {"start": "2026-03-27 15:00", "end": "2026-03-30 09:15"},
+        }
+
+
+class _AutoFetchFailedNewsAnalyzer(_FakeAnalyzer):
+    """返回自动补抓失败的新闻结果。"""
+
+    async def collect_news_data(self, trade_date, offline=False):
+        self.collect_news_data_calls.append({"trade_date": trade_date, "offline": offline})
+        return {
+            "status": "degraded",
+            "telegraphs": [],
+            "watch_items": [],
+            "articles": [{"title": "Article"}],
+            "sources_status": {
+                "telegraphs": "error",
+                "watch_items": "error",
+                "articles": "ok",
+            },
+            "source_details": {
+                "telegraphs": {"mode": "auto_fetch_error", "message": "自动补抓失败"},
+                "watch_items": {"mode": "auto_fetch_error", "message": "自动补抓失败"},
+                "articles": {"mode": "local", "message": "已获取 1 篇"},
+            },
+            "time_windows": {
+                "watch": {"start": "2026-03-27 09:00", "end": "2026-03-27 15:00"},
+                "telegraph": {"start": "2026-03-27 09:00", "end": "2026-03-30 09:15"},
+                "article": {"start": "2026-03-27 15:00", "end": "2026-03-30 09:15"},
+            },
+            "time_window": {"start": "2026-03-27 15:00", "end": "2026-03-30 09:15"},
+        }
+
+
 def test_news_degraded_status_shows_warning():
     """部分新闻源失败时，CLI 应展示退化提示。"""
     runner = CliRunner()
@@ -1032,6 +1090,47 @@ def test_input_manifest_all_empty_sources():
     assert "财联社电报: 0 条" in output
     assert "看盘数据: 0 条" in output
     assert "相关文章: 0 篇" in output
+
+
+def test_news_stage_shows_auto_fetch_summary_messages():
+    """阶段 2 和预检应展示自动补抓后的摘要文案。"""
+    runner = CliRunner()
+    _AutoFetchedNewsAnalyzer.instances = []
+    _FakeProcessor.instances = []
+
+    with patch("src.cli.ai.get_db", new=_fake_get_db):
+        with patch("src.cli.ai.MarketAnalyzer", _AutoFetchedNewsAnalyzer):
+            with patch("src.cli.ai.AIProcessor", _FakeProcessor):
+                result = runner.invoke(
+                    main,
+                    ["ai", "market-summary", "--date", "2026-03-27", "--force"],
+                )
+
+    output = result.output
+    assert result.exit_code == 0
+    assert "财联社电报: 已获取 2 条（自动补抓）" in output
+    assert "看盘数据: 0 条（已自动抓取）" in output
+    assert "相关文章: 已获取 1 篇" in output
+
+
+def test_news_stage_shows_auto_fetch_failure_message():
+    """自动补抓失败时应展示专门的失败摘要，而不是普通 0 条。"""
+    runner = CliRunner()
+    _AutoFetchFailedNewsAnalyzer.instances = []
+    _FakeProcessor.instances = []
+
+    with patch("src.cli.ai.get_db", new=_fake_get_db):
+        with patch("src.cli.ai.MarketAnalyzer", _AutoFetchFailedNewsAnalyzer):
+            with patch("src.cli.ai.AIProcessor", _FakeProcessor):
+                result = runner.invoke(
+                    main,
+                    ["ai", "market-summary", "--date", "2026-03-27", "--force"],
+                )
+
+    output = result.output
+    assert result.exit_code == 0
+    assert "财联社电报: 自动补抓失败" in output
+    assert "看盘数据: 自动补抓失败" in output
 
 
 # ---------------------------------------------------------------------------

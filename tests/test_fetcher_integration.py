@@ -25,7 +25,7 @@ async def test_fetch_feed_persists_article(integration_db: Database) -> None:
                 {
                     "id": "article_1",
                     "title": "原始标题",
-                    "publish_time": datetime.now(timezone.utc).isoformat(),
+                    "publish_time": "2026-04-01T12:24:08+00:00",
                 }
             ],
             "page_size": 1,
@@ -55,6 +55,7 @@ async def test_fetch_feed_persists_article(integration_db: Database) -> None:
 
     assert article is not None
     assert article.title == "解析标题"
+    assert article.publish_time == datetime(2026, 4, 1, 20, 24, 8)
 
 
 @pytest.mark.asyncio
@@ -94,3 +95,49 @@ async def test_backfill_publish_time_updates_missing_article(integration_db: Dat
         refreshed = result.scalar_one()
 
     assert refreshed.publish_time is not None
+    assert refreshed.publish_time == datetime(2026, 1, 3, 17, 0, 0)
+
+
+@pytest.mark.asyncio
+async def test_repair_weread_publish_time_only_updates_weread_records(integration_db: Database) -> None:
+    """测试历史修复只处理 weread 记录。"""
+    subscription_service = SubscriptionService(integration_db)
+    feed = await subscription_service.add_subscription("MP_WXS_test", "测试公众号")
+
+    async with integration_db.get_session() as session:
+        session.add_all(
+            [
+                Article(
+                    feed_id=feed.id,
+                    article_id="weread_article",
+                    title="待修复 weread",
+                    provider="weread",
+                    publish_time=datetime(2026, 4, 1, 12, 24, 8),
+                ),
+                Article(
+                    feed_id=feed.id,
+                    article_id="page_article",
+                    title="不应修复",
+                    provider=None,
+                    publish_time=datetime(2026, 4, 1, 20, 24, 8),
+                ),
+            ]
+        )
+        await session.flush()
+
+    fetcher = FetcherService(MagicMock(), integration_db, subscription_service)
+
+    repaired = await fetcher.repair_weread_publish_time("MP_WXS_test")
+
+    assert repaired == 1
+
+    async with integration_db.get_session() as session:
+        result = await session.execute(
+            select(Article.article_id, Article.publish_time).order_by(Article.article_id)
+        )
+        rows = result.all()
+
+    assert rows == [
+        ("page_article", datetime(2026, 4, 1, 20, 24, 8)),
+        ("weread_article", datetime(2026, 4, 1, 20, 24, 8)),
+    ]

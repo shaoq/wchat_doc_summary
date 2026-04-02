@@ -83,7 +83,8 @@
       "Bash(LLM_API_KEY=\"invalid-key\" python src/cli.py:*)",
       "Bash(# 创建备份:*)",
       "Bash(pytest:*)",
-      "Bash(sort:*)"
+      "Bash(sort:*)",
+      "Bash(git rm:*)"
     ]
   }
 }

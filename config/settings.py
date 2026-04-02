@@ -26,6 +26,18 @@ class Settings(BaseSettings):
         default="https://weread.111965.xyz",
         description="微信读书 API 基础 URL",
     )
+    article_list_provider: Literal["weread", "wechat2rss"] = Field(
+        default="weread",
+        description="文章列表 Provider",
+    )
+    wechat2rss_base_url: str = Field(
+        default="https://wechat2rss.xlab.app",
+        description="Wechat2RSS API 基础 URL",
+    )
+    wechat2rss_token: str | None = Field(
+        default=None,
+        description="Wechat2RSS API token",
+    )
 
     # 数据库配置
     database_url: str = Field(

@@ -24,6 +24,17 @@ class Feed(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False, comment="公众号名称")
     intro: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="简介")
     cover: Mapped[Optional[str]] = mapped_column(String(512), nullable=True, comment="封面图片URL")
+    provider: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, comment="列表Provider")
+    provider_feed_id: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        nullable=True,
+        comment="Provider侧订阅标识",
+    )
+    provider_meta: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+        comment="Provider元数据(JSON)",
+    )
     status: Mapped[int] = mapped_column(
         Integer,
         default=1,
@@ -57,6 +68,12 @@ class Article(Base):
     summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="AI生成的摘要")
     pic_url: Mapped[Optional[str]] = mapped_column(String(512), nullable=True, comment="封面图片URL")
     original_url: Mapped[Optional[str]] = mapped_column(String(512), nullable=True, comment="原文链接")
+    provider: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, comment="文章来源Provider")
+    provider_item_id: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        nullable=True,
+        comment="Provider侧文章标识",
+    )
     publish_time: Mapped[Optional[datetime]] = mapped_column(
         DateTime,
         nullable=True,

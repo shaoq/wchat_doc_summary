@@ -3,6 +3,8 @@
 验证模块化后命令面保持不变。
 """
 
+from unittest.mock import AsyncMock, MagicMock, patch
+
 from click.testing import CliRunner
 
 from src.cli import main
@@ -149,6 +151,7 @@ class TestCLICommandHelpMessages:
         result = runner.invoke(main, ['fetch', '--help'])
         assert result.exit_code == 0
         assert '抓取' in result.output or 'fetch' in result.output.lower()
+        assert '默认抓取最新 10 条文章' in result.output
 
     def test_market_summary_command_help(self):
         """测试 market-summary 命令帮助信息。"""
@@ -163,3 +166,109 @@ class TestCLICommandHelpMessages:
         result = runner.invoke(main, ['ai', 'extract-stocks', '--help'])
         assert result.exit_code == 0
         assert '股票' in result.output or 'stock' in result.output.lower()
+
+
+class TestFetchCommandBehavior:
+    """fetch 命令行为测试。"""
+
+    def test_fetch_defaults_to_latest_ten(self):
+        """测试 fetch 默认抓取最新 10 条。"""
+        runner = CliRunner()
+        auth_service = MagicMock()
+        auth_service.get_current_token = AsyncMock(return_value="token")
+        fetcher_service = MagicMock()
+        fetcher_service.fetch_feed = AsyncMock(return_value=[])
+        subscription_service = MagicMock()
+        subscription_service.get_subscription = AsyncMock(return_value=None)
+
+        with patch("src.cli.subscription.get_db", new=AsyncMock(return_value=MagicMock())):
+            with patch("src.cli.subscription.AuthService", return_value=auth_service):
+                with patch("src.cli.subscription.SubscriptionService", return_value=subscription_service):
+                    with patch("src.cli.subscription.FetcherService", return_value=fetcher_service):
+                        result = runner.invoke(main, ["fetch", "MP_WXS_test"])
+
+        assert result.exit_code == 0
+        assert "抓取范围: 最新 10 条" in result.output
+        fetcher_service.fetch_feed.assert_awaited_once_with(
+            "MP_WXS_test",
+            days=None,
+            latest_count=10,
+        )
+
+    def test_fetch_full_overrides_days(self):
+        """测试 --full 优先于 --days。"""
+        runner = CliRunner()
+        auth_service = MagicMock()
+        auth_service.get_current_token = AsyncMock(return_value="token")
+        fetcher_service = MagicMock()
+        fetcher_service.fetch_feed = AsyncMock(return_value=[])
+        subscription_service = MagicMock()
+        subscription_service.get_subscription = AsyncMock(return_value=None)
+
+        with patch("src.cli.subscription.get_db", new=AsyncMock(return_value=MagicMock())):
+            with patch("src.cli.subscription.AuthService", return_value=auth_service):
+                with patch("src.cli.subscription.SubscriptionService", return_value=subscription_service):
+                    with patch("src.cli.subscription.FetcherService", return_value=fetcher_service):
+                        result = runner.invoke(main, ["fetch", "MP_WXS_test", "--days", "30", "--full"])
+
+        assert result.exit_code == 0
+        assert "抓取范围: 全部历史" in result.output
+        fetcher_service.fetch_feed.assert_awaited_once_with(
+            "MP_WXS_test",
+            days=None,
+            latest_count=None,
+        )
+
+    def test_subscribe_wechat2rss_does_not_require_login(self):
+        """测试 wechat2rss provider 下订阅不要求 weread 登录。"""
+        runner = CliRunner()
+        auth_service = MagicMock()
+        auth_service.get_current_token = AsyncMock(return_value=None)
+        fetcher_service = MagicMock()
+        fetcher_service.get_mp_info_from_article = AsyncMock(
+            return_value={
+                "mp_id": "3008522239",
+                "name": "e公司",
+                "intro": "",
+                "cover": "",
+                "provider": "wechat2rss",
+                "provider_feed_id": "3008522239",
+                "provider_meta": "{}",
+            }
+        )
+        subscription_service = MagicMock()
+        subscription_service.add_subscription = AsyncMock(return_value=MagicMock())
+
+        with patch("src.cli.subscription.get_settings") as mock_settings:
+            mock_settings.return_value = MagicMock(article_list_provider="wechat2rss")
+            with patch("src.cli.subscription.get_db", new=AsyncMock(return_value=MagicMock())):
+                with patch("src.cli.subscription.AuthService", return_value=auth_service):
+                    with patch("src.cli.subscription.SubscriptionService", return_value=subscription_service):
+                        with patch("src.cli.subscription.FetcherService", return_value=fetcher_service):
+                            result = runner.invoke(main, ["subscribe", "https://mp.weixin.qq.com/s/test"])
+
+        assert result.exit_code == 0
+        auth_service.get_current_token.assert_not_awaited()
+        subscription_service.add_subscription.assert_awaited_once()
+
+    def test_fetch_wechat2rss_single_feed_skips_login(self):
+        """测试 wechat2rss provider 下单号抓取不要求 weread 登录。"""
+        runner = CliRunner()
+        auth_service = MagicMock()
+        auth_service.get_current_token = AsyncMock(return_value=None)
+        fetcher_service = MagicMock()
+        fetcher_service.fetch_feed = AsyncMock(return_value=[])
+        feed = MagicMock(mp_id="3008522239", provider="wechat2rss")
+        subscription_service = MagicMock()
+        subscription_service.get_subscription = AsyncMock(return_value=feed)
+
+        with patch("src.cli.subscription.get_settings") as mock_settings:
+            mock_settings.return_value = MagicMock(article_list_provider="wechat2rss")
+            with patch("src.cli.subscription.get_db", new=AsyncMock(return_value=MagicMock())):
+                with patch("src.cli.subscription.AuthService", return_value=auth_service):
+                    with patch("src.cli.subscription.SubscriptionService", return_value=subscription_service):
+                        with patch("src.cli.subscription.FetcherService", return_value=fetcher_service):
+                            result = runner.invoke(main, ["fetch", "3008522239"])
+
+        assert result.exit_code == 0
+        auth_service.get_current_token.assert_not_awaited()

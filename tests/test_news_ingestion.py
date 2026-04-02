@@ -3,7 +3,7 @@
 覆盖场景:
 1. CLSTelegraphService 去重入库
 2. CLSWatchService 去重入库
-3. collect_news_data 从本地读取（不走远端 API）
+3. collect_news_data 本地读取与在线自动补抓
 4. ingest_telegraphs 入库路径
 """
 
@@ -231,11 +231,11 @@ class TestCLSWatchDedup:
 
 
 class TestCollectNewsDataLocalRead:
-    """验证 collect_news_data 使用本地服务查询，而非远端 API。"""
+    """验证 collect_news_data 的本地优先与自动补抓行为。"""
 
     @pytest.mark.asyncio
-    async def test_calls_list_telegraphs_not_remote(self, real_db):
-        """collect_news_data 应调用 CLSTelegraphService.list_telegraphs()（本地查询）。"""
+    async def test_offline_calls_list_telegraphs_not_remote(self, real_db):
+        """offline 模式下 collect_news_data 应只做本地查询。"""
         analyzer = MarketAnalyzer(db=real_db)
 
         with patch(
@@ -243,21 +243,29 @@ class TestCollectNewsDataLocalRead:
             new_callable=AsyncMock,
             return_value=[],
         ) as mock_list, patch(
+            "src.services.cls_telegraph_service.CLSTelegraphService.ingest_telegraphs_with_status",
+            new_callable=AsyncMock,
+        ) as mock_ingest, patch(
             "src.services.cls_watch_service.CLSWatchService.get_watch_data_for_summary",
             new_callable=AsyncMock,
             return_value=[],
         ), patch(
+            "src.services.cls_watch_service.CLSWatchService.ingest_watch_data_with_status",
+            new_callable=AsyncMock,
+        ) as mock_watch_ingest, patch(
             "src.services.market_analyzer.MarketAnalyzer.get_related_articles",
             new_callable=AsyncMock,
             return_value=[],
         ):
-            await analyzer.collect_news_data(trade_date=date(2025, 3, 28))
+            await analyzer.collect_news_data(trade_date=date(2025, 3, 28), offline=True)
 
             mock_list.assert_awaited_once()
+            mock_ingest.assert_not_awaited()
+            mock_watch_ingest.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_calls_get_watch_data_for_summary_not_remote(self, real_db):
-        """collect_news_data 应调用 CLSWatchService.get_watch_data_for_summary()（本地查询）。"""
+    async def test_offline_calls_get_watch_data_for_summary_not_remote(self, real_db):
+        """offline 模式下看盘数据应只查本地。"""
         analyzer = MarketAnalyzer(db=real_db)
 
         with patch(
@@ -265,17 +273,24 @@ class TestCollectNewsDataLocalRead:
             new_callable=AsyncMock,
             return_value=[],
         ), patch(
+            "src.services.cls_telegraph_service.CLSTelegraphService.ingest_telegraphs_with_status",
+            new_callable=AsyncMock,
+        ), patch(
             "src.services.cls_watch_service.CLSWatchService.get_watch_data_for_summary",
             new_callable=AsyncMock,
             return_value=[],
         ) as mock_watch, patch(
+            "src.services.cls_watch_service.CLSWatchService.ingest_watch_data_with_status",
+            new_callable=AsyncMock,
+        ) as mock_watch_ingest, patch(
             "src.services.market_analyzer.MarketAnalyzer.get_related_articles",
             new_callable=AsyncMock,
             return_value=[],
         ):
-            await analyzer.collect_news_data(trade_date=date(2025, 3, 28))
+            await analyzer.collect_news_data(trade_date=date(2025, 3, 28), offline=True)
 
             mock_watch.assert_awaited_once()
+            mock_watch_ingest.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_returns_correct_structure(self, real_db):
@@ -295,12 +310,13 @@ class TestCollectNewsDataLocalRead:
             new_callable=AsyncMock,
             return_value=[],
         ):
-            result = await analyzer.collect_news_data(trade_date=date(2025, 3, 28))
+            result = await analyzer.collect_news_data(trade_date=date(2025, 3, 28), offline=True)
 
             assert "telegraphs" in result
             assert "watch_items" in result
             assert "articles" in result
             assert "sources_status" in result
+            assert "source_details" in result
             assert "time_window" in result
             assert result["sources_status"]["telegraphs"] == "empty"
             assert result["sources_status"]["watch_items"] == "empty"
@@ -323,6 +339,116 @@ class TestCollectNewsDataLocalRead:
         # 电报数据应被填充（时间戳在当天范围内的会被查到）
         assert result["sources_status"]["telegraphs"] in ("ok", "empty")
         assert result["sources_status"]["watch_items"] in ("ok", "empty")
+
+    @pytest.mark.asyncio
+    async def test_online_empty_telegraphs_auto_fetches_and_requeries(self, real_db):
+        """在线模式下本地电报为空时应自动补抓并回查。"""
+        analyzer = MarketAnalyzer(db=real_db)
+        telegraph = MagicMock(
+            title="重要电报",
+            content="内容",
+            level="A",
+            ctime=1743140400,
+        )
+
+        with patch(
+            "src.services.cls_telegraph_service.CLSTelegraphService.list_telegraphs",
+            new_callable=AsyncMock,
+            side_effect=[[], [telegraph]],
+        ) as mock_list, patch(
+            "src.services.cls_telegraph_service.CLSTelegraphService.ingest_telegraphs_with_status",
+            new_callable=AsyncMock,
+            return_value={"status": "ok", "inserted": 1, "skipped": 0, "fetched": 1},
+        ) as mock_ingest, patch(
+            "src.services.cls_watch_service.CLSWatchService.get_watch_data_for_summary",
+            new_callable=AsyncMock,
+            side_effect=[[], []],
+        ), patch(
+            "src.services.cls_watch_service.CLSWatchService.ingest_watch_data_with_status",
+            new_callable=AsyncMock,
+            return_value={"status": "empty", "inserted": 0, "skipped": 0, "fetched": 0},
+        ), patch(
+            "src.services.market_analyzer.MarketAnalyzer.get_related_articles",
+            new_callable=AsyncMock,
+            return_value=[],
+        ):
+            result = await analyzer.collect_news_data(trade_date=date(2025, 3, 28), offline=False)
+
+        assert result["sources_status"]["telegraphs"] == "ok"
+        assert result["source_details"]["telegraphs"]["mode"] == "auto_fetch_ok"
+        assert "自动补抓" in result["source_details"]["telegraphs"]["message"]
+        assert len(result["telegraphs"]) == 1
+        assert mock_list.await_count == 2
+        mock_ingest.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_online_empty_watch_auto_fetch_error_sets_error_status(self, real_db):
+        """在线模式下看盘自动补抓失败应标记为 error。"""
+        analyzer = MarketAnalyzer(db=real_db)
+        telegraph = MagicMock(
+            title="重要电报",
+            content="内容",
+            level="A",
+            ctime=1743140400,
+        )
+
+        with patch(
+            "src.services.cls_telegraph_service.CLSTelegraphService.list_telegraphs",
+            new_callable=AsyncMock,
+            return_value=[telegraph],
+        ), patch(
+            "src.services.cls_watch_service.CLSWatchService.get_watch_data_for_summary",
+            new_callable=AsyncMock,
+            return_value=[],
+        ), patch(
+            "src.services.cls_watch_service.CLSWatchService.ingest_watch_data_with_status",
+            new_callable=AsyncMock,
+            return_value={"status": "error", "inserted": 0, "skipped": 0, "fetched": 0, "error": "timeout"},
+        ) as mock_ingest, patch(
+            "src.services.market_analyzer.MarketAnalyzer.get_related_articles",
+            new_callable=AsyncMock,
+            return_value=[],
+        ):
+            result = await analyzer.collect_news_data(trade_date=date(2025, 3, 28), offline=False)
+
+        assert result["sources_status"]["watch_items"] == "error"
+        assert result["source_details"]["watch_items"]["mode"] == "auto_fetch_error"
+        assert result["source_details"]["watch_items"]["message"] == "自动补抓失败"
+        mock_ingest.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_online_empty_sources_can_remain_empty_after_auto_fetch(self, real_db):
+        """在线模式下自动补抓后仍为空时，应保留 empty 状态并记录自动补抓摘要。"""
+        analyzer = MarketAnalyzer(db=real_db)
+
+        with patch(
+            "src.services.cls_telegraph_service.CLSTelegraphService.list_telegraphs",
+            new_callable=AsyncMock,
+            side_effect=[[], []],
+        ), patch(
+            "src.services.cls_telegraph_service.CLSTelegraphService.ingest_telegraphs_with_status",
+            new_callable=AsyncMock,
+            return_value={"status": "empty", "inserted": 0, "skipped": 0, "fetched": 0},
+        ), patch(
+            "src.services.cls_watch_service.CLSWatchService.get_watch_data_for_summary",
+            new_callable=AsyncMock,
+            side_effect=[[], []],
+        ), patch(
+            "src.services.cls_watch_service.CLSWatchService.ingest_watch_data_with_status",
+            new_callable=AsyncMock,
+            return_value={"status": "empty", "inserted": 0, "skipped": 0, "fetched": 0},
+        ), patch(
+            "src.services.market_analyzer.MarketAnalyzer.get_related_articles",
+            new_callable=AsyncMock,
+            return_value=[],
+        ):
+            result = await analyzer.collect_news_data(trade_date=date(2025, 3, 28), offline=False)
+
+        assert result["sources_status"]["telegraphs"] == "empty"
+        assert result["source_details"]["telegraphs"]["mode"] == "auto_fetch_empty"
+        assert "已自动抓取" in result["source_details"]["telegraphs"]["message"]
+        assert result["sources_status"]["watch_items"] == "empty"
+        assert result["source_details"]["watch_items"]["mode"] == "auto_fetch_empty"
 
 
 # ===================================================================

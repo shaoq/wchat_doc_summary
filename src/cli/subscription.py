@@ -5,12 +5,27 @@ from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
+from config.settings import get_settings
 from src.api.weread import WeReadClient
 from src.cli.utils import console, run_async
 from src.services.auth import AuthService
-from src.services.fetcher import FetcherService
+from src.services.fetcher import DEFAULT_LATEST_COUNT, FetcherService
 from src.services.subscription import SubscriptionService
 from src.storage.database import get_db
+
+
+def _provider_requires_weread_auth(provider_name: str) -> bool:
+    """判断指定 Provider 是否依赖 WeRead 登录。"""
+    return provider_name == "weread"
+
+
+def _resolve_feed_provider(mp_id: str, provider_name: str | None, default_provider: str) -> str:
+    """兼容历史订阅的 Provider 推断。"""
+    if provider_name:
+        return provider_name
+    if mp_id.startswith("MP_WXS_"):
+        return "weread"
+    return default_provider
 
 
 @click.command()
@@ -26,12 +41,13 @@ def subscribe(url: str) -> None:
         auth_service = AuthService(client, db)
         subscription_service = SubscriptionService(db)
         fetcher_service = FetcherService(client, db, subscription_service)
+        provider_name = get_settings().article_list_provider
 
-        # 检查登录状态
-        token = await auth_service.get_current_token()
-        if not token:
-            console.print("[red]请先登录: wchat login[/red]")
-            return
+        if _provider_requires_weread_auth(provider_name):
+            token = await auth_service.get_current_token()
+            if not token:
+                console.print("[red]请先登录: wchat login[/red]")
+                return
 
         with console.status("[bold blue]获取公众号信息...[/bold blue]"):
             try:
@@ -55,6 +71,9 @@ def subscribe(url: str) -> None:
             name=name,
             intro=intro,
             cover=cover,
+            provider=mp_info.get("provider"),
+            provider_feed_id=mp_info.get("provider_feed_id"),
+            provider_meta=mp_info.get("provider_meta"),
         )
 
         console.print(Panel(
@@ -191,15 +210,15 @@ def info(mp_id: str) -> None:
 
 @click.command()
 @click.option('--all', 'fetch_all', is_flag=True, help='抓取所有订阅')
-@click.option('--days', 'days', type=int, default=5, help='抓取最近 N 天的文章（默认 5 天）')
+@click.option('--days', 'days', type=int, default=None, help='抓取最近 N 天的文章')
 @click.option('--full', 'full', is_flag=True, help='抓取全部历史文章')
 @click.argument('mp_id', required=False)
-def fetch(fetch_all: bool, days: int, full: bool, mp_id: str | None) -> None:
+def fetch(fetch_all: bool, days: int | None, full: bool, mp_id: str | None) -> None:
     """拉取文章。
 
     MP_ID: 公众号 ID（可选，不指定时需使用 --all）
 
-    默认抓取最近 5 天的文章，
+    默认抓取最新 10 条文章。
     """
     # full 参数优先级高于 days
     if full:
@@ -211,18 +230,44 @@ def fetch(fetch_all: bool, days: int, full: bool, mp_id: str | None) -> None:
         auth_service = AuthService(client, db)
         subscription_service = SubscriptionService(db)
         fetcher_service = FetcherService(client, db, subscription_service)
+        provider_name = get_settings().article_list_provider
 
-        # 检查登录状态
-        token = await auth_service.get_current_token()
-        if not token:
-            console.print("[red]请先登录: wchat login[/red]")
-            return
+        requires_auth = False
+        if fetch_all:
+            feeds = await subscription_service.list_subscriptions(active_only=True)
+            requires_auth = any(
+                _provider_requires_weread_auth(
+                    _resolve_feed_provider(feed.mp_id, feed.provider, provider_name)
+                )
+                for feed in feeds
+            )
+        elif mp_id:
+            feed = await subscription_service.get_subscription(mp_id)
+            requires_auth = _provider_requires_weread_auth(
+                _resolve_feed_provider(
+                    mp_id,
+                    feed.provider if feed else None,
+                    provider_name,
+                )
+            )
+        else:
+            requires_auth = _provider_requires_weread_auth(provider_name)
+
+        if requires_auth:
+            token = await auth_service.get_current_token()
+            if not token:
+                console.print("[red]请先登录: wchat login[/red]")
+                return
 
         # 显示抓取范围
-        if days:
+        latest_count = None
+        if full:
+            console.print("[cyan]抓取范围: 全部历史[/cyan]")
+        elif days is not None:
             console.print(f"[cyan]抓取范围: 最近 {days} 天[/cyan]")
         else:
-            console.print("[cyan]抓取范围: 全部历史[/cyan]")
+            latest_count = DEFAULT_LATEST_COUNT
+            console.print(f"[cyan]抓取范围: 最新 {latest_count} 条[/cyan]")
 
         if fetch_all:
             # 抓取所有订阅
@@ -233,7 +278,7 @@ def fetch(fetch_all: bool, days: int, full: bool, mp_id: str | None) -> None:
             ) as progress:
                 task = progress.add_task("抓取所有订阅...", total=None)
 
-                results = await fetcher_service.fetch_all(days=days)
+                results = await fetcher_service.fetch_all(days=days, latest_count=latest_count)
 
             for feed_mp_id, articles in results.items():
                 if articles:
@@ -241,13 +286,21 @@ def fetch(fetch_all: bool, days: int, full: bool, mp_id: str | None) -> None:
 
         elif mp_id:
             # 抓取指定公众号
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                console=console,
-            ) as progress:
-                task = progress.add_task(f"抓取 {mp_id}...", total=None)
-                articles = await fetcher_service.fetch_feed(mp_id, days=days)
+            try:
+                with Progress(
+                    SpinnerColumn(),
+                    TextColumn("[progress.description]{task.description}"),
+                    console=console,
+                ) as progress:
+                    task = progress.add_task(f"抓取 {mp_id}...", total=None)
+                    articles = await fetcher_service.fetch_feed(
+                        mp_id,
+                        days=days,
+                        latest_count=latest_count,
+                    )
+            except Exception as e:
+                console.print(f"\n[red]抓取失败: {e}[/red]")
+                return
 
             console.print(f"\n[green]抓取完成，共 {len(articles)} 篇文章[/green]")
 

@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator, TypeVar
 
-from sqlalchemy import select
+from sqlalchemy import inspect, select, text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -68,8 +68,37 @@ class Database:
 
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(self._ensure_compatible_schema)
 
         logger.info("数据库初始化完成")
+
+    @staticmethod
+    def _ensure_compatible_schema(sync_conn) -> None:
+        """为已存在的 SQLite 数据库补齐新增列。"""
+        inspector = inspect(sync_conn)
+
+        def ensure_columns(table_name: str, columns: dict[str, str]) -> None:
+            existing = {col["name"] for col in inspector.get_columns(table_name)}
+            for name, ddl in columns.items():
+                if name in existing:
+                    continue
+                sync_conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {name} {ddl}"))
+
+        ensure_columns(
+            "feeds",
+            {
+                "provider": "VARCHAR(64)",
+                "provider_feed_id": "VARCHAR(255)",
+                "provider_meta": "TEXT",
+            },
+        )
+        ensure_columns(
+            "articles",
+            {
+                "provider": "VARCHAR(64)",
+                "provider_item_id": "VARCHAR(255)",
+            },
+        )
 
     async def close(self) -> None:
         """关闭数据库连接。"""

@@ -15,6 +15,26 @@ from src.storage.database import Database
 logger = logging.getLogger(__name__)
 
 
+def _build_ingest_result(
+    status: str,
+    *,
+    inserted: int = 0,
+    skipped: int = 0,
+    fetched: int = 0,
+    error: str | None = None,
+) -> dict[str, Any]:
+    """构造统一的抓取结果结构。"""
+    payload: dict[str, Any] = {
+        "status": status,
+        "inserted": inserted,
+        "skipped": skipped,
+        "fetched": fetched,
+    }
+    if error:
+        payload["error"] = error
+    return payload
+
+
 class CLSWatchService:
     """财联社看盘数据服务类。"""
 
@@ -251,6 +271,20 @@ class CLSWatchService:
         Returns:
             (新增数量, 跳过数量)
         """
+        result = await self.ingest_watch_data_with_status(
+            start_time=start_time,
+            end_time=end_time,
+            client=client,
+        )
+        return int(result.get("inserted", 0)), int(result.get("skipped", 0))
+
+    async def ingest_watch_data_with_status(
+        self,
+        start_time: int,
+        end_time: int,
+        client: CLSWatchClient | None = None,
+    ) -> dict[str, Any]:
+        """从远端抓取看盘数据后入库，并返回结构化状态。"""
         if client is None:
             client = CLSWatchClient()
 
@@ -262,11 +296,16 @@ class CLSWatchService:
             )
         except Exception as e:
             logger.warning(f"抓取远端看盘数据失败: {e}")
-            return 0, 0
+            return _build_ingest_result("error", error=str(e))
 
         if not items:
-            return 0, 0
+            return _build_ingest_result("empty")
 
         inserted, skipped = await self.save_watch_data(items)
         logger.info(f"看盘数据入库完成: 新增 {inserted}, 跳过 {skipped} (共 {len(items)} 条)")
-        return inserted, skipped
+        return _build_ingest_result(
+            "ok",
+            inserted=inserted,
+            skipped=skipped,
+            fetched=len(items),
+        )

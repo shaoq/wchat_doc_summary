@@ -20,11 +20,11 @@ class ArticleFetchError(Exception):
     pass
 
 
-async def fetch_article_content(article_id: str) -> str:
+async def fetch_article_content(article_ref: str) -> str:
     """请求微信公众号文章获取 HTML 内容。
 
     Args:
-        article_id: 文章 ID（URL 中 /s/ 后面的部分）
+        article_ref: 文章 URL 或文章 ID（URL 中 /s/ 后面的部分）
 
     Returns:
         文章 HTML 内容
@@ -33,7 +33,10 @@ async def fetch_article_content(article_id: str) -> str:
         ArticleFetchError: 抓取失败
     """
     settings = get_settings()
-    url = f"https://mp.weixin.qq.com/s/{article_id}"
+    if article_ref.startswith(("http://", "https://")):
+        url = article_ref
+    else:
+        url = f"https://mp.weixin.qq.com/s/{article_ref}"
 
     headers = {
         "User-Agent": (

@@ -169,6 +169,34 @@ class TestWeReadClient:
             assert result["total"] == 2
             assert result["page_size"] == 50
 
+    @pytest.mark.asyncio
+    async def test_request_http_error_preserves_context(self) -> None:
+        """测试 HTTP 错误会保留状态码和响应上下文。"""
+        client = WeReadClient(base_url="https://api.example.com")
+        client.max_retries = 0
+
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_response = MagicMock()
+            mock_response.status_code = 500
+            mock_response.text = '{"message":"id(931511154): WeReadError400"}'
+            mock_response.raise_for_status = MagicMock(
+                side_effect=httpx.HTTPStatusError(
+                    "Error",
+                    request=MagicMock(),
+                    response=mock_response,
+                )
+            )
+            mock_client.return_value.__aenter__.return_value.request = AsyncMock(
+                return_value=mock_response
+            )
+
+            with pytest.raises(WeReadAPIError) as exc_info:
+                await client._request("GET", "/api/v2/platform/mps/MP_WXS_test/articles")
+
+        assert exc_info.value.status_code == 500
+        assert exc_info.value.response_text == '{"message":"id(931511154): WeReadError400"}'
+        assert "id(931511154): WeReadError400" in str(exc_info.value)
+
     def test_set_token(self) -> None:
         """测试设置 token。"""
         client = WeReadClient(base_url="https://api.example.com")
@@ -196,6 +224,25 @@ class TestArticleAPI:
 
             result = await fetch_article_content("test_article_id")
             assert result == html_content
+
+    @pytest.mark.asyncio
+    async def test_fetch_article_content_with_full_url(self) -> None:
+        """测试使用完整文章 URL 获取内容。"""
+        html_content = "<html><body>Test content</body></html>"
+
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_response = MagicMock()
+            mock_response.text = html_content
+            mock_response.raise_for_status = MagicMock()
+
+            mock_client.return_value.__aenter__.return_value.get = AsyncMock(
+                return_value=mock_response
+            )
+
+            result = await fetch_article_content("https://mp.weixin.qq.com/s/test_article_id")
+
+            assert result == html_content
+            mock_client.return_value.__aenter__.return_value.get.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_fetch_article_content_failure(self) -> None:
@@ -273,3 +320,15 @@ class TestWeReadAPIError:
 
         assert str(error) == "API 请求失败"
         assert isinstance(error, Exception)
+
+    def test_error_creation_with_context(self) -> None:
+        """测试带上下文的错误字符串。"""
+        error = WeReadAPIError(
+            "API 请求失败: 500",
+            status_code=500,
+            response_text='{"message":"id(931511154): WeReadError400"}',
+        )
+
+        assert error.status_code == 500
+        assert error.response_text is not None
+        assert "id(931511154): WeReadError400" in str(error)

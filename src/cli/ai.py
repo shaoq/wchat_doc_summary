@@ -241,30 +241,37 @@ def _render_market_data_statuses(market_data: dict[str, Any]) -> None:
 def _get_news_status_items(news_data: dict[str, Any]) -> list[dict[str, str]]:
     """汇总新闻来源逐项状态。"""
     sources_status = news_data.get("sources_status", {})
+    source_details = news_data.get("source_details", {})
     telegraphs_count = len(news_data.get("telegraphs", []))
     watch_count = len(news_data.get("watch_items", []))
     articles_count = len(news_data.get("articles", []))
+    telegraph_detail = source_details.get("telegraphs", {}) if isinstance(source_details, dict) else {}
+    watch_detail = source_details.get("watch_items", {}) if isinstance(source_details, dict) else {}
+    article_detail = source_details.get("articles", {}) if isinstance(source_details, dict) else {}
 
     return [
         _make_status_item(
             "财联社电报",
             sources_status.get("telegraphs", "empty"),
-            ok_message=f"已获取 {telegraphs_count} 条",
-            empty_message="0 条",
+            ok_message=telegraph_detail.get("message", f"已获取 {telegraphs_count} 条"),
+            empty_message=telegraph_detail.get("message", "0 条"),
+            error_message=telegraph_detail.get("message", "获取失败"),
             summary=f"{telegraphs_count} 条",
         ),
         _make_status_item(
             "看盘数据",
             sources_status.get("watch_items", "empty"),
-            ok_message=f"已获取 {watch_count} 条",
-            empty_message="0 条",
+            ok_message=watch_detail.get("message", f"已获取 {watch_count} 条"),
+            empty_message=watch_detail.get("message", "0 条"),
+            error_message=watch_detail.get("message", "获取失败"),
             summary=f"{watch_count} 条",
         ),
         _make_status_item(
             "相关文章",
             sources_status.get("articles", "empty"),
-            ok_message=f"已获取 {articles_count} 篇",
-            empty_message="0 篇",
+            ok_message=article_detail.get("message", f"已获取 {articles_count} 篇"),
+            empty_message=article_detail.get("message", "0 篇"),
+            error_message=article_detail.get("message", "获取失败"),
             summary=f"{articles_count} 篇",
         ),
     ]

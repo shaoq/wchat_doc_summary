@@ -4,7 +4,9 @@ import pytest
 from datetime import date, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from src.models.schema import Article, Feed
 from src.services.market_analyzer import MarketAnalyzer
+from src.storage.database import Database
 
 
 class TestGetRelatedArticlesTradeDayAware:
@@ -198,3 +200,33 @@ class TestAIProcessorWatchItemsFormat:
         assert "09:30" in result
         assert "Important News" in result
         assert "News content here" in result
+
+
+@pytest.mark.asyncio
+async def test_get_related_articles_matches_post_close_article_with_shanghai_local_time(
+    integration_db: Database,
+) -> None:
+    """测试上海本地时间存储后，盘后文章能命中 market-summary 时间窗口。"""
+    async with integration_db.get_session() as session:
+        feed = Feed(mp_id="MP_WXS_test", name="测试公众号")
+        session.add(feed)
+        await session.flush()
+
+        session.add(
+            Article(
+                feed_id=feed.id,
+                article_id="article_post_close",
+                title="盘后文章",
+                content="<p>正文</p>",
+                publish_time=datetime(2026, 4, 1, 20, 24, 8),
+            )
+        )
+        await session.flush()
+
+    with patch("src.services.market_analyzer.FinanceClient"):
+        analyzer = MarketAnalyzer(integration_db)
+
+    articles = await analyzer.get_related_articles(date(2026, 4, 1))
+
+    assert len(articles) == 1
+    assert articles[0]["title"] == "盘后文章"

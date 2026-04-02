@@ -31,6 +31,9 @@ class SubscriptionService:
         name: str,
         intro: str = "",
         cover: str = "",
+        provider: str | None = None,
+        provider_feed_id: str | None = None,
+        provider_meta: str | None = None,
     ) -> Feed:
         """添加订阅。
 
@@ -41,6 +44,9 @@ class SubscriptionService:
             name: 公众号名称
             intro: 公众号简介
             cover: 封面图片 URL
+            provider: 列表 Provider
+            provider_feed_id: Provider 侧订阅标识
+            provider_meta: Provider 元数据
 
         Returns:
             创建或更新的 Feed 对象
@@ -63,6 +69,9 @@ class SubscriptionService:
                 existing.name = name
                 existing.intro = intro
                 existing.cover = cover
+                existing.provider = provider or existing.provider
+                existing.provider_feed_id = provider_feed_id or existing.provider_feed_id
+                existing.provider_meta = provider_meta or existing.provider_meta
                 existing.status = 1
                 await session.flush()
                 await session.refresh(existing)
@@ -75,6 +84,9 @@ class SubscriptionService:
                 name=name,
                 intro=intro,
                 cover=cover,
+                provider=provider,
+                provider_feed_id=provider_feed_id,
+                provider_meta=provider_meta,
                 status=1,
             )
             session.add(feed)

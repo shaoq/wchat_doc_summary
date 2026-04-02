@@ -31,6 +31,9 @@ def mock_settings() -> MagicMock:
     settings = MagicMock()
     settings.database_url = "sqlite+aiosqlite:///:memory:"
     settings.weread_api_base = "https://test.api.com"
+    settings.article_list_provider = "weread"
+    settings.wechat2rss_base_url = "https://wechat2rss.test"
+    settings.wechat2rss_token = "test_token"
     settings.request_timeout = 30
     settings.max_retries = 3
     settings.openai_api_key = "test_openai_key"

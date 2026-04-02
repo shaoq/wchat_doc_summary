@@ -13,7 +13,25 @@ logger = logging.getLogger(__name__)
 class WeReadAPIError(Exception):
     """微信读书 API 错误。"""
 
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        response_text: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+        self.response_text = response_text
+
+    def __str__(self) -> str:
+        details: list[str] = [self.message]
+        if self.status_code is not None and str(self.status_code) not in self.message:
+            details.append(f"status={self.status_code}")
+        if self.response_text and self.response_text not in self.message:
+            details.append(f"response={self.response_text}")
+        return " | ".join(details)
 
 
 class WeReadClient:
@@ -56,6 +74,8 @@ class WeReadClient:
         *,
         allowed_status_codes: set[int] | None = None,
         include_status_code: bool = False,
+        max_retries_override: int | None = None,
+        log_http_errors: bool = True,
         **kwargs: Any,
     ) -> Any:
         """发送 HTTP 请求。
@@ -77,9 +97,10 @@ class WeReadClient:
         kwargs.setdefault("headers", headers)
         kwargs.setdefault("timeout", self.timeout)
         allowed_status_codes = allowed_status_codes or set()
+        max_retries = self.max_retries if max_retries_override is None else max_retries_override
 
         async with httpx.AsyncClient() as client:
-            for attempt in range(self.max_retries + 1):
+            for attempt in range(max_retries + 1):
                 try:
                     response = await client.request(method, url, **kwargs)
                     if response.status_code in allowed_status_codes:
@@ -94,12 +115,16 @@ class WeReadClient:
                         return {"status_code": response.status_code, "data": data}
                     return data
                 except httpx.HTTPStatusError as e:
-                    logger.error(
-                        f"HTTP 错误: {e.response.status_code} - {e.response.text}"
-                    )
-                    if attempt == self.max_retries:
+                    if log_http_errors:
+                        log_fn = logger.error if attempt == max_retries else logger.warning
+                        log_fn(
+                            f"HTTP 错误: {e.response.status_code} - {e.response.text}"
+                        )
+                    if attempt == max_retries:
                         raise WeReadAPIError(
-                            f"API 请求失败: {e.response.status_code}"
+                            f"API 请求失败: {e.response.status_code}",
+                            status_code=e.response.status_code,
+                            response_text=e.response.text,
                         ) from e
                 except httpx.RequestError as e:
                     logger.warning(f"请求错误 (尝试 {attempt + 1}): {e}")
@@ -261,7 +286,13 @@ class WeReadClient:
         return response
 
     async def get_articles(
-        self, mp_id: str, page: int = 1, page_size: int = 50
+        self,
+        mp_id: str,
+        page: int = 1,
+        page_size: int = 50,
+        *,
+        max_retries_override: int | None = None,
+        log_http_errors: bool = True,
     ) -> dict[str, Any]:
         """获取公众号文章列表。
 
@@ -285,6 +316,8 @@ class WeReadClient:
             "GET",
             f"/api/v2/platform/mps/{mp_id}/articles",
             params=params,
+            max_retries_override=max_retries_override,
+            log_http_errors=log_http_errors,
         )
 
         if isinstance(response, list):

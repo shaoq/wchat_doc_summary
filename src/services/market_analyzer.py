@@ -377,6 +377,11 @@ class MarketAnalyzer:
                 "watch_items": "empty",
                 "articles": "empty",
             },
+            "source_details": {
+                "telegraphs": {},
+                "watch_items": {},
+                "articles": {},
+            },
             "time_windows": {
                 "watch": {
                     "start": watch_window[0].strftime("%Y-%m-%d %H:%M"),
@@ -407,32 +412,74 @@ class MarketAnalyzer:
             # 使用电报专用窗口: trade_date 09:00 ~ next_trade_date 09:15
             start_dt, end_dt = telegraph_window
 
+            start_time = int(start_dt.timestamp())
+            end_time = int(end_dt.timestamp())
             telegraphs = await telegraph_service.list_telegraphs(
-                start_time=int(start_dt.timestamp()),
-                end_time=int(end_dt.timestamp()),
+                start_time=start_time,
+                end_time=end_time,
                 min_level="B",  # 只获取 B 级以上重要电报
                 limit=100,
             )
 
             if telegraphs:
-                result["telegraphs"] = [
-                    {
-                        "title": t.title,
-                        "content": t.content,
-                        "level": t.level,
-                        "ctime": t.ctime,
-                        "publish_time": datetime.fromtimestamp(t.ctime).strftime("%Y-%m-%d %H:%M") if t.ctime else None,
-                    }
-                    for t in telegraphs
-                ]
+                result["telegraphs"] = self._serialize_telegraphs(telegraphs)
                 result["sources_status"]["telegraphs"] = "ok"
+                result["source_details"]["telegraphs"] = {
+                    "mode": "local",
+                    "message": f"已获取 {len(telegraphs)} 条",
+                }
                 logger.info(f"获取财联社电报: {len(telegraphs)} 条")
             else:
-                result["sources_status"]["telegraphs"] = "empty"
-                logger.info(f"财联社电报: 无数据 ({trade_date})")
+                if offline:
+                    result["sources_status"]["telegraphs"] = "empty"
+                    result["source_details"]["telegraphs"] = {
+                        "mode": "offline_empty",
+                        "message": "0 条",
+                    }
+                    logger.info(f"财联社电报: 无数据 ({trade_date})")
+                else:
+                    ingest_result = await telegraph_service.ingest_telegraphs_with_status(
+                        start_time=start_time,
+                        end_time=end_time,
+                    )
+                    if ingest_result.get("status") == "error":
+                        result["sources_status"]["telegraphs"] = "error"
+                        result["source_details"]["telegraphs"] = {
+                            "mode": "auto_fetch_error",
+                            "message": "自动补抓失败",
+                            "fetch_result": ingest_result,
+                        }
+                    else:
+                        telegraphs = await telegraph_service.list_telegraphs(
+                            start_time=start_time,
+                            end_time=end_time,
+                            min_level="B",
+                            limit=100,
+                        )
+                        if telegraphs:
+                            result["telegraphs"] = self._serialize_telegraphs(telegraphs)
+                            result["sources_status"]["telegraphs"] = "ok"
+                            result["source_details"]["telegraphs"] = {
+                                "mode": "auto_fetch_ok",
+                                "message": f"已获取 {len(telegraphs)} 条（自动补抓）",
+                                "fetch_result": ingest_result,
+                            }
+                            logger.info(f"获取财联社电报: {len(telegraphs)} 条（自动补抓）")
+                        else:
+                            result["sources_status"]["telegraphs"] = "empty"
+                            result["source_details"]["telegraphs"] = {
+                                "mode": "auto_fetch_empty",
+                                "message": "0 条（已自动抓取）",
+                                "fetch_result": ingest_result,
+                            }
+                            logger.info(f"财联社电报: 自动补抓后仍无数据 ({trade_date})")
 
         except Exception as e:
             result["sources_status"]["telegraphs"] = "error"
+            result["source_details"]["telegraphs"] = {
+                "mode": "error",
+                "message": "获取失败",
+            }
             logger.warning(f"获取财联社电报失败: {e}")
 
         # ========== 2. 收集财联社看盘数据 ==========
@@ -442,6 +489,9 @@ class MarketAnalyzer:
             watch_service = CLSWatchService(self.db)
 
             # 使用看盘专用窗口: trade_date 09:00 ~ trade_date 15:00
+            start_dt, end_dt = watch_window
+            start_time = int(start_dt.timestamp())
+            end_time = int(end_dt.timestamp())
             watch_items = await watch_service.get_watch_data_for_summary(
                 trade_date,
                 time_window=watch_window,
@@ -450,13 +500,60 @@ class MarketAnalyzer:
             if watch_items:
                 result["watch_items"] = watch_items
                 result["sources_status"]["watch_items"] = "ok"
+                result["source_details"]["watch_items"] = {
+                    "mode": "local",
+                    "message": f"已获取 {len(watch_items)} 条",
+                }
                 logger.info(f"获取财联社看盘数据: {len(watch_items)} 条")
             else:
-                result["sources_status"]["watch_items"] = "empty"
-                logger.info(f"财联社看盘数据: 无数据 ({trade_date})")
+                if offline:
+                    result["sources_status"]["watch_items"] = "empty"
+                    result["source_details"]["watch_items"] = {
+                        "mode": "offline_empty",
+                        "message": "0 条",
+                    }
+                    logger.info(f"财联社看盘数据: 无数据 ({trade_date})")
+                else:
+                    ingest_result = await watch_service.ingest_watch_data_with_status(
+                        start_time=start_time,
+                        end_time=end_time,
+                    )
+                    if ingest_result.get("status") == "error":
+                        result["sources_status"]["watch_items"] = "error"
+                        result["source_details"]["watch_items"] = {
+                            "mode": "auto_fetch_error",
+                            "message": "自动补抓失败",
+                            "fetch_result": ingest_result,
+                        }
+                    else:
+                        watch_items = await watch_service.get_watch_data_for_summary(
+                            trade_date,
+                            time_window=watch_window,
+                        )
+                        if watch_items:
+                            result["watch_items"] = watch_items
+                            result["sources_status"]["watch_items"] = "ok"
+                            result["source_details"]["watch_items"] = {
+                                "mode": "auto_fetch_ok",
+                                "message": f"已获取 {len(watch_items)} 条（自动补抓）",
+                                "fetch_result": ingest_result,
+                            }
+                            logger.info(f"获取财联社看盘数据: {len(watch_items)} 条（自动补抓）")
+                        else:
+                            result["sources_status"]["watch_items"] = "empty"
+                            result["source_details"]["watch_items"] = {
+                                "mode": "auto_fetch_empty",
+                                "message": "0 条（已自动抓取）",
+                                "fetch_result": ingest_result,
+                            }
+                            logger.info(f"财联社看盘数据: 自动补抓后仍无数据 ({trade_date})")
 
         except Exception as e:
             result["sources_status"]["watch_items"] = "error"
+            result["source_details"]["watch_items"] = {
+                "mode": "error",
+                "message": "获取失败",
+            }
             logger.warning(f"获取财联社看盘数据失败: {e}")
 
         # ========== 3. 收集相关市场文章 ==========
@@ -466,13 +563,25 @@ class MarketAnalyzer:
             if articles:
                 result["articles"] = articles
                 result["sources_status"]["articles"] = "ok"
+                result["source_details"]["articles"] = {
+                    "mode": "local",
+                    "message": f"已获取 {len(articles)} 篇",
+                }
                 logger.info(f"获取相关文章: {len(articles)} 篇")
             else:
                 result["sources_status"]["articles"] = "empty"
+                result["source_details"]["articles"] = {
+                    "mode": "empty",
+                    "message": "0 篇",
+                }
                 logger.info(f"相关文章: 无数据 ({trade_date})")
 
         except Exception as e:
             result["sources_status"]["articles"] = "error"
+            result["source_details"]["articles"] = {
+                "mode": "error",
+                "message": "获取失败",
+            }
             logger.warning(f"获取相关文章失败: {e}")
 
         # 计算聚合状态: success / degraded / failed
@@ -486,6 +595,20 @@ class MarketAnalyzer:
             result["status"] = "success"
 
         return result
+
+    @staticmethod
+    def _serialize_telegraphs(telegraphs: list[Any]) -> list[dict[str, Any]]:
+        """将电报 ORM 对象转为摘要结构。"""
+        return [
+            {
+                "title": t.title,
+                "content": t.content,
+                "level": t.level,
+                "ctime": t.ctime,
+                "publish_time": datetime.fromtimestamp(t.ctime).strftime("%Y-%m-%d %H:%M") if t.ctime else None,
+            }
+            for t in telegraphs
+        ]
 
     async def get_related_articles(
         self,

@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime, timedelta, timezone
 
 from src.services.subscription import SubscriptionService
-from src.services.fetcher import FetcherService
+from src.services.fetcher import FetcherService, _normalize_publish_time_for_storage
 from src.services.auth import AuthService
 from src.services.ai_processor import AIProcessor
 from src.api.weread import WeReadAPIError
@@ -228,10 +228,25 @@ class TestFetcherService:
 
         assert len(articles) == 1
         assert fetcher_service._fetch_and_save_article.await_count == 1
-        fetcher_service._fetch_and_save_article.assert_awaited_with(
-            1,
-            {"id": "article_new", "title": "新文章", "publish_time": recent_time},
-        )
+        saved_payload = fetcher_service._fetch_and_save_article.await_args.args[1]
+        assert saved_payload["id"] == "article_new"
+        assert saved_payload["title"] == "新文章"
+        assert saved_payload["publish_time"] == recent_time
+        assert saved_payload["provider"] == "weread"
+
+    def test_normalize_publish_time_for_storage_converts_unix_timestamp_to_shanghai_local(self) -> None:
+        """测试 Unix 时间戳会在入库前转成上海本地时间。"""
+        normalized = _normalize_publish_time_for_storage(1775046248)
+
+        assert normalized == datetime(2026, 4, 1, 20, 24, 8)
+
+    def test_normalize_publish_time_for_storage_keeps_naive_datetime_unchanged(self) -> None:
+        """测试页面解析出的本地 naive 时间不会被二次转换。"""
+        parsed_local = datetime(2026, 4, 1, 20, 24, 8)
+
+        normalized = _normalize_publish_time_for_storage(parsed_local)
+
+        assert normalized == parsed_local
 
     @pytest.mark.asyncio
     async def test_fetch_incremental_stops_at_existing_publish_time(
@@ -252,8 +267,8 @@ class TestFetcherService:
         mock_weread_client.get_articles = AsyncMock(
             return_value={
                 "articles": [
-                    {"id": "article_new", "title": "新文章", "publish_time": "2026-01-03T09:00:00+00:00"},
-                    {"id": "article_old", "title": "旧文章", "publish_time": "2026-01-02T09:00:00+00:00"},
+                    {"id": "article_new", "title": "新文章", "publish_time": "2026-01-03T09:00:00+08:00"},
+                    {"id": "article_old", "title": "旧文章", "publish_time": "2026-01-02T09:00:00+08:00"},
                 ],
                 "page_size": 2,
             }
@@ -268,6 +283,134 @@ class TestFetcherService:
         assert len(articles) == 1
         assert mock_weread_client.get_articles.await_count == 1
         fetcher_service._fetch_and_save_article.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_fetch_feed_latest_count_limits_articles(
+        self,
+        fetcher_service: FetcherService,
+        mock_weread_client: MagicMock,
+        mock_subscription_service: MagicMock,
+    ) -> None:
+        """测试默认最新文章模式只抓取最新 10 条。"""
+        mock_subscription_service.get_subscription = AsyncMock(
+            return_value=Feed(id=1, mp_id="MP_WXS_test", name="测试公众号", status=1)
+        )
+        mock_subscription_service.update_sync_time = AsyncMock()
+        mock_weread_client.get_articles = AsyncMock(
+            return_value={
+                "articles": [
+                    {"id": f"article_{idx}", "title": f"文章{idx}"}
+                    for idx in range(12)
+                ],
+                "page_size": 10,
+            }
+        )
+
+        async def save_article(feed_id: int, article_info: dict) -> Article:
+            return Article(
+                id=1,
+                feed_id=feed_id,
+                article_id=article_info["id"],
+                title=article_info["title"],
+            )
+
+        fetcher_service._fetch_and_save_article = AsyncMock(side_effect=save_article)
+        fetcher_service.backfill_publish_time = AsyncMock(return_value=0)
+
+        articles = await fetcher_service.fetch_feed("MP_WXS_test", latest_count=10)
+
+        assert len(articles) == 10
+        mock_weread_client.get_articles.assert_awaited_once_with(
+            "MP_WXS_test",
+            page=1,
+            page_size=10,
+            max_retries_override=0,
+            log_http_errors=False,
+        )
+        fetcher_service.backfill_publish_time.assert_awaited_once_with(
+            "MP_WXS_test",
+            page_size=10,
+            max_pages=1,
+        )
+
+    @pytest.mark.asyncio
+    async def test_fetch_feed_latest_count_retries_with_smaller_window(
+        self,
+        fetcher_service: FetcherService,
+        mock_weread_client: MagicMock,
+        mock_subscription_service: MagicMock,
+    ) -> None:
+        """测试默认最新文章模式遇错后会缩小窗口重试。"""
+        mock_subscription_service.get_subscription = AsyncMock(
+            return_value=Feed(id=1, mp_id="MP_WXS_test", name="测试公众号", status=1)
+        )
+        mock_subscription_service.update_sync_time = AsyncMock()
+
+        call_sizes: list[int] = []
+
+        async def get_articles(
+            mp_id: str,
+            page: int = 1,
+            page_size: int = 50,
+            **_: dict,
+        ) -> dict:
+            call_sizes.append(page_size)
+            if page_size == 10:
+                raise WeReadAPIError(
+                    "API 请求失败: 500",
+                    status_code=500,
+                    response_text='{"message":"id(931511154): WeReadError400"}',
+                )
+            return {
+                "articles": [
+                    {"id": f"article_{idx}", "title": f"文章{idx}"}
+                    for idx in range(page_size)
+                ],
+                "page_size": page_size,
+            }
+
+        mock_weread_client.get_articles = AsyncMock(side_effect=get_articles)
+
+        async def save_article(feed_id: int, article_info: dict) -> Article:
+            return Article(
+                id=1,
+                feed_id=feed_id,
+                article_id=article_info["id"],
+                title=article_info["title"],
+            )
+
+        fetcher_service._fetch_and_save_article = AsyncMock(side_effect=save_article)
+        fetcher_service.backfill_publish_time = AsyncMock(return_value=0)
+
+        articles = await fetcher_service.fetch_feed("MP_WXS_test", latest_count=10)
+
+        assert len(articles) == 5
+        assert call_sizes[:2] == [10, 5]
+
+    @pytest.mark.asyncio
+    async def test_fetch_feed_latest_count_reports_aggregated_failure(
+        self,
+        fetcher_service: FetcherService,
+        mock_weread_client: MagicMock,
+        mock_subscription_service: MagicMock,
+    ) -> None:
+        """测试默认最新文章模式在全部缩窗失败时返回汇总错误。"""
+        mock_subscription_service.get_subscription = AsyncMock(
+            return_value=Feed(id=1, mp_id="MP_WXS_test", name="测试公众号", status=1)
+        )
+        mock_weread_client.get_articles = AsyncMock(
+            side_effect=WeReadAPIError(
+                "API 请求失败: 500",
+                status_code=500,
+                response_text='{"message":"id(931511154): WeReadError400"}',
+            )
+        )
+
+        with pytest.raises(WeReadAPIError) as exc_info:
+            await fetcher_service.fetch_feed("MP_WXS_test", latest_count=10)
+
+        assert "已尝试 pageSize=10/5/3/2/1" in str(exc_info.value)
+        assert "id(931511154): WeReadError400" in str(exc_info.value)
 
 
 class TestAuthService:
