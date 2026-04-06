@@ -4,7 +4,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 
-from src.api.weread import WeReadClient, WeReadAPIError
+from src.api.weread import WeReadClient, WeReadAPIError, RateLimitError
 from src.api.article import (
     fetch_article_content,
     parse_article_html,
@@ -178,7 +178,7 @@ class TestWeReadClient:
         with patch("httpx.AsyncClient") as mock_client:
             mock_response = MagicMock()
             mock_response.status_code = 500
-            mock_response.text = '{"message":"id(931511154): WeReadError400"}'
+            mock_response.text = '{"message":"internal server error"}'
             mock_response.raise_for_status = MagicMock(
                 side_effect=httpx.HTTPStatusError(
                     "Error",
@@ -194,8 +194,7 @@ class TestWeReadClient:
                 await client._request("GET", "/api/v2/platform/mps/MP_WXS_test/articles")
 
         assert exc_info.value.status_code == 500
-        assert exc_info.value.response_text == '{"message":"id(931511154): WeReadError400"}'
-        assert "id(931511154): WeReadError400" in str(exc_info.value)
+        assert "internal server error" in str(exc_info.value)
 
     def test_set_token(self) -> None:
         """测试设置 token。"""
@@ -332,3 +331,84 @@ class TestWeReadAPIError:
         assert error.status_code == 500
         assert error.response_text is not None
         assert "id(931511154): WeReadError400" in str(error)
+
+
+class TestRateLimitError:
+    """限流错误测试。"""
+
+    def test_rate_limit_error_is_weread_error(self) -> None:
+        """RateLimitError 是 WeReadAPIError 的子类。"""
+        error = RateLimitError("请求被限流")
+        assert isinstance(error, WeReadAPIError)
+        assert isinstance(error, Exception)
+
+    def test_rate_limit_error_carries_context(self) -> None:
+        """RateLimitError 携带状态码和响应文本。"""
+        error = RateLimitError(
+            "请求被限流",
+            status_code=500,
+            response_text='{"message":"id(931511154): WeReadError400","statusCode":500}',
+        )
+        assert error.status_code == 500
+        assert "WeReadError400" in error.response_text
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_detected_immediately(self) -> None:
+        """限流响应应立即抛出 RateLimitError，不重试。"""
+        client = WeReadClient(base_url="https://api.example.com")
+        client.max_retries = 3  # 即使允许重试
+
+        call_count = 0
+
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_response = MagicMock()
+            mock_response.status_code = 500
+            mock_response.text = '{"message":"id(931511154): WeReadError400","statusCode":500}'
+            mock_response.raise_for_status = MagicMock(
+                side_effect=httpx.HTTPStatusError(
+                    "Error",
+                    request=MagicMock(),
+                    response=mock_response,
+                )
+            )
+
+            async def count_calls(*args, **kwargs):
+                nonlocal call_count
+                call_count += 1
+                return mock_response
+
+            mock_client.return_value.__aenter__.return_value.request = count_calls
+
+            with pytest.raises(RateLimitError) as exc_info:
+                await client._request("GET", "/api/v2/platform/mps/MP_WXS_test/articles")
+
+        # 应只调用一次，不重试
+        assert call_count == 1
+        assert "WeReadError400" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_non_rate_limit_500_still_retries(self) -> None:
+        """非限流的 500 错误仍然走正常重试逻辑。"""
+        client = WeReadClient(base_url="https://api.example.com")
+        client.max_retries = 2
+
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_response = MagicMock()
+            mock_response.status_code = 500
+            mock_response.text = '{"message":"internal server error"}'
+            mock_response.raise_for_status = MagicMock(
+                side_effect=httpx.HTTPStatusError(
+                    "Error",
+                    request=MagicMock(),
+                    response=mock_response,
+                )
+            )
+            mock_client.return_value.__aenter__.return_value.request = AsyncMock(
+                return_value=mock_response
+            )
+
+            with pytest.raises(WeReadAPIError) as exc_info:
+                await client._request("GET", "/api/v2/test")
+
+        # 非 RateLimitError，应为 WeReadAPIError
+        assert not isinstance(exc_info.value, RateLimitError)

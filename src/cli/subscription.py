@@ -6,7 +6,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
 from config.settings import get_settings
-from src.api.weread import WeReadClient
+from src.api.weread import RateLimitError, WeReadClient
 from src.cli.utils import console, run_async
 from src.services.auth import AuthService
 from src.services.fetcher import DEFAULT_LATEST_COUNT, FetcherService
@@ -271,14 +271,28 @@ def fetch(fetch_all: bool, days: int | None, full: bool, mp_id: str | None) -> N
 
         if fetch_all:
             # 抓取所有订阅
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                console=console,
-            ) as progress:
-                task = progress.add_task("抓取所有订阅...", total=None)
+            total_feeds = 0
+            try:
+                feeds = await subscription_service.list_subscriptions(active_only=True)
+                total_feeds = len(feeds)
 
-                results = await fetcher_service.fetch_all(days=days, latest_count=latest_count)
+                with Progress(
+                    SpinnerColumn(),
+                    TextColumn("[progress.description]{task.description}"),
+                    console=console,
+                ) as progress:
+                    task = progress.add_task("抓取所有订阅...", total=None)
+
+                    results = await fetcher_service.fetch_all(days=days, latest_count=latest_count)
+            except RateLimitError:
+                completed = len(results) if 'results' in dir() else 0
+                console.print(f"\n[yellow]已被限流，已完成 {completed}/{total_feeds} 个订阅[/yellow]")
+                console.print("[dim]请稍后重试: wchat fetch --all[/dim]")
+                if 'results' in dir():
+                    for feed_mp_id, articles in results.items():
+                        if articles:
+                            console.print(f"  {feed_mp_id}: {len(articles)} 篇")
+                return
 
             for feed_mp_id, articles in results.items():
                 if articles:
@@ -298,6 +312,9 @@ def fetch(fetch_all: bool, days: int | None, full: bool, mp_id: str | None) -> N
                         days=days,
                         latest_count=latest_count,
                     )
+            except RateLimitError:
+                console.print(f"\n[yellow]已被限流，请稍后重试: wchat fetch {mp_id}[/yellow]")
+                return
             except Exception as e:
                 console.print(f"\n[red]抓取失败: {e}[/red]")
                 return

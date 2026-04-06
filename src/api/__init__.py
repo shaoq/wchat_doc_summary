@@ -19,12 +19,13 @@ from src.api.providers import (
     WeReadArticleProvider,
     create_article_list_provider,
 )
-from src.api.weread import WeReadAPIError, WeReadClient
+from src.api.weread import RateLimitError, WeReadAPIError, WeReadClient
 
 __all__ = [
     # 微信读书 API
     "WeReadClient",
     "WeReadAPIError",
+    "RateLimitError",
     # 文章抓取
     "fetch_article_content",
     "parse_article_html",

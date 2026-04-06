@@ -10,7 +10,7 @@ from sqlalchemy import and_, or_, select
 
 from src.api.article import fetch_article_content, parse_article_html
 from src.api.providers import ArticleListProvider, create_article_list_provider
-from src.api.weread import WeReadAPIError, WeReadClient
+from src.api.weread import RateLimitError, WeReadAPIError, WeReadClient
 from src.models.schema import Article
 from src.services.subscription import SubscriptionService
 from src.storage.database import Database
@@ -250,6 +250,9 @@ class FetcherService:
                 article_list = [article.to_article_info() for article in page.articles]
                 return article_list[:latest_count], page.page_size
             except WeReadAPIError as e:
+                # 限流直接上抛，不缩小窗口重试
+                if isinstance(e, RateLimitError):
+                    raise
                 last_error = e
                 logger.warning(
                     "默认最新文章抓取失败，尝试缩小窗口: mp_id=%s, page_size=%s, error=%s",
@@ -404,6 +407,9 @@ class FetcherService:
             # Backfill publish_time for existing articles
             await self.backfill_publish_time(mp_id)
 
+        except RateLimitError:
+            logger.warning(f"限流中断抓取: {mp_id}")
+            raise
         except Exception as e:
             logger.error(f"API 错误: {e}")
             raise
@@ -513,6 +519,10 @@ class FetcherService:
             try:
                 articles = await self.fetch_feed(feed.mp_id, days=days, latest_count=latest_count)
                 results[feed.mp_id] = articles
+            except RateLimitError as e:
+                logger.warning(f"限流中断批量抓取: {feed.name} - {e}")
+                results[feed.mp_id] = []
+                break
             except Exception as e:
                 logger.error(f"抓取失败: {feed.name} - {e}")
                 results[feed.mp_id] = []

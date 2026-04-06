@@ -8,7 +8,7 @@ from src.services.subscription import SubscriptionService
 from src.services.fetcher import FetcherService, _normalize_publish_time_for_storage
 from src.services.auth import AuthService
 from src.services.ai_processor import AIProcessor
-from src.api.weread import WeReadAPIError
+from src.api.weread import RateLimitError, WeReadAPIError
 from src.models.schema import Feed, Article, Auth, ArticleProcessing
 
 
@@ -808,3 +808,113 @@ class TestArticleProcessing:
         repr_str = repr(processing)
         assert "ArticleProcessing" in repr_str
         assert "extract_stocks" in repr_str
+
+
+class TestRateLimitCircuitBreaker:
+    """限流熔断集成测试。"""
+
+    @pytest.fixture
+    def mock_weread_client(self) -> MagicMock:
+        return MagicMock()
+
+    @pytest.fixture
+    def mock_db(self) -> MagicMock:
+        return MagicMock()
+
+    @pytest.fixture
+    def mock_subscription_service(self) -> MagicMock:
+        return MagicMock()
+
+    @pytest.fixture
+    def fetcher_service(
+        self,
+        mock_weread_client: MagicMock,
+        mock_db: MagicMock,
+        mock_subscription_service: MagicMock,
+    ) -> FetcherService:
+        return FetcherService(
+            mock_weread_client, mock_db, mock_subscription_service
+        )
+
+    @pytest.mark.asyncio
+    async def test_fetch_feed_raises_rate_limit_error(
+        self,
+        fetcher_service: FetcherService,
+        mock_subscription_service: MagicMock,
+    ) -> None:
+        """fetch_feed 遇到限流时直接上抛 RateLimitError。"""
+        mock_subscription_service.get_subscription = AsyncMock(
+            return_value=Feed(id=1, mp_id="MP_WXS_test", name="测试", status=1)
+        )
+
+        mock_provider = MagicMock()
+        mock_provider.get_articles = AsyncMock(
+            side_effect=RateLimitError(
+                "请求被限流",
+                status_code=500,
+                response_text='{"message":"id(931511154): WeReadError400"}',
+            )
+        )
+        fetcher_service._providers = {"weread": mock_provider}
+
+        with pytest.raises(RateLimitError):
+            await fetcher_service.fetch_feed("MP_WXS_test", latest_count=10)
+
+    @pytest.mark.asyncio
+    async def test_fetch_all_stops_on_rate_limit(
+        self,
+        fetcher_service: FetcherService,
+        mock_subscription_service: MagicMock,
+    ) -> None:
+        """fetch_all 遇到限流时停止遍历，返回已完成的部分结果。"""
+        feed_1 = Feed(id=1, mp_id="MP_A", name="公众号A", status=1)
+        feed_2 = Feed(id=2, mp_id="MP_B", name="公众号B", status=1)
+        feed_3 = Feed(id=3, mp_id="MP_C", name="公众号C", status=1)
+
+        mock_subscription_service.list_subscriptions = AsyncMock(
+            return_value=[feed_1, feed_2, feed_3]
+        )
+
+        article_a = Article(id=1, feed_id=1, article_id="a1", title="文章A")
+
+        async def mock_fetch_feed(mp_id: str, **kwargs):
+            if mp_id == "MP_A":
+                return [article_a]
+            if mp_id == "MP_B":
+                raise RateLimitError("限流", status_code=500, response_text="WeReadError400")
+            return []
+
+        fetcher_service.fetch_feed = AsyncMock(side_effect=mock_fetch_feed)
+
+        results = await fetcher_service.fetch_all()
+
+        # MP_A 应成功
+        assert len(results["MP_A"]) == 1
+        # MP_B 应记录为空列表（熔断前的 catch）
+        assert results["MP_B"] == []
+        # MP_C 不应出现在结果中（熔断后跳过）
+        assert "MP_C" not in results
+
+    @pytest.mark.asyncio
+    async def test_narrow_retry_skipped_on_rate_limit(
+        self,
+        fetcher_service: FetcherService,
+        mock_subscription_service: MagicMock,
+    ) -> None:
+        """_get_latest_articles_with_retry 遇到 RateLimitError 不缩窗口重试。"""
+        mock_subscription_service.get_subscription = AsyncMock(
+            return_value=Feed(id=1, mp_id="MP_WXS_test", name="测试", status=1)
+        )
+
+        mock_provider = MagicMock()
+        mock_provider.supports_narrow_retry = True
+        mock_provider.get_articles = AsyncMock(
+            side_effect=RateLimitError("限流", status_code=500, response_text="WeReadError400")
+        )
+        fetcher_service._providers = {"weread": mock_provider}
+
+        with pytest.raises(RateLimitError):
+            await fetcher_service.fetch_feed("MP_WXS_test", latest_count=10)
+
+        # 应只调用一次（不重试）
+        assert mock_provider.get_articles.await_count == 1

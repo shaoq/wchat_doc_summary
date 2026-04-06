@@ -34,6 +34,14 @@ class WeReadAPIError(Exception):
         return " | ".join(details)
 
 
+class RateLimitError(WeReadAPIError):
+    """WeRead 代理限流错误。
+
+    当代理返回 HTTP 500 且包含 WeReadError400 时抛出，
+    表示请求被限流，不应继续重试。
+    """
+
+
 class WeReadClient:
     """微信读书代理 API 客户端。
 
@@ -115,6 +123,18 @@ class WeReadClient:
                         return {"status_code": response.status_code, "data": data}
                     return data
                 except httpx.HTTPStatusError as e:
+                    # 限流检测：500 + WeReadError400 → 立即抛出，不重试
+                    if (
+                        e.response.status_code == 500
+                        and "WeReadError400" in e.response.text
+                    ):
+                        logger.warning(f"限流检测: {e.response.text}")
+                        raise RateLimitError(
+                            f"请求被限流: {e.response.text}",
+                            status_code=e.response.status_code,
+                            response_text=e.response.text,
+                        ) from e
+
                     if log_http_errors:
                         log_fn = logger.error if attempt == max_retries else logger.warning
                         log_fn(
