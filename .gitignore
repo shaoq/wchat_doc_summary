@@ -50,6 +50,3 @@ output/
 
 # Claude local files
 .claude/ralph-loop.local.md
-
-# OpenSpec change management
-openspec/
