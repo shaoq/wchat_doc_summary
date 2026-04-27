@@ -1143,19 +1143,6 @@ class FinanceClient:
         if quality["status"] == "ok":
             return statistics, quality
 
-        try:
-            fallback = await self._get_statistics_from_spot_em()
-            total = fallback.get("up_count", 0) + fallback.get("down_count", 0) + fallback.get("flat_count", 0)
-            if total > 0:
-                return fallback, self._build_quality(
-                    status="ok",
-                    source=_AKSHARE_BREADTH_SOURCE,
-                    actual_count=quality.get("actual_count", 0),
-                    expected_count=quality.get("expected_count", 0),
-                )
-        except Exception as e:
-            logger.warning("涨跌统计旧链路兜底失败: %s", e)
-
         if quality.get("status") == "partial" and quality.get("actual_count", 0) > 0:
             return statistics, quality
 

@@ -628,7 +628,7 @@ class _BreadthPrimarySourceAnalyzer(_FakeAnalyzer):
 
 
 class _BreadthFallbackSourceAnalyzer(_FakeAnalyzer):
-    """宽度数据命中旧链路兜底的 analyzer。"""
+    """成交额命中旧链路兜底、涨跌统计命中 pytdx 的 analyzer。"""
 
     async def collect_market_data(self, offline=False, trade_date=None, force=False):
         return {
@@ -641,7 +641,7 @@ class _BreadthFallbackSourceAnalyzer(_FakeAnalyzer):
             "data_source": "api",
             "breadth_quality": {
                 "volume": {"status": "ok", "source": "akshare_spot_em", "actual_count": 5518, "expected_count": 5518},
-                "statistics": {"status": "ok", "source": "akshare_spot_em", "actual_count": 5518, "expected_count": 5518},
+                "statistics": {"status": "ok", "source": "pytdx_quotes", "actual_count": 5518, "expected_count": 5518},
             },
         }
 
@@ -661,7 +661,7 @@ def test_breadth_primary_source_label_displayed():
 
 
 def test_breadth_fallback_source_label_displayed():
-    """阶段 1 应展示旧链路兜底宽度标签。"""
+    """阶段 1 应展示成交额旧链路兜底 + pytdx 宽度标签。"""
     runner = CliRunner()
     with patch("src.cli.ai.get_db", new=_fake_get_db):
         with patch("src.cli.ai.MarketAnalyzer", _BreadthFallbackSourceAnalyzer):
@@ -671,7 +671,7 @@ def test_breadth_fallback_source_label_displayed():
                     ["ai", "market-summary", "--date", "2026-03-27", "--force"],
                 )
 
-    assert "宽度来源: 旧链路兜底 (AKShare)" in result.output
+    assert "宽度来源: 成交额旧链路兜底 + pytdx 统计" in result.output
 
 
 def test_market_stage_shows_component_level_statuses():
@@ -1317,7 +1317,7 @@ class _TqdmLeakingAnalyzer(_FakeAnalyzer):
             "data_source": "api",
             "breadth_quality": {
                 "volume": {"status": "ok", "source": "akshare_spot_em", "actual_count": 5518, "expected_count": 5518},
-                "statistics": {"status": "ok", "source": "akshare_spot_em", "actual_count": 5518, "expected_count": 5518},
+                "statistics": {"status": "ok", "source": "pytdx_quotes", "actual_count": 5518, "expected_count": 5518},
             },
         }
 

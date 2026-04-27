@@ -304,7 +304,7 @@ def _data_source_label(data_source: str) -> str:
 
 
 def _breadth_source_outcome_label(market_data: dict[str, Any]) -> str | None:
-    """汇总宽度数据来源结果，突出官方成交额、pytdx、旧链路兜底和降级空值。"""
+    """汇总宽度数据来源结果，突出官方成交额、pytdx、成交额旧链路兜底和降级空值。"""
     breadth_quality = market_data.get("breadth_quality", {})
     volume_quality = breadth_quality.get("volume", {})
     stats_quality = breadth_quality.get("statistics", {})
@@ -322,12 +322,8 @@ def _breadth_source_outcome_label(market_data: dict[str, Any]) -> str | None:
     if volume_status == "ok" and stats_status == "ok":
         if volume_source == "official_exchange_turnover" and stats_source == "pytdx_quotes":
             return "官方成交额 + pytdx 统计"
-        if volume_source == "official_exchange_turnover" and stats_source == "akshare_spot_em":
-            return "官方成交额 + 旧链路兜底"
         if volume_source == "akshare_spot_em" and stats_source == "pytdx_quotes":
-            return "pytdx 统计 + 旧链路兜底"
-        if volume_source == "akshare_spot_em" and stats_source == "akshare_spot_em":
-            return "旧链路兜底 (AKShare)"
+            return "成交额旧链路兜底 + pytdx 统计"
 
     fallback_parts = []
     if volume_status == "ok":
@@ -338,8 +334,6 @@ def _breadth_source_outcome_label(market_data: dict[str, Any]) -> str | None:
     if stats_status == "ok":
         if stats_source == "pytdx_quotes":
             fallback_parts.append("pytdx 统计")
-        elif stats_source == "akshare_spot_em":
-            fallback_parts.append("涨跌统计旧链路兜底")
     if fallback_parts:
         return " + ".join(fallback_parts)
 

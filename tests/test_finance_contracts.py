@@ -1166,20 +1166,21 @@ class TestLegacyFallbackRegression:
                 {"up_count": 1, "down_count": 1, "flat_count": 0},
                 {"status": "partial", "source": "pytdx_quotes", "actual_count": 100, "expected_count": 5518},
             ),
-        ):
-            with patch.object(
-                finance_client, "_get_statistics_from_spot_em",
-                new_callable=AsyncMock,
-                return_value={"up_count": 2, "down_count": 1, "flat_count": 0},
-            ):
-                statistics, quality = await finance_client._get_statistics_with_quality()
+        ), patch.object(
+            finance_client, "_get_statistics_from_spot_em",
+            new_callable=AsyncMock,
+            return_value={"up_count": 2, "down_count": 1, "flat_count": 0},
+        ) as mock_fallback:
+            statistics, quality = await finance_client._get_statistics_with_quality()
 
-        assert statistics["up_count"] == 2
-        assert quality["source"] == "akshare_spot_em"
+        assert statistics == {"up_count": 1, "down_count": 1, "flat_count": 0}
+        assert quality["source"] == "pytdx_quotes"
+        assert quality["status"] == "partial"
+        mock_fallback.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_statistics_fallback_failure_returns_zeros(self, finance_client):
-        """Regression: pytdx 与旧链路都失败时返回零值。"""
+        """Regression: pytdx error 时直接返回零值，不再尝试旧链路。"""
         with patch.object(
             finance_client, "_fetch_pytdx_statistics",
             new_callable=AsyncMock,
@@ -1187,13 +1188,13 @@ class TestLegacyFallbackRegression:
                 {"up_count": 1, "down_count": 1, "flat_count": 0},
                 {"status": "error", "source": "pytdx_quotes", "actual_count": 0, "expected_count": 5518},
             ),
-        ):
-            with patch.object(
-                finance_client, "_get_statistics_from_spot_em",
-                new_callable=AsyncMock,
-                side_effect=Exception("akshare fail"),
-            ):
-                statistics, quality = await finance_client._get_statistics_with_quality()
+        ), patch.object(
+            finance_client, "_get_statistics_from_spot_em",
+            new_callable=AsyncMock,
+            side_effect=Exception("akshare fail"),
+        ) as mock_fallback:
+            statistics, quality = await finance_client._get_statistics_with_quality()
 
         assert statistics == {"up_count": 0, "down_count": 0, "flat_count": 0}
         assert quality["status"] == "error"
+        mock_fallback.assert_not_awaited()

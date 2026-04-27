@@ -6,7 +6,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
 from config.settings import get_settings
-from src.api.weread import RateLimitError, WeReadClient
+from src.api.weread import AuthExpiredError, RateLimitError, WeReadClient
 from src.cli.utils import console, run_async
 from src.services.auth import AuthService
 from src.services.fetcher import DEFAULT_LATEST_COUNT, FetcherService
@@ -293,6 +293,9 @@ def fetch(fetch_all: bool, days: int | None, full: bool, mp_id: str | None) -> N
                         if articles:
                             console.print(f"  {feed_mp_id}: {len(articles)} 篇")
                 return
+            except AuthExpiredError:
+                console.print("\n[red]Token 已失效，请重新登录: wchat login[/red]")
+                return
 
             for feed_mp_id, articles in results.items():
                 if articles:
@@ -314,6 +317,9 @@ def fetch(fetch_all: bool, days: int | None, full: bool, mp_id: str | None) -> N
                     )
             except RateLimitError:
                 console.print(f"\n[yellow]已被限流，请稍后重试: wchat fetch {mp_id}[/yellow]")
+                return
+            except AuthExpiredError:
+                console.print("\n[red]Token 已失效，请重新登录: wchat login[/red]")
                 return
             except Exception as e:
                 console.print(f"\n[red]抓取失败: {e}[/red]")

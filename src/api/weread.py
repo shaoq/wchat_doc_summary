@@ -42,6 +42,14 @@ class RateLimitError(WeReadAPIError):
     """
 
 
+class AuthExpiredError(WeReadAPIError):
+    """WeRead Token 失效错误。
+
+    当代理返回 HTTP 401 且包含 WeReadError401 时抛出，
+    表示 Token 已失效，需要重新登录。
+    """
+
+
 class WeReadClient:
     """微信读书代理 API 客户端。
 
@@ -131,6 +139,18 @@ class WeReadClient:
                         logger.warning(f"限流检测: {e.response.text}")
                         raise RateLimitError(
                             f"请求被限流: {e.response.text}",
+                            status_code=e.response.status_code,
+                            response_text=e.response.text,
+                        ) from e
+
+                    # Token 失效检测：401 + WeReadError401 → 立即抛出，不重试
+                    if (
+                        e.response.status_code == 401
+                        and "WeReadError401" in e.response.text
+                    ):
+                        logger.warning(f"Token 失效: {e.response.text}")
+                        raise AuthExpiredError(
+                            f"Token 已失效: {e.response.text}",
                             status_code=e.response.status_code,
                             response_text=e.response.text,
                         ) from e
