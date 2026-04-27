@@ -83,7 +83,7 @@ class TestFetchBackfillDeduplication:
         )
 
         fetcher_service._fetch_and_save_article = AsyncMock(
-            side_effect=[article1, article2]
+            side_effect=[("inserted", article1), ("inserted", article2)]
         )
 
         # 追踪 backfill_publish_time 调用次数
@@ -119,8 +119,12 @@ class TestFetchBackfillDeduplication:
         )
         mock_subscription_service.update_sync_time = AsyncMock()
 
+        article1 = Article(id=1, feed_id=1, article_id="a1", title="文章1")
         mock_weread_client.get_articles = AsyncMock(
-            return_value={"articles": [], "page_size": 50}
+            return_value={"articles": [{"id": "a1", "title": "文章1"}], "page_size": 50}
+        )
+        fetcher_service._fetch_and_save_article = AsyncMock(
+            return_value=("inserted", article1)
         )
 
         fetcher_service.backfill_publish_time = AsyncMock(return_value=0)

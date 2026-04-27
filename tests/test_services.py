@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime, timedelta, timezone
 
 from src.services.subscription import SubscriptionService
-from src.services.fetcher import FetcherService, _normalize_publish_time_for_storage
+from src.services.fetcher import FetcherService, FetchSummary, _normalize_publish_time_for_storage
 from src.services.auth import AuthService
 from src.services.ai_processor import AIProcessor
 from src.api.weread import AuthExpiredError, RateLimitError, WeReadAPIError
@@ -221,7 +221,7 @@ class TestFetcherService:
         )
 
         saved_article = Article(id=1, feed_id=1, article_id="article_new", title="新文章")
-        fetcher_service._fetch_and_save_article = AsyncMock(return_value=saved_article)
+        fetcher_service._fetch_and_save_article = AsyncMock(return_value=("inserted", saved_article))
         fetcher_service.backfill_publish_time = AsyncMock(return_value=0)
 
         articles = await fetcher_service.fetch_feed("MP_WXS_test", days=5, max_pages=1)
@@ -275,7 +275,7 @@ class TestFetcherService:
         )
 
         saved_article = Article(id=1, feed_id=1, article_id="article_new", title="新文章")
-        fetcher_service._fetch_and_save_article = AsyncMock(return_value=saved_article)
+        fetcher_service._fetch_and_save_article = AsyncMock(return_value=("inserted", saved_article))
         fetcher_service.backfill_publish_time = AsyncMock(return_value=0)
 
         articles = await fetcher_service.fetch_incremental("MP_WXS_test", max_pages=3, page_size=2)
@@ -306,8 +306,8 @@ class TestFetcherService:
             }
         )
 
-        async def save_article(feed_id: int, article_info: dict) -> Article:
-            return Article(
+        async def save_article(feed_id: int, article_info: dict) -> tuple[str, Article]:
+            return "inserted", Article(
                 id=1,
                 feed_id=feed_id,
                 article_id=article_info["id"],
@@ -371,8 +371,8 @@ class TestFetcherService:
 
         mock_weread_client.get_articles = AsyncMock(side_effect=get_articles)
 
-        async def save_article(feed_id: int, article_info: dict) -> Article:
-            return Article(
+        async def save_article(feed_id: int, article_info: dict) -> tuple[str, Article]:
+            return "inserted", Article(
                 id=1,
                 feed_id=feed_id,
                 article_id=article_info["id"],
@@ -877,21 +877,21 @@ class TestRateLimitCircuitBreaker:
 
         article_a = Article(id=1, feed_id=1, article_id="a1", title="文章A")
 
-        async def mock_fetch_feed(mp_id: str, **kwargs):
+        async def mock_fetch_summary(mp_id: str, **kwargs):
             if mp_id == "MP_A":
-                return [article_a]
+                return FetchSummary(mp_id=mp_id, inserted_count=1, articles=[article_a])
             if mp_id == "MP_B":
                 raise RateLimitError("限流", status_code=500, response_text="WeReadError400")
-            return []
+            return FetchSummary(mp_id=mp_id)
 
-        fetcher_service.fetch_feed = AsyncMock(side_effect=mock_fetch_feed)
+        fetcher_service._fetch_incremental_or_init_summary = AsyncMock(side_effect=mock_fetch_summary)
 
         results = await fetcher_service.fetch_all()
 
         # MP_A 应成功
-        assert len(results["MP_A"]) == 1
-        # MP_B 应记录为空列表（熔断前的 catch）
-        assert results["MP_B"] == []
+        assert results["MP_A"].inserted_count == 1
+        # MP_B 应记录为 ERROR
+        assert results["MP_B"].final_state == "error"
         # MP_C 不应出现在结果中（熔断后跳过）
         assert "MP_C" not in results
 
@@ -956,7 +956,6 @@ class TestRateLimitCircuitBreaker:
         """fetch_all 遇到 Token 失效时停止遍历。"""
         feed_1 = Feed(id=1, mp_id="MP_A", name="A", status=1)
         feed_2 = Feed(id=2, mp_id="MP_B", name="B", status=1)
-
         feed_3 = Feed(id=3, mp_id="MP_C", name="C", status=1)
 
         mock_subscription_service.list_subscriptions = AsyncMock(
@@ -965,20 +964,16 @@ class TestRateLimitCircuitBreaker:
 
         article_a = Article(id=1, feed_id=1, article_id="a1", title="文章A")
 
-        mock_fetch_feed_responses = {
-            "MP_A": [article_a],
-        }
-
-        async def mock_fetch_feed(mp_id: str, **kwargs):
+        async def mock_fetch_summary(mp_id: str, **kwargs):
             if mp_id == "MP_A":
-                return [article_a]
+                return FetchSummary(mp_id=mp_id, inserted_count=1, articles=[article_a])
             raise AuthExpiredError("Token 失效", status_code=401, response_text="WeReadError401")
 
-        fetcher_service.fetch_feed = AsyncMock(side_effect=mock_fetch_feed)
+        fetcher_service._fetch_incremental_or_init_summary = AsyncMock(side_effect=mock_fetch_summary)
         results = await fetcher_service.fetch_all()
 
-        assert len(results["MP_A"]) == 1
-        assert results["MP_B"] == []
+        assert results["MP_A"].inserted_count == 1
+        assert results["MP_B"].final_state == "error"
         assert "MP_C" not in results
 
 class TestAuthExpiredCircuitBreaker:
@@ -1050,14 +1045,14 @@ class TestAuthExpiredCircuitBreaker:
 
         article_a = Article(id=1, feed_id=1, article_id="a1", title="文章A")
 
-        async def mock_fetch_feed(mp_id: str, **kwargs):
+        async def mock_fetch_summary(mp_id: str, **kwargs):
             if mp_id == "MP_A":
-                return [article_a]
+                return FetchSummary(mp_id=mp_id, inserted_count=1, articles=[article_a])
             raise AuthExpiredError("Token 失效", status_code=401, response_text="WeReadError401")
 
-        fetcher_service.fetch_feed = AsyncMock(side_effect=mock_fetch_feed)
+        fetcher_service._fetch_incremental_or_init_summary = AsyncMock(side_effect=mock_fetch_summary)
         results = await fetcher_service.fetch_all()
 
-        assert len(results["MP_A"]) == 1
-        assert results["MP_B"] == []
+        assert results["MP_A"].inserted_count == 1
+        assert results["MP_B"].final_state == "error"
         assert "MP_C" not in results

@@ -9,7 +9,7 @@ from config.settings import get_settings
 from src.api.weread import AuthExpiredError, RateLimitError, WeReadClient
 from src.cli.utils import console, run_async
 from src.services.auth import AuthService
-from src.services.fetcher import DEFAULT_LATEST_COUNT, FetcherService
+from src.services.fetcher import DEFAULT_LATEST_COUNT, FetchFinalState, FetchSummary, FetcherService
 from src.services.subscription import SubscriptionService
 from src.storage.database import get_db
 
@@ -17,6 +17,29 @@ from src.storage.database import get_db
 def _provider_requires_weread_auth(provider_name: str) -> bool:
     """判断指定 Provider 是否依赖 WeRead 登录。"""
     return provider_name == "weread"
+
+
+def _print_fetch_summary(mp_id: str, summary: FetchSummary) -> None:
+    """格式化输出单个订阅的抓取摘要。"""
+    if summary.final_state == FetchFinalState.SUSPICIOUS_EMPTY:
+        console.print(f"  {mp_id}: [yellow]可疑空结果（重试后仍为空）[/yellow]")
+        return
+    if summary.final_state == FetchFinalState.ERROR:
+        console.print(f"  {mp_id}: [red]抓取失败[/red]")
+        return
+    if summary.final_state == FetchFinalState.EMPTY_RESULT:
+        console.print(f"  {mp_id}: [dim]上游返回空结果[/dim]")
+        return
+    if summary.final_state == FetchFinalState.NO_NEW:
+        console.print(f"  {mp_id}: [dim]无新增（已存在 {summary.existing_count} 篇）[/dim]")
+        return
+    # SUCCESS
+    parts = [f"{summary.inserted_count} 篇新增"]
+    if summary.existing_count:
+        parts.append(f"{summary.existing_count} 篇已存在")
+    if summary.failed_count:
+        parts.append(f"[red]{summary.failed_count} 篇失败[/red]")
+    console.print(f"  {mp_id}: [green]{', '.join(parts)}[/green]")
 
 
 def _resolve_feed_provider(mp_id: str, provider_name: str | None, default_provider: str) -> str:
@@ -265,6 +288,8 @@ def fetch(fetch_all: bool, days: int | None, full: bool, mp_id: str | None) -> N
             console.print("[cyan]抓取范围: 全部历史[/cyan]")
         elif days is not None:
             console.print(f"[cyan]抓取范围: 最近 {days} 天[/cyan]")
+        elif fetch_all:
+            console.print("[cyan]抓取范围: 批量增量同步[/cyan]")
         else:
             latest_count = DEFAULT_LATEST_COUNT
             console.print(f"[cyan]抓取范围: 最新 {latest_count} 条[/cyan]")
@@ -289,17 +314,15 @@ def fetch(fetch_all: bool, days: int | None, full: bool, mp_id: str | None) -> N
                 console.print(f"\n[yellow]已被限流，已完成 {completed}/{total_feeds} 个订阅[/yellow]")
                 console.print("[dim]请稍后重试: wchat fetch --all[/dim]")
                 if 'results' in dir():
-                    for feed_mp_id, articles in results.items():
-                        if articles:
-                            console.print(f"  {feed_mp_id}: {len(articles)} 篇")
+                    for feed_mp_id, summary in results.items():
+                        _print_fetch_summary(feed_mp_id, summary)
                 return
             except AuthExpiredError:
                 console.print("\n[red]Token 已失效，请重新登录: wchat login[/red]")
                 return
 
-            for feed_mp_id, articles in results.items():
-                if articles:
-                    console.print(f"  {feed_mp_id}: {len(articles)} 篇")
+            for feed_mp_id, summary in results.items():
+                _print_fetch_summary(feed_mp_id, summary)
 
         elif mp_id:
             # 抓取指定公众号

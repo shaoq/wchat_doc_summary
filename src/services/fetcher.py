@@ -1,7 +1,10 @@
 """文章抓取服务 - 从微信公众号抓取文章并保存到数据库。"""
 
+import asyncio
 import hashlib
 import logging
+import random
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -20,6 +23,33 @@ from config.settings import get_settings
 logger = logging.getLogger(__name__)
 
 DEFAULT_LATEST_COUNT = 10
+BATCH_INIT_COUNT = 10  # 未初始化订阅的批量初始化抓取条数
+BATCH_BASE_DELAY = 3.0  # 订阅间基础等待秒数
+BATCH_JITTER = 2.0  # 随机抖动上限秒数
+BATCH_BACKOFF_FACTOR = 2.0  # 异常后退避倍数
+
+
+class FetchFinalState:
+    """抓取最终状态常量。"""
+    SUCCESS = "success"
+    NO_NEW = "no_new"
+    EMPTY_RESULT = "empty_result"
+    SUSPICIOUS_EMPTY = "suspicious_empty"
+    ERROR = "error"
+
+
+@dataclass
+class FetchSummary:
+    """单次抓取结果摘要。"""
+
+    mp_id: str
+    list_returned_count: int = 0
+    inserted_count: int = 0
+    existing_count: int = 0
+    failed_count: int = 0
+    suspicious_empty_retried: bool = False
+    final_state: str = FetchFinalState.SUCCESS
+    articles: list[Article] = field(default_factory=list)
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 
 
@@ -283,6 +313,47 @@ class FetcherService:
         provider_page = await provider.get_articles(mp_id, page=page, page_size=page_size, **kwargs)
         return [item.to_article_info() for item in provider_page.articles], provider_page.page_size
 
+    async def _get_article_page_with_suspicious_retry(
+        self,
+        mp_id: str,
+        *,
+        provider: ArticleListProvider,
+        page: int,
+        page_size: int,
+        max_retries: int = 2,
+        base_delay: float = 2.0,
+        **kwargs: Any,
+    ) -> tuple[list[dict[str, Any]], int, bool]:
+        """获取文章页，对第一页空结果执行有限重试。
+
+        Returns:
+            (articles, page_size, was_suspicious_empty)
+        """
+        article_list, current_page_size = await self._get_article_page(
+            mp_id, provider=provider, page=page, page_size=page_size, **kwargs,
+        )
+
+        if article_list or page != 1:
+            return article_list, current_page_size, False
+
+        # 第一页为空 → 可疑空页，有限重试
+        for attempt in range(1, max_retries + 1):
+            delay = base_delay * attempt
+            logger.warning(
+                "可疑空页重试: mp_id=%s, page=%s, attempt=%d/%d, delay=%.1fs",
+                mp_id, page, attempt, max_retries, delay,
+            )
+            await asyncio.sleep(delay)
+            article_list, current_page_size = await self._get_article_page(
+                mp_id, provider=provider, page=page, page_size=page_size, **kwargs,
+            )
+            if article_list:
+                logger.info(f"可疑空页重试成功: mp_id={mp_id}, attempt={attempt}")
+                return article_list, current_page_size, True
+
+        logger.warning(f"可疑空页重试后仍为空: mp_id={mp_id}, retries={max_retries}")
+        return [], current_page_size, True
+
     def _get_article_storage_id(self, article_info: dict[str, Any]) -> str | None:
         """为不同 Provider 生成稳定的文章唯一键。"""
         direct_id = article_info.get("id") or article_info.get("article_id")
@@ -320,6 +391,20 @@ class FetcherService:
         Returns:
             抓取到的文章列表
         """
+        summary = await self._fetch_feed_summary(
+            mp_id, max_pages=max_pages, days=days, page_size=page_size, latest_count=latest_count,
+        )
+        return summary.articles
+
+    async def _fetch_feed_summary(
+        self,
+        mp_id: str,
+        max_pages: int = 5,
+        days: int | None = None,
+        page_size: int | None = None,
+        latest_count: int | None = None,
+    ) -> FetchSummary:
+        """抓取指定公众号的文章并返回详细摘要。"""
         if page_size is None:
             page_size = get_settings().fetch_page_size
 
@@ -335,7 +420,8 @@ class FetcherService:
         feed = await self._get_feed_or_raise(mp_id)
         provider = self._get_provider(self._resolve_feed_provider(mp_id, feed.provider))
 
-        articles: list[Article] = []
+        summary = FetchSummary(mp_id=mp_id)
+        inserted: list[Article] = []
 
         # 计算时间截止点
         cutoff_time = None
@@ -349,23 +435,27 @@ class FetcherService:
                     latest_count,
                     provider,
                 )
+                summary.list_returned_count = len(article_list)
                 for article_info in article_list:
-                    article = await self._fetch_and_save_article(feed.id, article_info)
-                    if article:
-                        articles.append(article)
+                    status, article = await self._fetch_and_save_article(feed.id, article_info)
+                    if status == "inserted":
+                        inserted.append(article)  # type: ignore[arg-type]
+                    self._update_summary_counts(summary, status)
 
                 await self.subscription_service.update_sync_time(mp_id)
-                logger.info(f"抓取完成: {len(articles)} 篇文章")
+                summary.final_state = self._determine_state(summary)
+                logger.info(f"抓取完成: {summary.inserted_count} 篇新文章")
                 await self.backfill_publish_time(
                     mp_id,
                     page_size=latest_count,
                     max_pages=1,
                 )
-                return articles
+                summary.articles = inserted
+                return summary
 
             for page in range(1, max_pages + 1):
-                # 获取文章列表
-                article_list, current_page_size = await self._get_article_page(
+                # 获取文章列表（第一页使用可疑空页重试）
+                article_list, current_page_size, was_suspicious = await self._get_article_page_with_suspicious_retry(
                     mp_id,
                     provider=provider,
                     page=page,
@@ -373,8 +463,15 @@ class FetcherService:
                 )
 
                 if not article_list:
+                    if was_suspicious and page == 1:
+                        logger.warning(f"可疑空页放弃，不更新 sync_time: {mp_id}")
+                        summary.suspicious_empty_retried = True
+                        summary.final_state = FetchFinalState.SUSPICIOUS_EMPTY
+                        return summary
                     logger.info(f"第 {page} 页无文章，停止抓取")
                     break
+
+                summary.list_returned_count += len(article_list)
 
                 # 时间过滤：检查是否所有文章都早于截止时间
                 if cutoff_time and self._page_all_older_than_cutoff(article_list, cutoff_time):
@@ -383,44 +480,64 @@ class FetcherService:
 
                 # 抓取每篇文章内容
                 for article_info in article_list:
-                    # 时间过滤：跳过早于截止时间的文章
                     if cutoff_time:
                         publish_time = _get_publish_time_from_info(article_info)
                         if publish_time is not None and publish_time < cutoff_time:
                             logger.debug(f"跳过早期文章: {article_info.get('title', '')}")
                             continue
 
-                    article = await self._fetch_and_save_article(feed.id, article_info)
-                    if article:
-                        articles.append(article)
+                    status, article = await self._fetch_and_save_article(feed.id, article_info)
+                    if status == "inserted":
+                        inserted.append(article)  # type: ignore[arg-type]
+                    self._update_summary_counts(summary, status)
 
-                # 检查是否还有更多页
                 if len(article_list) < current_page_size:
                     logger.info(f"已获取所有文章，共 {page} 页")
                     break
 
-            # 更新同步时间
             await self.subscription_service.update_sync_time(mp_id)
-
-            logger.info(f"抓取完成: {len(articles)} 篇文章")
-
-            # Backfill publish_time for existing articles
+            summary.final_state = self._determine_state(summary)
+            logger.info(f"抓取完成: {summary.inserted_count} 篇新文章")
             await self.backfill_publish_time(mp_id)
 
         except (RateLimitError, AuthExpiredError):
+            summary.final_state = FetchFinalState.ERROR
             logger.warning(f"不可恢复错误中断抓取: {mp_id}")
             raise
         except Exception as e:
+            summary.final_state = FetchFinalState.ERROR
             logger.error(f"API 错误: {e}")
             raise
 
-        return articles
+        summary.articles = inserted
+        return summary
+
+    @staticmethod
+    def _update_summary_counts(summary: FetchSummary, status: str) -> None:
+        """根据单篇文章状态更新摘要计数。"""
+        if status == "inserted":
+            summary.inserted_count += 1
+        elif status == "existing":
+            summary.existing_count += 1
+        elif status == "failed":
+            summary.failed_count += 1
+
+    @staticmethod
+    def _determine_state(summary: FetchSummary) -> str:
+        """根据摘要计数确定最终状态。"""
+        if summary.suspicious_empty_retried:
+            return FetchFinalState.SUSPICIOUS_EMPTY
+        if summary.inserted_count > 0:
+            return FetchFinalState.SUCCESS
+        if summary.list_returned_count == 0:
+            return FetchFinalState.EMPTY_RESULT
+        return FetchFinalState.NO_NEW
 
     async def _fetch_and_save_article(
         self,
         feed_id: int,
         article_info: dict[str, Any],
-    ) -> Article | None:
+    ) -> tuple[str, Article | None]:
         """抓取并保存单篇文章。
 
         Args:
@@ -428,7 +545,7 @@ class FetcherService:
             article_info: 文章基本信息（从 API 获取）
 
         Returns:
-            保存的 Article 对象，失败返回 None
+            (status, article) 其中 status 为 "inserted"/"existing"/"failed"
         """
         article_id = self._get_article_storage_id(article_info)
         title = article_info.get("title", "无标题")
@@ -439,7 +556,7 @@ class FetcherService:
 
         if not article_id:
             logger.warning(f"文章缺少 ID: {title}")
-            return None
+            return "failed", None
 
         try:
             # 检查是否已存在
@@ -458,7 +575,7 @@ class FetcherService:
                 existing = result.scalar_one_or_none()
                 if existing:
                     logger.debug(f"文章已存在: {title}")
-                    return existing
+                    return "existing", existing
 
             # 抓取文章内容
             html = content_html or await fetch_article_content(original_url or article_id)
@@ -485,17 +602,17 @@ class FetcherService:
                 await session.refresh(article)
 
             logger.info(f"保存文章成功: {article.title[:30]}...")
-            return article
+            return "inserted", article
 
         except Exception as e:
             logger.error(f"抓取文章失败: {title} - {e}")
-            return None
+            return "failed", None
 
     async def fetch_all(
         self,
         days: int | None = None,
         latest_count: int | None = None,
-    ) -> dict[str, list[Article]]:
+    ) -> dict[str, FetchSummary]:
         """抓取所有已订阅公众号的文章。
 
         Args:
@@ -503,7 +620,7 @@ class FetcherService:
             latest_count: 仅抓取每个订阅的最新 N 条文章，None 表示不启用
 
         Returns:
-            字典，key 为 mp_id，value 为文章列表
+            字典，key 为 mp_id，value 为 FetchSummary
         """
         if latest_count is not None:
             logger.info(f"开始抓取所有订阅 (每个订阅最新 {latest_count} 条)")
@@ -511,26 +628,67 @@ class FetcherService:
             logger.info(f"开始抓取所有订阅 (最近 {days if days else '全部'} 天)")
 
         feeds = await self.subscription_service.list_subscriptions(active_only=True)
-        results: dict[str, list[Article]] = {}
+        results: dict[str, FetchSummary] = {}
+        backoff_delay = BATCH_BASE_DELAY
 
         for feed in feeds:
             if not feed.mp_id:
                 continue
             try:
-                articles = await self.fetch_feed(feed.mp_id, days=days, latest_count=latest_count)
-                results[feed.mp_id] = articles
+                if latest_count is not None or days is not None:
+                    summary = await self._fetch_feed_summary(
+                        feed.mp_id, days=days, latest_count=latest_count,
+                    )
+                else:
+                    summary = await self._fetch_incremental_or_init_summary(feed.mp_id)
+                results[feed.mp_id] = summary
+                backoff_delay = BATCH_BASE_DELAY
             except (RateLimitError, AuthExpiredError) as e:
                 logger.warning(f"不可恢复错误中断批量抓取: {feed.name} - {e}")
-                results[feed.mp_id] = []
+                results[feed.mp_id] = FetchSummary(
+                    mp_id=feed.mp_id, final_state=FetchFinalState.ERROR,
+                )
                 break
             except Exception as e:
                 logger.error(f"抓取失败: {feed.name} - {e}")
-                results[feed.mp_id] = []
+                results[feed.mp_id] = FetchSummary(
+                    mp_id=feed.mp_id, final_state=FetchFinalState.ERROR,
+                )
+                backoff_delay = min(backoff_delay * BATCH_BACKOFF_FACTOR, 30.0)
 
-        total = sum(len(a) for a in results.values())
-        logger.info(f"全部抓取完成: {total} 篇文章")
+            # 订阅间等待 + 抖动（最后一个订阅不等）
+            if feed != feeds[-1] and feed.mp_id:
+                jitter = random.uniform(0, BATCH_JITTER)
+                wait = backoff_delay + jitter
+                logger.debug(f"订阅间等待 {wait:.1f}s")
+                await asyncio.sleep(wait)
+
+        total = sum(s.inserted_count for s in results.values())
+        logger.info(f"全部抓取完成: {total} 篇新文章")
 
         return results
+
+    async def _fetch_incremental_or_init(
+        self,
+        mp_id: str,
+    ) -> list[Article]:
+        """批量模式的默认抓取路径：优先增量同步，未初始化时退化为有界初始化。"""
+        summary = await self._fetch_incremental_or_init_summary(mp_id)
+        return summary.articles
+
+    async def _fetch_incremental_or_init_summary(
+        self,
+        mp_id: str,
+    ) -> FetchSummary:
+        """批量模式的默认抓取路径，返回摘要。"""
+        feed = await self._get_feed_or_raise(mp_id)
+        latest_time = await self._get_latest_publish_time(feed.id)
+
+        if latest_time is None:
+            logger.info(f"订阅未初始化，退化为最新 {BATCH_INIT_COUNT} 条初始化抓取: {mp_id}")
+            return await self._fetch_feed_summary(mp_id, latest_count=BATCH_INIT_COUNT)
+
+        return await self._fetch_incremental_summary(mp_id)
 
     async def fetch_incremental(
         self,
@@ -539,6 +697,16 @@ class FetcherService:
         page_size: int | None = None,
     ) -> list[Article]:
         """增量抓取（只获取新文章）。"""
+        summary = await self._fetch_incremental_summary(mp_id, max_pages=max_pages, page_size=page_size)
+        return summary.articles
+
+    async def _fetch_incremental_summary(
+        self,
+        mp_id: str,
+        max_pages: int = 5,
+        page_size: int | None = None,
+    ) -> FetchSummary:
+        """增量抓取，返回详细摘要。"""
         if page_size is None:
             page_size = get_settings().fetch_page_size
 
@@ -548,15 +716,17 @@ class FetcherService:
 
         if latest_time is None:
             logger.info(f"未找到已抓取文章，增量抓取退化为全量抓取: {mp_id}")
-            return await self.fetch_feed(mp_id, max_pages=max_pages, days=None, page_size=page_size)
+            return await self._fetch_feed_summary(mp_id, max_pages=max_pages, days=None, page_size=page_size)
 
         logger.info(f"开始增量抓取: mp_id={mp_id}, latest_time={latest_time.isoformat()}")
 
-        articles: list[Article] = []
+        summary = FetchSummary(mp_id=mp_id)
+        inserted: list[Article] = []
         should_stop = False
+        suspicious_empty = False
 
         for page in range(1, max_pages + 1):
-            article_list, current_page_size = await self._get_article_page(
+            article_list, current_page_size, was_suspicious = await self._get_article_page_with_suspicious_retry(
                 mp_id,
                 provider=provider,
                 page=page,
@@ -564,27 +734,39 @@ class FetcherService:
             )
 
             if not article_list:
+                if was_suspicious and page == 1:
+                    suspicious_empty = True
                 break
+
+            summary.list_returned_count += len(article_list)
 
             for article_info in article_list:
                 publish_time = _get_publish_time_from_info(article_info)
 
-                # 保守策略：缺失发布时间不作为停止依据，但仍尝试抓取和后续回填
                 if publish_time is not None and publish_time <= latest_time:
                     should_stop = True
                     continue
 
-                article = await self._fetch_and_save_article(feed.id, article_info)
-                if article:
-                    articles.append(article)
+                status, article = await self._fetch_and_save_article(feed.id, article_info)
+                if status == "inserted":
+                    inserted.append(article)  # type: ignore[arg-type]
+                self._update_summary_counts(summary, status)
 
             if should_stop or len(article_list) < current_page_size:
                 break
 
-        await self.subscription_service.update_sync_time(mp_id)
-        await self.backfill_publish_time(mp_id)
-        logger.info(f"增量抓取完成: {len(articles)} 篇新文章")
-        return articles
+        summary.suspicious_empty_retried = suspicious_empty
+        if suspicious_empty:
+            summary.final_state = FetchFinalState.SUSPICIOUS_EMPTY
+            logger.warning(f"可疑空页放弃，不更新 sync_time: {mp_id}")
+        else:
+            summary.final_state = self._determine_state(summary)
+            await self.subscription_service.update_sync_time(mp_id)
+            await self.backfill_publish_time(mp_id)
+
+        summary.articles = inserted
+        logger.info(f"增量抓取完成: {summary.inserted_count} 篇新文章")
+        return summary
 
     async def backfill_publish_time(
         self,

@@ -369,12 +369,11 @@ class WeReadClient:
             }
 
         if not isinstance(response, dict):
-            return {
-                "articles": [],
-                "total": 0,
-                "page": page,
-                "page_size": page_size,
-            }
+            raise WeReadAPIError(
+                f"文章列表响应格式异常，期望 dict 或 list，得到: {type(response).__name__}",
+                status_code=None,
+                response_text=str(response)[:200],
+            )
 
         return {
             "articles": response.get("articles", []),
