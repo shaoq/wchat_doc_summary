@@ -42,6 +42,9 @@ _SZSE_TURNOVER_SOURCE = "official_szse_turnover"
 _OFFICIAL_TURNOVER_SOURCE = "official_exchange_turnover"
 _PYTDX_STATS_SOURCE = "pytdx_quotes"
 _AKSHARE_BREADTH_SOURCE = "akshare_spot_em"
+_NEAR_COMPLETE_ABS_THRESHOLD = 50
+_NEAR_COMPLETE_PCT_THRESHOLD = 0.01
+_RECOVERY_MAX_ROUNDS = 2
 
 
 @contextlib.contextmanager
@@ -495,6 +498,64 @@ class FinanceClient:
             "flat_count": flat_count,
         }, actual_count
 
+    def _recover_pytdx_missing(
+        self,
+        api: Any,
+        missing_universe: list[tuple[int, str]],
+    ) -> list[dict[str, Any]]:
+        """对缺失证券执行有限轮次的定向补抓。"""
+        recovered: list[dict[str, Any]] = []
+        remaining = list(missing_universe)
+
+        for round_num in range(1, _RECOVERY_MAX_ROUNDS + 1):
+            if not remaining:
+                break
+            round_quotes: list[dict[str, Any]] = []
+            for start in range(0, len(remaining), _PYTDX_BATCH_SIZE):
+                batch = remaining[start:start + _PYTDX_BATCH_SIZE]
+                try:
+                    quotes = api.get_security_quotes(batch)
+                    if isinstance(quotes, list):
+                        round_quotes.extend(quotes)
+                except Exception as e:
+                    logger.warning("pytdx 补抓第 %d 轮失败: %s", round_num, e)
+
+            if not round_quotes:
+                break
+
+            recovered.extend(round_quotes)
+            recovered_codes = {
+                str(item.get("code", ""))
+                for item in round_quotes
+                if isinstance(item, Mapping)
+            }
+            prev_remaining = len(remaining)
+            remaining = [(m, c) for m, c in remaining if c not in recovered_codes]
+            logger.info(
+                "pytdx 补抓第 %d 轮: 恢复 %d, 仍缺失 %d",
+                round_num, prev_remaining - len(remaining), len(remaining),
+            )
+
+        if recovered:
+            logger.info("pytdx 补抓完成: 共恢复 %d 条", len(recovered))
+        return recovered
+
+    @staticmethod
+    def _determine_statistics_quality(actual_count: int, expected_count: int) -> str:
+        """判定涨跌统计质量状态（四态模型: ok / near-complete / partial / error）。"""
+        if expected_count == 0:
+            return "error"
+        if actual_count >= expected_count:
+            return "ok"
+        if actual_count == 0:
+            return "error"
+        gap = expected_count - actual_count
+        threshold = max(
+            _NEAR_COMPLETE_ABS_THRESHOLD,
+            int(expected_count * _NEAR_COMPLETE_PCT_THRESHOLD),
+        )
+        return "near-complete" if gap <= threshold else "partial"
+
     def _fetch_pytdx_statistics_sync(self) -> tuple[dict[str, int], dict[str, Any]]:
         error_quality = self._build_quality(status="error", source=_PYTDX_STATS_SOURCE)
         try:
@@ -520,8 +581,26 @@ class FinanceClient:
                         if isinstance(quotes, list):
                             quotes_rows.extend(quotes)
 
+                    # 识别首轮缺失并定向补抓
+                    fetched_codes = {
+                        str(item.get("code", ""))
+                        for item in quotes_rows
+                        if isinstance(item, Mapping)
+                    }
+                    missing_universe = [
+                        (m, c) for m, c in universe if c not in fetched_codes
+                    ]
+                    if missing_universe:
+                        logger.info(
+                            "pytdx 首轮缺失 %d/%d, 开始补抓",
+                            len(missing_universe), expected_count,
+                        )
+                        quotes_rows.extend(
+                            self._recover_pytdx_missing(api, missing_universe)
+                        )
+
                     statistics, actual_count = self._compute_statistics_from_pytdx_quotes(quotes_rows)
-                    status = "ok" if actual_count >= expected_count else ("partial" if actual_count > 0 else "error")
+                    status = self._determine_statistics_quality(actual_count, expected_count)
                     return statistics, self._build_quality(
                         status=status,
                         source=_PYTDX_STATS_SOURCE,
@@ -586,7 +665,7 @@ class FinanceClient:
             return None
         return raw / 100
 
-    def _normalize_sector_rows(self, rows: list[dict[str, Any]], top_n: int = 5) -> dict[str, list]:
+    def _normalize_sector_rows(self, rows: list[dict[str, Any]], top_n: int = 10) -> dict[str, list]:
         """将不同板块源的记录统一为 contract。"""
         normalized: list[dict[str, Any]] = []
         for item in rows:
@@ -617,7 +696,7 @@ class FinanceClient:
             "bottom_sectors": sorted_rows[-top_n:],
         }
 
-    def _normalize_limit_up_rows(self, rows: list[dict[str, Any]], limit: int = 20) -> list[dict[str, Any]]:
+    def _normalize_limit_up_rows(self, rows: list[dict[str, Any]], limit: int | None = None) -> list[dict[str, Any]]:
         """将不同涨停股源的记录统一为 contract。"""
         normalized: list[dict[str, Any]] = []
         for item in rows:
@@ -641,7 +720,7 @@ class FinanceClient:
             normalized.append(stock)
 
         normalized.sort(key=lambda x: x["change"], reverse=True)
-        return normalized[:limit]
+        return normalized[:limit] if limit is not None else normalized
 
     def _records_from_dataframe(self, data: Any) -> list[dict[str, Any]]:
         """从 dataframe 风格对象提取 records，并拒绝协程式 mock。"""
@@ -679,17 +758,17 @@ class FinanceClient:
                 }
         return indices
 
-    async def _get_sector_data_from_stock_sector_spot(self, top_n: int = 5) -> dict[str, list]:
+    async def _get_sector_data_from_stock_sector_spot(self, top_n: int = 10) -> dict[str, list]:
         df = await self._retry_request(ak.stock_sector_spot, indicator="概念")
         rows = self._records_from_dataframe(df)
         return self._normalize_sector_rows(rows, top_n=top_n)
 
-    async def _get_sector_data_from_board_name_em(self, top_n: int = 5) -> dict[str, list]:
+    async def _get_sector_data_from_board_name_em(self, top_n: int = 10) -> dict[str, list]:
         df = await self._retry_request(ak.stock_board_concept_name_em)
         rows = self._records_from_dataframe(df)
         return self._normalize_sector_rows(rows, top_n=top_n)
 
-    async def _get_sector_data_from_eastmoney(self, top_n: int = 5) -> dict[str, list]:
+    async def _get_sector_data_from_eastmoney(self, top_n: int = 10) -> dict[str, list]:
         loop = asyncio.get_event_loop()
         data = await loop.run_in_executor(None, self._eastmoney.get_board_list)
         stocks = self._normalize_stock_snapshot({"data": {"diff": data.get("data", {}).get("diff", [])}}) if isinstance(data, Mapping) else []
@@ -722,7 +801,7 @@ class FinanceClient:
         df = await self._retry_request(ak.stock_zh_a_spot_em)
         rows = [
             row.to_dict()
-            for _, row in df[df["涨跌幅"] >= 9.9].head(20).iterrows()
+            for _, row in df[df["涨跌幅"] >= 9.9].iterrows()
         ]
         return self._normalize_limit_up_rows(rows)
 
@@ -1140,7 +1219,7 @@ class FinanceClient:
             )
 
         statistics, quality = await self._fetch_pytdx_statistics()
-        if quality["status"] == "ok":
+        if quality["status"] in ("ok", "near-complete"):
             return statistics, quality
 
         if quality.get("status") == "partial" and quality.get("actual_count", 0) > 0:
@@ -1174,7 +1253,7 @@ class FinanceClient:
             logger.warning("获取涨跌统计失败: %s", e)
             return {"up_count": 0, "down_count": 0, "flat_count": 0}
 
-    async def get_sector_data(self, top_n: int = 5) -> dict[str, list]:
+    async def get_sector_data(self, top_n: int = 10) -> dict[str, list]:
         """获取板块涨跌数据。
 
         优先使用专用板块 adapter，失败时按策略降级。
@@ -1199,20 +1278,42 @@ class FinanceClient:
 
         优先使用专用涨停池 adapter，失败时按策略降级。
         """
-        if _DISABLE_NETWORK:
-            return []
+        stocks, _ = await self._get_limit_up_with_quality(trade_date=trade_date)
+        return stocks
 
-        adapters = [
-            (self.SOURCE_STRATEGIES["limit_up"][0], lambda: self._get_limit_up_from_zt_pool(trade_date=trade_date)),
-            (self.SOURCE_STRATEGIES["limit_up"][1], self._get_limit_up_from_snapshot),
-            (self.SOURCE_STRATEGIES["limit_up"][2], self._get_limit_up_from_spot_em),
-        ]
-        result = await self._run_source_strategy(
-            "limit_up",
-            adapters,
-            lambda data: data is not None,
-        )
-        return result or []
+    async def _get_limit_up_with_quality(
+        self,
+        trade_date: Optional[date | datetime] = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """获取涨停股及其来源质量标记。"""
+        if _DISABLE_NETWORK:
+            return [], {"source_type": "none", "status": "error"}
+
+        # 优先专用涨停池
+        try:
+            result = await self._get_limit_up_from_zt_pool(trade_date=trade_date)
+            if result is not None:
+                return result, {"source_type": "dedicated_pool", "status": "ok"}
+        except Exception as e:
+            logger.warning("涨停池主源失败: %s", e)
+
+        # 快照兜底
+        try:
+            result = await self._get_limit_up_from_snapshot()
+            if result is not None:
+                return result, {"source_type": "approximate_candidates", "status": "ok"}
+        except Exception as e:
+            logger.warning("涨停股快照兜底失败: %s", e)
+
+        # akshare spot 兜底
+        try:
+            result = await self._get_limit_up_from_spot_em()
+            if result is not None:
+                return result, {"source_type": "approximate_candidates", "status": "ok"}
+        except Exception as e:
+            logger.warning("涨停股 spot 兜底失败: %s", e)
+
+        return [], {"source_type": "none", "status": "error"}
 
     async def get_all_market_data(self, trade_date: Optional[date | datetime] = None) -> dict[str, Any]:
         """获取所有市场数据。
@@ -1245,24 +1346,32 @@ class FinanceClient:
             asyncio.gather(
                 self.get_index_data(),
                 self.get_sector_data(),
-                self.get_limit_up_stocks(trade_date=trade_date),
+                self._get_limit_up_with_quality(trade_date=trade_date),
                 return_exceptions=True,
             ),
         )
         volume, volume_quality = volume_result
         statistics, statistics_quality = statistics_result
 
+        limit_up_raw = other_results[2]
+        if isinstance(limit_up_raw, Exception):
+            limit_up: list[dict[str, Any]] = []
+            limit_up_quality: dict[str, Any] = {"source_type": "none", "status": "error"}
+        else:
+            limit_up, limit_up_quality = limit_up_raw
+
         market_data = {
             "indices": other_results[0] if not isinstance(other_results[0], Exception) else {},
             "volume": volume,
             "statistics": statistics,
             "sectors": other_results[1] if not isinstance(other_results[1], Exception) else {},
-            "limit_up": other_results[2] if not isinstance(other_results[2], Exception) else [],
+            "limit_up": limit_up,
             "fetch_time": datetime.now().isoformat(),
             "breadth_quality": {
                 "volume": volume_quality,
                 "statistics": statistics_quality,
             },
+            "limit_up_quality": limit_up_quality,
         }
 
         logger.info("市场数据获取完成")

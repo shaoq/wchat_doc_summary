@@ -11,8 +11,13 @@ from src.services.ai_processor import AIProcessor
 def _make_processor() -> AIProcessor:
     """创建一个 mock AIProcessor 实例（不连接真实 API）。"""
     mock_db = MagicMock()
-    with patch("src.services.ai_processor.AsyncAnthropic"):
-        processor = AIProcessor(mock_db)
+    mock_settings = MagicMock()
+    mock_settings.llm_api_key = "test_key"
+    mock_settings.llm_base_url = "https://test.api.com"
+    mock_settings.llm_model = "test-model"
+    with patch("src.services.ai_processor.get_settings", return_value=mock_settings):
+        with patch("src.services.ai_processor.AsyncAnthropic"):
+            processor = AIProcessor(mock_db)
     # 替换 _call_api 为 mock，不真正调用 LLM
     processor._call_api = AsyncMock(return_value="")
     return processor

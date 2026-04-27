@@ -1374,3 +1374,88 @@ def test_ai_stage_starts_after_data_collection():
     assert idx_preflight > 0, "缺少预检清单"
     assert idx_stage3 > 0, "缺少阶段 3 标题"
     assert idx_preflight < idx_stage3, "预检清单应在 AI 阶段之前"
+
+
+# ---------------------------------------------------------------------------
+# Task 4.3: near-complete 与涨停股来源标记展示
+# ---------------------------------------------------------------------------
+
+
+class _BreadthNearCompleteAnalyzer(_FakeAnalyzer):
+    """涨跌统计为 near-complete 的 analyzer。"""
+
+    async def collect_market_data(self, offline=False, trade_date=None, force=False):
+        return {
+            "indices": {"sh": {"name": "上证指数", "close": 3089.26, "change": 0.0045}},
+            "volume": {"sh_volume": 5000.0, "sz_volume": 7000.0, "total_volume": 12000.0},
+            "statistics": {"up_count": 5200, "down_count": 0, "flat_count": 1},
+            "sectors": {"top_sectors": [], "bottom_sectors": []},
+            "limit_up": [],
+            "fetch_time": "2026-03-27T10:00:00",
+            "data_source": "api",
+            "breadth_quality": {
+                "volume": {"status": "ok", "source": "official_exchange_turnover", "actual_count": 2, "expected_count": 2},
+                "statistics": {"status": "near-complete", "source": "pytdx_quotes", "actual_count": 5200, "expected_count": 5201},
+            },
+        }
+
+
+class _LimitUpApproximateAnalyzer(_FakeAnalyzer):
+    """涨停股为近似候选集的 analyzer。"""
+
+    async def collect_market_data(self, offline=False, trade_date=None, force=False):
+        return {
+            "indices": {"sh": {"name": "上证指数", "close": 3089.26, "change": 0.0045}},
+            "volume": {"sh_volume": 5000.0, "sz_volume": 7000.0, "total_volume": 12000.0},
+            "statistics": {"up_count": 2500, "down_count": 1800, "flat_count": 200},
+            "sectors": {"top_sectors": [], "bottom_sectors": []},
+            "limit_up": [{"name": "A", "code": "001", "change": 0.1}, {"name": "B", "code": "002", "change": 0.099}],
+            "fetch_time": "2026-03-27T10:00:00",
+            "data_source": "api",
+            "breadth_quality": {
+                "volume": {"status": "ok", "source": "official_exchange_turnover", "actual_count": 2, "expected_count": 2},
+                "statistics": {"status": "ok", "source": "pytdx_quotes", "actual_count": 5518, "expected_count": 5518},
+            },
+            "limit_up_quality": {"source_type": "approximate_candidates", "status": "ok"},
+        }
+
+
+def test_near_complete_statistics_shows_near_complete_wording():
+    """near-complete 涨跌统计应显示"近完整"提示而非"已获取"或"样本不完整"。"""
+    runner = CliRunner()
+    _BreadthNearCompleteAnalyzer.instances = []
+    _FakeProcessor.instances = []
+
+    with patch("src.cli.ai.get_db", new=_fake_get_db):
+        with patch("src.cli.ai.MarketAnalyzer", _BreadthNearCompleteAnalyzer):
+            with patch("src.cli.ai.AIProcessor", _FakeProcessor):
+                result = runner.invoke(
+                    main,
+                    ["ai", "market-summary", "--date", "2026-03-27", "--force"],
+                )
+
+    output = result.output
+    assert result.exit_code == 0
+    assert "近完整" in output
+    assert "5200/5201" in output
+
+
+def test_approximate_limit_up_shows_candidate_label():
+    """近似候选集涨停股应显示"近似候选"标签。"""
+    runner = CliRunner()
+    _LimitUpApproximateAnalyzer.instances = []
+    _FakeProcessor.instances = []
+
+    with patch("src.cli.ai.get_db", new=_fake_get_db):
+        with patch("src.cli.ai.MarketAnalyzer", _LimitUpApproximateAnalyzer):
+            with patch("src.cli.ai.AIProcessor", _FakeProcessor):
+                result = runner.invoke(
+                    main,
+                    ["ai", "market-summary", "--date", "2026-03-27", "--force"],
+                )
+
+    output = result.output
+    assert result.exit_code == 0
+    assert "近似候选" in output
+    assert "2 只" in output
+

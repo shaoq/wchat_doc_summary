@@ -211,7 +211,7 @@ class MarketDataCacheService:
                 "code": s.sector_code,
                 "change": (s.change_pct or 0) / 100,
             }
-            for s in sorted_sectors[:5]
+            for s in sorted_sectors[:10]
         ]
 
         bottom_sectors = [
@@ -220,7 +220,7 @@ class MarketDataCacheService:
                 "code": s.sector_code,
                 "change": (s.change_pct or 0) / 100,
             }
-            for s in sorted_sectors[-5:]
+            for s in sorted_sectors[-10:]
         ]
 
         return {"top_sectors": top_sectors, "bottom_sectors": bottom_sectors}
@@ -317,11 +317,11 @@ class MarketDataCacheService:
                     "跳过成交额缓存写入: quality=%s", volume_quality_status
                 )
 
-            # 保存涨跌统计数据 — 仅在宽度质量 ok 时写库（缺省视为 ok，向后兼容）
+            # 保存涨跌统计数据 — ok / near-complete 可写库，partial / error 跳过
             stats_quality = breadth_quality.get("statistics", {})
             stats_quality_status = stats_quality.get("status", "ok")
             statistics = data.get("statistics", {})
-            if statistics and stats_quality_status == "ok":
+            if statistics and stats_quality_status in ("ok", "near-complete"):
                 result = await session.execute(
                     select(MarketStatistics).where(MarketStatistics.trade_date == trade_date)
                 )
@@ -339,7 +339,7 @@ class MarketDataCacheService:
                         flat_count=statistics.get("flat_count"),
                         fetch_time=fetch_time,
                     ))
-            elif statistics and stats_quality_status != "ok":
+            elif statistics and stats_quality_status not in ("ok", "near-complete"):
                 logger.info(
                     "跳过涨跌统计缓存写入: quality=%s", stats_quality_status
                 )

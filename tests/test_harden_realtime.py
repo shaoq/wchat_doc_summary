@@ -14,37 +14,40 @@ from src.services.market_data_cache_service import MarketDataCacheService, _deri
 
 
 @pytest.mark.asyncio
-async def test_get_all_market_data_shares_snapshot():
-    """get_all_market_data should fetch snapshot once and share it."""
+async def test_get_all_market_data_calls_quality_methods():
+    """get_all_market_data should call _get_volume_with_quality and _get_statistics_with_quality."""
     client = FinanceClient()
 
-    mock_stocks = [
-        {"f12": "600000", "f3": 5.0, "f6": 5_000_000_000},
-        {"f12": "000001", "f3": -2.0, "f6": 3_000_000_000},
-    ]
-
-    with patch.object(client, "_fetch_stock_snapshot", new_callable=AsyncMock) as mock_fetch:
-        mock_fetch.return_value = (
-            mock_stocks,
-            {"status": "ok", "source": "eastmoney_curl", "actual_count": len(mock_stocks), "expected_count": len(mock_stocks)},
+    with patch.object(client, "_get_volume_with_quality", new_callable=AsyncMock) as mock_vol:
+        mock_vol.return_value = (
+            {"sh_volume": 100, "sz_volume": 200, "total_volume": 300},
+            {"status": "ok", "source": "official_exchange_turnover"},
         )
 
-        with patch.object(client, "get_index_data", new_callable=AsyncMock) as mock_index:
-            mock_index.return_value = {"sh": {"name": "上证指数", "close": 3000, "change": 0.01}}
+        with patch.object(client, "_get_statistics_with_quality", new_callable=AsyncMock) as mock_stats:
+            mock_stats.return_value = (
+                {"up_count": 10, "down_count": 5, "flat_count": 3},
+                {"status": "ok", "source": "pytdx_quotes"},
+            )
 
-            with patch.object(client, "get_sector_data", new_callable=AsyncMock) as mock_sector:
-                mock_sector.return_value = {"top_sectors": [], "bottom_sectors": []}
+            with patch.object(client, "get_index_data", new_callable=AsyncMock) as mock_index:
+                mock_index.return_value = {"sh": {"name": "上证指数", "close": 3000, "change": 0.01}}
 
-                with patch.object(client, "get_limit_up_stocks", new_callable=AsyncMock) as mock_limit:
-                    mock_limit.return_value = []
+                with patch.object(client, "get_sector_data", new_callable=AsyncMock) as mock_sector:
+                    mock_sector.return_value = {"top_sectors": [], "bottom_sectors": []}
 
-                    result = await client.get_all_market_data()
+                    with patch.object(client, "_get_limit_up_with_quality", new_callable=AsyncMock) as mock_limit:
+                        mock_limit.return_value = ([], {"source_type": "none", "status": "error"})
 
-    # _fetch_stock_snapshot should be called exactly once
-    mock_fetch.assert_awaited_once()
-    assert result["volume"]["total_volume"] > 0
-    assert result["statistics"]["up_count"] == 1
-    assert result["statistics"]["down_count"] == 1
+                        result = await client.get_all_market_data()
+
+    mock_vol.assert_awaited_once()
+    mock_stats.assert_awaited_once()
+    assert result["volume"]["total_volume"] == 300
+    assert result["statistics"]["up_count"] == 10
+    assert result["statistics"]["down_count"] == 5
+    assert result["breadth_quality"]["volume"]["status"] == "ok"
+    assert result["breadth_quality"]["statistics"]["status"] == "ok"
 
 
 @pytest.mark.asyncio

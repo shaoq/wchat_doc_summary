@@ -601,7 +601,7 @@ class TestAllMarketDataContract:
                         "get_sector_data",
                         return_value={"top_sectors": [], "bottom_sectors": []},
                     ):
-                        with patch.object(finance_client, "get_limit_up_stocks", return_value=[]):
+                        with patch.object(finance_client, "_get_limit_up_with_quality", return_value=([], {"source_type": "none", "status": "error"})):
                             result = await finance_client.get_all_market_data()
 
         assert "indices" in result
@@ -611,6 +611,7 @@ class TestAllMarketDataContract:
         assert "limit_up" in result
         assert "fetch_time" in result
         assert "breadth_quality" in result
+        assert "limit_up_quality" in result
 
     @pytest.mark.asyncio
     async def test_partial_failure_preserves_structure(
@@ -636,7 +637,8 @@ class TestAllMarketDataContract:
                         finance_client, "get_sector_data", side_effect=Exception("Sector error")
                     ):
                         with patch.object(
-                            finance_client, "get_limit_up_stocks", return_value=[]
+                            finance_client, "_get_limit_up_with_quality",
+                            return_value=([], {"source_type": "none", "status": "error"}),
                         ):
                             result = await finance_client.get_all_market_data()
 
@@ -670,9 +672,9 @@ class TestAllMarketDataContract:
                     with patch.object(finance_client, "get_sector_data", return_value={"top_sectors": [], "bottom_sectors": []}):
                         with patch.object(
                             finance_client,
-                            "get_limit_up_stocks",
+                            "_get_limit_up_with_quality",
                             new_callable=AsyncMock,
-                            return_value=[],
+                            return_value=([], {"source_type": "none", "status": "error"}),
                         ) as mock_limit:
                             await finance_client.get_all_market_data(trade_date=trade_date)
 
@@ -697,7 +699,7 @@ class TestAllMarketDataContract:
             ):
                 with patch.object(finance_client, "get_index_data", side_effect=Exception("Error")):
                     with patch.object(finance_client, "get_sector_data", side_effect=Exception("Error")):
-                        with patch.object(finance_client, "get_limit_up_stocks", side_effect=Exception("Error")):
+                        with patch.object(finance_client, "_get_limit_up_with_quality", side_effect=Exception("Error")):
                             result = await finance_client.get_all_market_data()
 
         assert isinstance(result["indices"], dict)
@@ -941,7 +943,7 @@ class TestBreadthQualityContract:
             ):
                 with patch.object(finance_client, "get_index_data", return_value=mock_indices_data):
                     with patch.object(finance_client, "get_sector_data", return_value={"top_sectors": [], "bottom_sectors": []}):
-                        with patch.object(finance_client, "get_limit_up_stocks", return_value=[]):
+                        with patch.object(finance_client, "_get_limit_up_with_quality", return_value=([], {"source_type": "dedicated_pool", "status": "ok"})):
                             result = await finance_client.get_all_market_data()
 
         assert "breadth_quality" in result
@@ -950,6 +952,8 @@ class TestBreadthQualityContract:
         assert result["breadth_quality"]["volume"]["status"] == "ok"
         assert result["breadth_quality"]["statistics"]["status"] == "ok"
         assert result["breadth_quality"]["volume"]["source"] == "official_exchange_turnover"
+        assert "limit_up_quality" in result
+        assert result["limit_up_quality"]["source_type"] == "dedicated_pool"
 
     @pytest.mark.asyncio
     async def test_get_all_market_data_breadth_error_when_primary_and_fallback_fail(self, finance_client):
@@ -970,11 +974,112 @@ class TestBreadthQualityContract:
             ):
                 with patch.object(finance_client, "get_index_data", return_value={}):
                     with patch.object(finance_client, "get_sector_data", return_value={"top_sectors": [], "bottom_sectors": []}):
-                        with patch.object(finance_client, "get_limit_up_stocks", return_value=[]):
+                        with patch.object(finance_client, "_get_limit_up_with_quality", return_value=([], {"source_type": "none", "status": "error"})):
                             result = await finance_client.get_all_market_data()
 
         assert result["breadth_quality"]["volume"]["status"] == "error"
         assert result["breadth_quality"]["statistics"]["status"] == "error"
+
+
+# ── 四态质量模型测试 ─────────────────────────────────────────
+
+
+class TestStatisticsQualityModel:
+    """涨跌统计四态质量模型测试。"""
+
+    def test_ok_when_actual_equals_expected(self, finance_client):
+        assert finance_client._determine_statistics_quality(5000, 5000) == "ok"
+
+    def test_ok_when_actual_exceeds_expected(self, finance_client):
+        assert finance_client._determine_statistics_quality(5001, 5000) == "ok"
+
+    def test_error_when_expected_zero(self, finance_client):
+        assert finance_client._determine_statistics_quality(0, 0) == "error"
+
+    def test_error_when_actual_zero(self, finance_client):
+        assert finance_client._determine_statistics_quality(0, 5000) == "error"
+
+    def test_near_complete_when_gap_within_abs_threshold(self, finance_client):
+        # gap = 30 < 50 (abs threshold)
+        assert finance_client._determine_statistics_quality(4970, 5000) == "near-complete"
+
+    def test_near_complete_when_gap_within_pct_threshold(self, finance_client):
+        # gap = 45, threshold = max(50, int(10000 * 0.01)) = max(50, 100) = 100
+        assert finance_client._determine_statistics_quality(9955, 10000) == "near-complete"
+
+    def test_partial_when_gap_exceeds_threshold(self, finance_client):
+        # gap = 200, threshold = max(50, int(5000 * 0.01)) = 50
+        assert finance_client._determine_statistics_quality(4800, 5000) == "partial"
+
+
+class TestLimitUpQualityContract:
+    """涨停股来源质量标记契约测试。"""
+
+    @pytest.mark.asyncio
+    async def test_zt_pool_returns_dedicated_pool(self, finance_client):
+        """Contract: 专用涨停池返回 dedicated_pool 来源。"""
+        with patch.object(
+            finance_client, "_get_limit_up_from_zt_pool",
+            new_callable=AsyncMock, return_value=[{"name": "A", "code": "001", "change": 0.1}],
+        ):
+            stocks, quality = await finance_client._get_limit_up_with_quality()
+
+        assert quality["source_type"] == "dedicated_pool"
+        assert quality["status"] == "ok"
+        assert len(stocks) == 1
+
+    @pytest.mark.asyncio
+    async def test_snapshot_fallback_returns_approximate(self, finance_client):
+        """Contract: 快照兜底返回 approximate_candidates 来源。"""
+        with patch.object(
+            finance_client, "_get_limit_up_from_zt_pool",
+            new_callable=AsyncMock, side_effect=Exception("fail"),
+        ):
+            with patch.object(
+                finance_client, "_get_limit_up_from_snapshot",
+                new_callable=AsyncMock, return_value=[{"name": "B", "code": "002", "change": 0.099}],
+            ):
+                stocks, quality = await finance_client._get_limit_up_with_quality()
+
+        assert quality["source_type"] == "approximate_candidates"
+        assert quality["status"] == "ok"
+
+    @pytest.mark.asyncio
+    async def test_all_fail_returns_none(self, finance_client):
+        """Contract: 全部失败返回 none 来源。"""
+        with patch.object(
+            finance_client, "_get_limit_up_from_zt_pool",
+            new_callable=AsyncMock, side_effect=Exception("fail"),
+        ):
+            with patch.object(
+                finance_client, "_get_limit_up_from_snapshot",
+                new_callable=AsyncMock, side_effect=Exception("fail"),
+            ):
+                with patch.object(
+                    finance_client, "_get_limit_up_from_spot_em",
+                    new_callable=AsyncMock, side_effect=Exception("fail"),
+                ):
+                    stocks, quality = await finance_client._get_limit_up_with_quality()
+
+        assert quality["source_type"] == "none"
+        assert quality["status"] == "error"
+        assert stocks == []
+
+    @pytest.mark.asyncio
+    async def test_get_statistics_with_quality_returns_near_complete(self, finance_client):
+        """Contract: near-complete 统计应返回实际值而非零值。"""
+        with patch.object(
+            finance_client, "_fetch_pytdx_statistics",
+            new_callable=AsyncMock,
+            return_value=(
+                {"up_count": 5200, "down_count": 0, "flat_count": 0},
+                {"status": "near-complete", "source": "pytdx_quotes", "actual_count": 5200, "expected_count": 5201},
+            ),
+        ):
+            statistics, quality = await finance_client._get_statistics_with_quality()
+
+        assert statistics["up_count"] == 5200
+        assert quality["status"] == "near-complete"
 
 
 # ── 分页回归测试 (Task 3.1-3.3) ──────────────────────────────

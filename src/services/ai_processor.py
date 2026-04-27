@@ -576,8 +576,14 @@ class AIProcessor:
         top_sectors = self._format_sectors_for_prompt(sectors.get("top_sectors", []))
         bottom_sectors = self._format_sectors_for_prompt(sectors.get("bottom_sectors", []))
 
-        # 格式化个股
-        limit_up_stocks = self._format_stocks_for_prompt(limit_up[:10])
+        # 格式化个股（展示层裁剪：最多 15 只，数据层保留全量）
+        limit_up_stocks = self._format_stocks_for_prompt(limit_up[:15])
+
+        # 涨停股来源标记
+        limit_up_quality = market_data.get("limit_up_quality", {})
+        source_type = limit_up_quality.get("source_type", "")
+        if source_type == "approximate_candidates":
+            limit_up_stocks = limit_up_stocks + "\n(注: 涨停池数据为近似候选集，非正式涨停池)"
 
         # 格式化文章
         articles_text = self._format_articles_for_prompt(articles[:10])
@@ -589,6 +595,7 @@ class AIProcessor:
         watch_items_text = self._format_watch_items_for_prompt(watch_items[:50] if watch_items else [])
 
         # 构建数据缺口提示
+        breadth_quality = market_data.get("breadth_quality", {})
         data_gaps = self._build_data_gaps(
             indices=indices,
             volume=market_data.get("volume"),
@@ -599,6 +606,8 @@ class AIProcessor:
             telegraphs=telegraphs,
             watch_items=watch_items,
             articles=articles,
+            stats_quality=breadth_quality.get("statistics"),
+            limit_up_quality=market_data.get("limit_up_quality"),
         )
 
         # 构建提示词
@@ -862,6 +871,8 @@ class AIProcessor:
         telegraphs: list | None,
         watch_items: list | None,
         articles: list,
+        stats_quality: dict | None = None,
+        limit_up_quality: dict | None = None,
     ) -> str:
         """构建数据缺口提示文本。
 
@@ -877,6 +888,8 @@ class AIProcessor:
             telegraphs: 电报列表
             watch_items: 看盘数据列表
             articles: 文章列表
+            stats_quality: 涨跌统计质量元数据
+            limit_up_quality: 涨停股来源质量元数据
 
         Returns:
             数据缺口描述文本，无缺口时返回"无"
@@ -889,10 +902,16 @@ class AIProcessor:
             gaps.append("成交额数据缺失")
         if not stats:
             gaps.append("涨跌统计数据缺失")
+        elif stats_quality and stats_quality.get("status") == "near-complete":
+            actual = stats_quality.get("actual_count", 0)
+            expected = stats_quality.get("expected_count", 0)
+            gaps.append(f"涨跌统计近完整 (样本 {actual}/{expected})，轻微缺失")
         if not top_sectors and not bottom_sectors:
             gaps.append("板块强弱数据缺失")
         if not limit_up:
             gaps.append("涨停个股数据缺失")
+        elif limit_up_quality and limit_up_quality.get("source_type") == "approximate_candidates":
+            gaps.append("涨停个股为近似候选集（非正式涨停池），可能含未封板个股")
         if not telegraphs:
             gaps.append("财联社电报数据缺失")
         if not watch_items:

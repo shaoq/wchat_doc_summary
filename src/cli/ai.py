@@ -62,6 +62,8 @@ def _source_icon(status: str) -> str:
     """根据来源状态返回对应图标。"""
     if status == "ok":
         return "[green]v[/green]"
+    if status == "near-complete":
+        return "[green]v[/green]"
     if status == "partial":
         return "[yellow]~[/yellow]"
     if status == "empty":
@@ -78,7 +80,7 @@ def _status_detail(
     error_message: str = "获取失败",
 ) -> None:
     """输出带状态图标的细项行。"""
-    if status in ("ok", "partial"):
+    if status in ("ok", "near-complete", "partial"):
         message = ok_message
     elif status == "empty":
         message = empty_message
@@ -97,7 +99,7 @@ def _make_status_item(
     summary: str | None = None,
 ) -> dict[str, str]:
     """构建统一的状态项描述。"""
-    if status in ("ok", "partial"):
+    if status in ("ok", "near-complete", "partial"):
         message = ok_message
     elif status == "empty":
         message = empty_message
@@ -167,10 +169,14 @@ def _get_market_data_status_items(market_data: dict[str, Any]) -> list[dict[str,
         f"{statistics.get('down_count', 0)}/"
         f"{statistics.get('flat_count', 0)}"
     ) if isinstance(statistics, dict) else "0/0/0"
-    if stats_quality and stats_quality.get("status") in ("ok", "partial", "error"):
+    if stats_quality and stats_quality.get("status") in ("ok", "near-complete", "partial", "error"):
         stats_status = stats_quality["status"]
         if stats_status == "ok":
             stats_msg = f"已获取 {statistics_summary}"
+        elif stats_status == "near-complete":
+            actual = stats_quality.get("actual_count", 0)
+            expected = stats_quality.get("expected_count", 0)
+            stats_msg = f"近完整 ({actual}/{expected}) {statistics_summary}"
         elif stats_status == "partial":
             actual = stats_quality.get("actual_count", 0)
             expected = stats_quality.get("expected_count", 0)
@@ -210,17 +216,22 @@ def _get_market_data_status_items(market_data: dict[str, Any]) -> list[dict[str,
     ))
 
     limit_up = market_data.get("limit_up")
+    limit_up_quality = market_data.get("limit_up_quality", {})
     limit_up_status = "error"
     limit_up_count = 0
     if isinstance(limit_up, list):
         limit_up_count = len(limit_up)
         limit_up_status = "ok" if limit_up_count > 0 else "empty"
+    source_type = limit_up_quality.get("source_type", "")
+    limit_up_suffix = ""
+    if source_type == "approximate_candidates":
+        limit_up_suffix = " (近似候选)"
     items.append(_make_status_item(
         "涨停股",
         limit_up_status,
-        ok_message=f"已获取 {limit_up_count} 只",
+        ok_message=f"已获取 {limit_up_count} 只{limit_up_suffix}",
         empty_message="0 只",
-        summary=f"{limit_up_count} 只",
+        summary=f"{limit_up_count} 只{limit_up_suffix}",
     ))
 
     return items
@@ -232,7 +243,7 @@ def _render_market_data_statuses(market_data: dict[str, Any]) -> None:
         _status_detail(
             item["label"],
             item["status"],
-            ok_message=item["message"] if item["status"] in ("ok", "partial") else "",
+            ok_message=item["message"] if item["status"] in ("ok", "near-complete", "partial") else "",
             empty_message=item["message"] if item["status"] == "empty" else "",
             error_message=item["message"] if item["status"] == "error" else "获取失败",
         )
@@ -285,7 +296,7 @@ def _render_pre_generation_summary(market_data: dict[str, Any], news_data: dict[
         _status_detail(
             item["label"],
             item["status"],
-            ok_message=item["message"] if item["status"] in ("ok", "partial") else "",
+            ok_message=item["message"] if item["status"] in ("ok", "near-complete", "partial") else "",
             empty_message=item["message"] if item["status"] == "empty" else "",
             error_message=item["message"] if item["status"] == "error" else "获取失败",
         )
@@ -331,9 +342,10 @@ def _breadth_source_outcome_label(market_data: dict[str, Any]) -> str | None:
             fallback_parts.append("官方成交额")
         elif volume_source == "akshare_spot_em":
             fallback_parts.append("成交额旧链路兜底")
-    if stats_status == "ok":
+    if stats_status in ("ok", "near-complete"):
         if stats_source == "pytdx_quotes":
-            fallback_parts.append("pytdx 统计")
+            label = "pytdx 统计" if stats_status == "ok" else "pytdx 统计(近完整)"
+            fallback_parts.append(label)
     if fallback_parts:
         return " + ".join(fallback_parts)
 
