@@ -50,3 +50,6 @@ output/
 
 # Claude local files
 .claude/ralph-loop.local.md
+
+# Codex
+.codex
