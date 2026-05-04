@@ -292,7 +292,7 @@ class FinanceClient:
     SOURCE_STRATEGIES: dict[str, tuple[str, ...]] = {
         "indices": ("tencent_realtime", "akshare_index_spot"),
         "volume": (_OFFICIAL_TURNOVER_SOURCE, _AKSHARE_BREADTH_SOURCE),
-        "statistics": (_PYTDX_STATS_SOURCE, _AKSHARE_BREADTH_SOURCE),
+        "statistics": (_PYTDX_STATS_SOURCE,),
         "snapshot": ("eastmoney_stock_snapshot", "akshare_a_spot"),
         "sectors": (
             "akshare_sector_spot",
@@ -828,27 +828,6 @@ class FinanceClient:
             "total_volume": round(sh_volume + sz_volume, 2),
         }
 
-    async def _get_statistics_from_spot_em(self) -> dict[str, int]:
-        df = await self._retry_request(ak.stock_zh_a_spot_em)
-
-        up_count = 0
-        down_count = 0
-        flat_count = 0
-
-        for _, row in df.iterrows():
-            change = float(row.get("涨跌幅", 0) or 0)
-            if change > 0:
-                up_count += 1
-            elif change < 0:
-                down_count += 1
-            else:
-                flat_count += 1
-
-        return {
-            "up_count": up_count,
-            "down_count": down_count,
-            "flat_count": flat_count,
-        }
 
     async def _fetch_spot_em_dataframe(self) -> Any:
         """获取 akshare 全市场 A 股快照 DataFrame（单次获取，供成交额和涨跌统计共享）。"""
