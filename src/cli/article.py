@@ -1,6 +1,7 @@
 """文章命令模块 - article, show, export。"""
 
-import json
+import re
+import shutil
 from pathlib import Path
 
 import click
@@ -11,6 +12,11 @@ from src.cli.utils import console, run_async
 from src.models.schema import Article, Feed
 from src.services.subscription import SubscriptionService
 from src.storage.database import get_db
+
+# 导出相关常量
+EXPORT_BASE_DIR = Path("output/export_articles")
+UNSAFE_FILENAME_CHARS = re.compile(r'[/\\:*?"<>|]')
+TITLE_MAX_LENGTH = 30
 
 
 @click.command()
@@ -119,32 +125,93 @@ def show(mp_id: str, limit: int, offset: int, show_all: bool) -> None:
     run_async(_show())
 
 
+def sanitize_filename(title: str, max_length: int = TITLE_MAX_LENGTH) -> str:
+    """替换文件系统不安全字符为 `_`，截断标题至指定长度。"""
+    safe = UNSAFE_FILENAME_CHARS.sub('_', title)
+    return safe[:max_length]
+
+
+def build_export_dir(mp_id: str) -> Path:
+    """返回导出目录路径 output/export_articles/<mp_id>/。"""
+    return EXPORT_BASE_DIR / mp_id
+
+
+def build_export_filename(export_dir: Path, date_prefix: str, title: str) -> str:
+    """组合日期前缀 + 截断标题生成文件名，处理重名。"""
+    safe_title = sanitize_filename(title)
+    base_name = f"{date_prefix}_{safe_name}" if (safe_name := safe_title) else date_prefix
+    filename = f"{base_name}.md"
+
+    # 处理重名：追加序号
+    if export_dir.exists() and (export_dir / filename).exists():
+        seq = 2
+        while (export_dir / f"{base_name}_{seq}.md").exists():
+            seq += 1
+        filename = f"{base_name}_{seq}.md"
+
+    return filename
+
+
+def build_article_markdown(article_obj: Article) -> str:
+    """生成单篇文章的 Markdown 内容。"""
+    lines: list[str] = [f"# {article_obj.title}\n\n"]
+
+    # 元信息
+    if article_obj.publish_time:
+        lines.append(f"- **发布时间**: {article_obj.publish_time.strftime('%Y-%m-%d %H:%M')}\n")
+    if article_obj.original_url:
+        lines.append(f"- **原文链接**: {article_obj.original_url}\n")
+    if article_obj.pic_url:
+        lines.append(f"- **封面图片**: {article_obj.pic_url}\n")
+
+    # 如果有元信息则加空行
+    has_meta = any([article_obj.publish_time, article_obj.original_url, article_obj.pic_url])
+    if has_meta:
+        lines.append("\n")
+
+    # AI 摘要
+    if article_obj.summary:
+        lines.append(f"> {article_obj.summary}\n\n")
+
+    # 正文
+    if article_obj.content:
+        lines.append(f"{article_obj.content}\n")
+
+    return "".join(lines)
+
+
 @click.command()
-@click.option('--format', 'output_format', type=click.Choice(['json', 'markdown']), default='json', help='输出格式')
-@click.option('--output', '-o', type=click.Path(), default='articles.json', help='输出文件路径')
-@click.option('--mp-id', 'mp_id', help='指定公众号 ID（可选）')
-def export(output_format: str, output: str, mp_id: str | None) -> None:
-    """导出文章。"""
+@click.argument('mp_id')
+@click.option('--force', is_flag=True, help='强制全量导出，覆盖已存在文件')
+def export(mp_id: str, force: bool) -> None:
+    """导出公众号文章为 Markdown 文件。
+
+    MP_ID: 公众号 ID
+
+    文章将导出到 output/export_articles/<MP_ID>/ 目录下，
+    每篇文章一个独立的 .md 文件。默认增量导出，使用 --force 全量覆盖。
+    """
     async def _export() -> None:
         db = await get_db()
 
         from sqlalchemy import select
 
         async with db.get_session() as session:
-            if mp_id:
-                # 先查找 feed id
-                feed_result = await session.execute(
-                    select(Feed.id).where(Feed.mp_id == mp_id)
-                )
-                feed_id = feed_result.scalar_one_or_none()
-                if feed_id is None:
-                    console.print(f"[red]订阅不存在: {mp_id}[/red]")
-                    return
-                query = select(Article).where(Article.feed_id == feed_id)
-            else:
-                query = select(Article)
+            # 验证公众号存在
+            feed_result = await session.execute(
+                select(Feed.id).where(Feed.mp_id == mp_id)
+            )
+            feed_id = feed_result.scalar_one_or_none()
+            if feed_id is None:
+                console.print(f"[red]订阅不存在: {mp_id}[/red]")
+                return
 
-            query = query.order_by(Article.publish_time.desc())
+            # 查询所有文章
+            query = (
+                select(Article)
+                .where(Article.feed_id == feed_id)
+                .order_by(Article.publish_time.desc())
+            )
             result = await session.execute(query)
             articles = list(result.scalars().all())
 
@@ -152,45 +219,37 @@ def export(output_format: str, output: str, mp_id: str | None) -> None:
             console.print("[yellow]没有可导出的文章[/yellow]")
             return
 
-        output_path = Path(output)
+        # 准备导出目录
+        export_dir = build_export_dir(mp_id)
+        if force and export_dir.exists():
+            shutil.rmtree(export_dir)
+        export_dir.mkdir(parents=True, exist_ok=True)
 
-        if output_format == 'json':
-            data = []
-            for article in articles:
-                data.append({
-                    "id": article.id,
-                    "article_id": article.article_id,
-                    "title": article.title,
-                    "content": article.content,
-                    "summary": article.summary,
-                    "pic_url": article.pic_url,
-                    "original_url": article.original_url,
-                    "publish_time": article.publish_time.isoformat() if article.publish_time else None,
-                    "created_at": article.created_at.isoformat() if article.created_at else None,
-                })
+        # 逐篇导出
+        exported = 0
+        skipped = 0
 
-            with open(output_path, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+        for article_obj in articles:
+            # 日期前缀
+            if article_obj.publish_time:
+                date_prefix = article_obj.publish_time.strftime('%Y-%m-%d')
+            else:
+                date_prefix = 'unknown-date'
 
-        else:  # markdown
-            lines = ["# 文章导出\n\n"]
+            filename = build_export_filename(export_dir, date_prefix, article_obj.title)
+            file_path = export_dir / filename
 
-            for article in articles:
-                lines.append(f"## {article.title}\n\n")
-                if article.summary:
-                    lines.append(f"**摘要**: {article.summary}\n\n")
-                if article.publish_time:
-                    lines.append(f"**发布时间**: {article.publish_time.strftime('%Y-%m-%d %H:%M')}\n\n")
-                if article.original_url:
-                    lines.append(f"**原文链接**: {article.original_url}\n\n")
-                if article.content:
-                    lines.append(f"### 正文\n\n{article.content}\n\n")
-                lines.append("---\n\n")
+            # 增量模式：跳过已存在文件
+            if not force and file_path.exists():
+                skipped += 1
+                continue
 
-            with open(output_path, 'w', encoding='utf-8') as f:
-                f.writelines(lines)
+            content = build_article_markdown(article_obj)
+            file_path.write_text(content, encoding='utf-8')
+            exported += 1
 
-        console.print(f"[green]导出成功: {output_path}[/green]")
-        console.print(f"  文章数量: {len(articles)}")
+        # 汇总输出
+        console.print(f"[green]导出完成: {export_dir}[/green]")
+        console.print(f"  导出: [cyan]{exported}[/cyan] 篇，跳过: [dim]{skipped}[/dim] 篇，共 [bold]{len(articles)}[/bold] 篇")
 
     run_async(_export())
