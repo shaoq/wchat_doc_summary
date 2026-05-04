@@ -98,12 +98,12 @@ def show(mp_id: str, limit: int, offset: int, show_all: bool) -> None:
         table = Table(title=f"{feed.name} - 文章列表 (共 {total} 篇)")
         table.add_column("ID", style="cyan", no_wrap=True)
         table.add_column("标题", style="green", max_width=40)
-        table.add_column("原文链接", style="blue", max_width=35)
+        table.add_column("原文链接", style="blue", max_width=50, no_wrap=True)
         table.add_column("发布时间", style="dim")
 
         for article in articles:
             title_display = article.title[:37] + "..." if len(article.title) > 40 else article.title
-            url_display = (article.original_url or "无")[:32] + "..." if article.original_url and len(article.original_url) > 35 else (article.original_url or "无")
+            url_display = article.original_url or "无"
             pub_time = article.publish_time.strftime("%Y-%m-%d %H:%M") if article.publish_time else "未知"
             table.add_row(str(article.id), title_display, url_display, pub_time)
 
@@ -113,6 +113,8 @@ def show(mp_id: str, limit: int, offset: int, show_all: bool) -> None:
         if not show_all and total > limit:
             current_end = offset + len(articles)
             console.print(f"\n[dim]显示 {offset + 1}-{current_end}/{total}，使用 --offset {offset + limit} 查看更多[/dim]")
+
+        console.print("[dim]使用 wchat article <ID> 查看完整原文链接[/dim]")
 
     run_async(_show())
 
@@ -129,10 +131,18 @@ def export(output_format: str, output: str, mp_id: str | None) -> None:
         from sqlalchemy import select
 
         async with db.get_session() as session:
-            query = select(Article).join(Feed)
-
             if mp_id:
-                query = query.where(Feed.mp_id == mp_id)
+                # 先查找 feed id
+                feed_result = await session.execute(
+                    select(Feed.id).where(Feed.mp_id == mp_id)
+                )
+                feed_id = feed_result.scalar_one_or_none()
+                if feed_id is None:
+                    console.print(f"[red]订阅不存在: {mp_id}[/red]")
+                    return
+                query = select(Article).where(Article.feed_id == feed_id)
+            else:
+                query = select(Article)
 
             query = query.order_by(Article.publish_time.desc())
             result = await session.execute(query)
