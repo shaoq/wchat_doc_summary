@@ -4,7 +4,7 @@ import click
 
 from src.cli.article import article, export, show
 from src.cli.auth import login, logout
-from src.cli.subscription import fetch, info, ls, subscribe, unsubscribe
+from src.cli.subscription import fetch, info, ls, set_weight, subscribe, unsubscribe
 from src.cli.system import init, version
 from src.cli.ai import ai
 from src.cli.cls_data import cls_data
@@ -31,6 +31,7 @@ main.add_command(unsubscribe)
 main.add_command(ls)
 main.add_command(info)
 main.add_command(fetch)
+main.add_command(set_weight)
 
 # 注册文章命令
 main.add_command(show)

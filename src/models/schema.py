@@ -35,6 +35,11 @@ class Feed(Base):
         nullable=True,
         comment="Provider元数据(JSON)",
     )
+    weight: Mapped[int] = mapped_column(
+        Integer,
+        default=5,
+        comment="权重: 0-低, 5-中, 10-高",
+    )
     status: Mapped[int] = mapped_column(
         Integer,
         default=1,

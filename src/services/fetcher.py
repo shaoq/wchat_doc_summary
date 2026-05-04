@@ -627,7 +627,7 @@ class FetcherService:
         else:
             logger.info(f"开始抓取所有订阅 (最近 {days if days else '全部'} 天)")
 
-        feeds = await self.subscription_service.list_subscriptions(active_only=True)
+        feeds = await self.subscription_service.list_subscriptions_for_fetch(active_only=True)
         results: dict[str, FetchSummary] = {}
         backoff_delay = BATCH_BASE_DELAY
 

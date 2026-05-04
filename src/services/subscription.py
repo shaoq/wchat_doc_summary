@@ -3,7 +3,7 @@
 import logging
 from datetime import datetime
 
-from sqlalchemy import func, select, update
+from sqlalchemy import case, func, select, update
 
 from src.models.schema import Article, Feed
 from src.storage.database import Database
@@ -223,3 +223,34 @@ class SubscriptionService:
 
             logger.info(f"获取订阅列表（带统计）: {len(feeds_with_stats)} 条记录")
             return feeds_with_stats
+
+    async def list_subscriptions_for_fetch(self, active_only: bool = True) -> list[Feed]:
+        """获取按抓取优先级排序的订阅列表。
+
+        排序策略:
+        1. weight DESC — 高权重优先
+        2. sync_time IS NULL 优先 — 未同步的先抓
+        3. name ASC — 确定性排序
+
+        Args:
+            active_only: 是否只返回活跃的订阅
+
+        Returns:
+            排序后的 Feed 列表
+        """
+        async with self.db.get_session() as session:
+            query = select(Feed)
+            if active_only:
+                query = query.where(Feed.status == 1)
+            query = query.order_by(
+                Feed.weight.desc(),
+                case(
+                    (Feed.sync_time.is_(None), 0),
+                    else_=1,
+                ),
+                Feed.name.asc(),
+            )
+            result = await session.execute(query)
+            feeds = list(result.scalars().all())
+            logger.info(f"获取抓取队列: {len(feeds)} 条记录（按权重排序）")
+            return feeds

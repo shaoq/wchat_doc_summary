@@ -87,6 +87,7 @@ class Database:
         ensure_columns(
             "feeds",
             {
+                "weight": "INTEGER DEFAULT 5",
                 "provider": "VARCHAR(64)",
                 "provider_feed_id": "VARCHAR(255)",
                 "provider_meta": "TEXT",

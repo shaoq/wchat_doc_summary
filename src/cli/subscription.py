@@ -8,6 +8,7 @@ from rich.table import Table
 from config.settings import get_settings
 from src.api.weread import AuthExpiredError, RateLimitError, WeReadClient
 from src.cli.utils import console, run_async
+from src.models.schema import Feed
 from src.services.auth import AuthService
 from src.services.fetcher import DEFAULT_LATEST_COUNT, FetchFinalState, FetchSummary, FetcherService
 from src.services.subscription import SubscriptionService
@@ -150,6 +151,7 @@ def ls(active_only: bool) -> None:
         table.add_column("ID", style="cyan", no_wrap=True)
         table.add_column("公众号名称", style="green")
         table.add_column("公众号 ID", style="blue")
+        table.add_column("权重", style="magenta", justify="center")
         table.add_column("文章数", style="magenta", justify="right")
         table.add_column("最近文章", style="yellow")
         table.add_column("状态", style="dim")
@@ -159,10 +161,13 @@ def ls(active_only: bool) -> None:
             status = "[green]活跃[/green]" if feed.status == 1 else "[red]停用[/red]"
             sync_time = feed.sync_time.strftime("%Y-%m-%d %H:%M") if feed.sync_time else "从未同步"
             latest_time = latest_article_time.strftime("%Y-%m-%d") if latest_article_time else "-"
+            weight_labels = {0: "[dim]低[/dim]", 5: "[yellow]中[/yellow]", 10: "[bold red]高[/bold red]"}
+            weight_display = weight_labels.get(feed.weight, str(feed.weight))
             table.add_row(
                 str(feed.id),
                 feed.name[:20] + "..." if len(feed.name) > 20 else feed.name,
                 feed.mp_id[:25] + "..." if len(feed.mp_id) > 25 else feed.mp_id,
+                weight_display,
                 str(article_count),
                 latest_time,
                 status,
@@ -215,6 +220,7 @@ def info(mp_id: str) -> None:
             f"[bold]公众号 ID:[/bold] {feed.mp_id}\n"
             f"[bold]简介:[/bold] {feed.intro or '无'}\n"
             f"[bold]状态:[/bold] {'活跃' if feed.status == 1 else '停用'}\n"
+            f"[bold]权重:[/bold] {feed.weight} ({'低' if feed.weight == 0 else '中' if feed.weight == 5 else '高'})\n"
             f"[bold]文章数量:[/bold] {article_count}\n"
             f"[bold]创建时间:[/bold] {feed.created_at.strftime('%Y-%m-%d %H:%M') if feed.created_at else '未知'}\n"
             f"[bold]最后同步:[/bold] {feed.sync_time.strftime('%Y-%m-%d %H:%M') if feed.sync_time else '从未同步'}",
@@ -357,3 +363,35 @@ def fetch(fetch_all: bool, days: int | None, full: bool, mp_id: str | None) -> N
             console.print("  wchat fetch --all         # 抓取所有订阅")
 
     run_async(_fetch())
+
+
+@click.command()
+@click.argument('mp_id')
+@click.argument('weight', type=click.Choice(['0', '5', '10']))
+def set_weight(mp_id: str, weight: str) -> None:
+    """设置公众号抓取权重。
+
+    MP_ID: 公众号 ID
+    WEIGHT: 权重值 (0=低, 5=中, 10=高)
+    """
+    weight_int = int(weight)
+
+    async def _set_weight() -> None:
+        db = await get_db()
+        subscription_service = SubscriptionService(db)
+
+        feed = await subscription_service.get_subscription(mp_id)
+        if not feed:
+            console.print(f"[red]订阅不存在: {mp_id}[/red]")
+            return
+
+        async with db.get_session() as session:
+            from sqlalchemy import update
+            await session.execute(
+                update(Feed).where(Feed.mp_id == mp_id).values(weight=weight_int)
+            )
+
+        weight_labels = {0: "低", 5: "中", 10: "高"}
+        console.print(f"[green]已设置 {feed.name} 权重为 {weight} ({weight_labels[weight_int]})[/green]")
+
+    run_async(_set_weight())
