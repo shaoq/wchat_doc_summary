@@ -210,6 +210,8 @@ class MarketAnalyzer:
             "session": None,
             "source": "none",
             "message": message,
+            "source_attempts": [],
+            "degraded": False,
             "us_market": {
                 "status": "error",
                 "session": None,

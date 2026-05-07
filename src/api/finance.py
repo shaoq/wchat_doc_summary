@@ -17,7 +17,8 @@ import re
 import subprocess
 from collections.abc import Mapping
 from datetime import date, datetime, time as time_type
-from typing import Any, Optional
+from enum import Enum
+from typing import Any, Optional, TypedDict
 from zoneinfo import ZoneInfo
 
 import akshare as ak
@@ -28,6 +29,26 @@ logger = logging.getLogger(__name__)
 
 # 是否禁用网络请求（用于测试或离线模式）
 _DISABLE_NETWORK = os.environ.get("WCHAT_DISABLE_NETWORK", "").lower() in ("1", "true", "yes")
+
+
+class ProviderFailureType(str, Enum):
+    """海外市场上下文 provider 失败分类。"""
+
+    UNAUTHORIZED = "unauthorized"
+    RATE_LIMITED = "rate_limited"
+    EMPTY = "empty"
+    MALFORMED = "malformed"
+    NETWORK_ERROR = "network_error"
+    NONE = "none"
+
+
+class ProviderAttempt(TypedDict):
+    """单个 provider 尝试结果。"""
+
+    source: str
+    status: str
+    failure_type: str
+    message: str
 
 _PYTDX_BATCH_SIZE = 80
 _PYTDX_HOSTS = (
@@ -367,6 +388,20 @@ class FinanceClient:
             session.headers["Referer"] = referer
         return session
 
+    @staticmethod
+    def _classify_provider_failure(error: Exception) -> tuple[str, str]:
+        """将 provider 异常分类为标准化失败类型和消息。"""
+        error_str = str(error)
+        if "401" in error_str:
+            return ProviderFailureType.UNAUTHORIZED.value, "上游拒绝访问 (401 Unauthorized)"
+        if "429" in error_str:
+            return ProviderFailureType.RATE_LIMITED.value, "上游限流 (429 Too Many Requests)"
+        if isinstance(error, (ConnectionError, requests.ConnectionError)):
+            return ProviderFailureType.NETWORK_ERROR.value, "网络连接失败"
+        if "timeout" in error_str.lower() or isinstance(error, requests.Timeout):
+            return ProviderFailureType.NETWORK_ERROR.value, "请求超时"
+        return ProviderFailureType.NETWORK_ERROR.value, f"上游请求失败: {error_str}"
+
     def _empty_global_market_context(
         self,
         target_a_trade_date: date,
@@ -385,6 +420,8 @@ class FinanceClient:
             "session": session,
             "source": source,
             "message": message,
+            "source_attempts": [],
+            "degraded": False,
             "us_market": {
                 "status": status,
                 "session": session,
@@ -563,8 +600,51 @@ class FinanceClient:
         finally:
             session.close()
 
+    def _fetch_yahoo_chart_sync(self, symbols: list[str]) -> list[Mapping[str, Any]]:
+        """使用 Yahoo chart API 获取行情数据（作为 v7 quote 的 fallback provider）。"""
+        session = self._requests_session(referer="https://finance.yahoo.com/")
+        try:
+            results: list[Mapping[str, Any]] = []
+            for symbol in symbols:
+                try:
+                    response = session.get(
+                        f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}",
+                        params={"range": "1d", "interval": "1d"},
+                        timeout=self.timeout,
+                    )
+                    response.raise_for_status()
+                    payload = response.json()
+                    chart_result = payload.get("chart", {}).get("result", [{}])
+                    if not chart_result:
+                        continue
+                    meta = chart_result[0].get("meta", {})
+                    if not meta.get("regularMarketPrice"):
+                        continue
+                    results.append({
+                        "symbol": symbol,
+                        "regularMarketPrice": meta.get("regularMarketPrice"),
+                        "regularMarketChangePercent": meta.get("regularMarketChangePercent"),
+                        "regularMarketChange": meta.get("regularMarketChange"),
+                        "regularMarketTime": meta.get("regularMarketTime"),
+                        "postMarketPrice": meta.get("postMarketPrice"),
+                        "postMarketChangePercent": meta.get("postMarketChangePercent"),
+                        "postMarketTime": meta.get("postMarketTime"),
+                        "preMarketPrice": meta.get("preMarketPrice"),
+                        "preMarketChangePercent": meta.get("preMarketChangePercent"),
+                        "preMarketTime": meta.get("preMarketTime"),
+                    })
+                except Exception:
+                    continue
+            return results
+        finally:
+            session.close()
+
     async def get_global_market_context(self, target_a_trade_date: date) -> dict[str, Any]:
-        """获取与 A 股目标交易日关联的海外市场上下文。"""
+        """获取与 A 股目标交易日关联的海外市场上下文。
+
+        使用有序 provider chain: yahoo_quote -> yahoo_chart，
+        短路于首个可用结果，并记录 source_attempts 和 degraded 元数据。
+        """
         if _DISABLE_NETWORK:
             return self._empty_global_market_context(
                 target_a_trade_date,
@@ -578,21 +658,85 @@ class FinanceClient:
             + list(self.GLOBAL_RISK_SYMBOLS)
             + list(self.GLOBAL_LEADER_SYMBOLS)
         )
+
+        source_attempts: list[ProviderAttempt] = []
+
+        # Provider 1: Yahoo v7 quote (主源)
         try:
             loop = asyncio.get_event_loop()
             rows = await loop.run_in_executor(None, lambda: self._fetch_yahoo_quotes_sync(symbols))
-            if not rows:
-                return self._empty_global_market_context(
-                    target_a_trade_date,
-                    message="海外市场上游返回空数据",
-                )
-            return self._normalize_global_quote_rows(rows, target_a_trade_date)
+            if rows:
+                result = self._normalize_global_quote_rows(rows, target_a_trade_date)
+                source_attempts.append(ProviderAttempt(
+                    source="yahoo_quote",
+                    status=result["status"],
+                    failure_type=ProviderFailureType.NONE.value,
+                    message="主源获取成功",
+                ))
+                result["source_attempts"] = source_attempts
+                result["degraded"] = False
+                return result
+            source_attempts.append(ProviderAttempt(
+                source="yahoo_quote",
+                status="error",
+                failure_type=ProviderFailureType.EMPTY.value,
+                message="海外市场上游返回空数据",
+            ))
         except Exception as e:
-            logger.warning("海外市场上下文获取失败: %s", e)
-            return self._empty_global_market_context(
-                target_a_trade_date,
-                message=f"海外市场上下文获取失败: {e}",
-            )
+            failure_type, message = self._classify_provider_failure(e)
+            source_attempts.append(ProviderAttempt(
+                source="yahoo_quote",
+                status="error",
+                failure_type=failure_type,
+                message=message,
+            ))
+            logger.warning("海外市场主源获取失败: %s", message)
+
+        # Provider 2: Yahoo v8 chart (fallback)
+        try:
+            loop = asyncio.get_event_loop()
+            rows = await loop.run_in_executor(None, lambda: self._fetch_yahoo_chart_sync(symbols))
+            if rows:
+                result = self._normalize_global_quote_rows(rows, target_a_trade_date)
+                result["source"] = "yahoo_chart"
+                result["us_market"]["source"] = "yahoo_chart"
+                source_attempts.append(ProviderAttempt(
+                    source="yahoo_chart",
+                    status=result["status"],
+                    failure_type=ProviderFailureType.NONE.value,
+                    message="fallback 获取成功",
+                ))
+                result["source_attempts"] = source_attempts
+                result["degraded"] = True
+                logger.info("海外市场上下文 fallback 成功 (yahoo_chart)")
+                return result
+            source_attempts.append(ProviderAttempt(
+                source="yahoo_chart",
+                status="error",
+                failure_type=ProviderFailureType.EMPTY.value,
+                message="海外市场 fallback 返回空数据",
+            ))
+        except Exception as e:
+            failure_type, message = self._classify_provider_failure(e)
+            source_attempts.append(ProviderAttempt(
+                source="yahoo_chart",
+                status="error",
+                failure_type=failure_type,
+                message=message,
+            ))
+            logger.warning("海外市场 fallback 获取失败: %s", message)
+
+        # 所有 provider 均失败
+        last_attempt = source_attempts[-1] if source_attempts else None
+        result = self._empty_global_market_context(
+            target_a_trade_date,
+            status="error",
+            message=last_attempt["message"] if last_attempt else "所有海外市场上游均失败",
+            source=last_attempt["source"] if last_attempt else "none",
+        )
+        result["source_attempts"] = source_attempts
+        result["degraded"] = False
+        return result
 
     def _parse_jsonp_payload(self, payload: str) -> Any:
         text = payload.strip()

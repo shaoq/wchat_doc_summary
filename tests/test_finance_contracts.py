@@ -1378,3 +1378,160 @@ class TestLegacyFallbackRegression:
 
         assert statistics == {"up_count": 0, "down_count": 0, "flat_count": 0}
         assert quality["status"] == "error"
+
+
+# ── 海外市场上下文 provider fallback / failure classification / provenance ───
+
+
+class TestProviderFallbackContract:
+    """海外市场上下文 provider fallback 契约测试。"""
+
+    def test_classify_401_as_unauthorized(self, finance_client):
+        """Contract: 401 错误应被分类为 unauthorized。"""
+        failure_type, message = finance_client._classify_provider_failure(
+            Exception("401 Client Error: Unauthorized")
+        )
+        assert failure_type == "unauthorized"
+        assert "401" in message
+
+    def test_classify_429_as_rate_limited(self, finance_client):
+        """Contract: 429 错误应被分类为 rate_limited。"""
+        failure_type, message = finance_client._classify_provider_failure(
+            Exception("429 Too Many Requests")
+        )
+        assert failure_type == "rate_limited"
+        assert "429" in message
+
+    def test_classify_connection_error_as_network_error(self, finance_client):
+        """Contract: ConnectionError 应被分类为 network_error。"""
+        failure_type, message = finance_client._classify_provider_failure(
+            ConnectionError("Connection refused")
+        )
+        assert failure_type == "network_error"
+
+    def test_classify_timeout_as_network_error(self, finance_client):
+        """Contract: 超时应被分类为 network_error。"""
+        import requests as req
+        failure_type, message = finance_client._classify_provider_failure(
+            req.Timeout("Read timed out")
+        )
+        assert failure_type == "network_error"
+
+    def test_classify_generic_error_as_network_error(self, finance_client):
+        """Contract: 通用异常应被分类为 network_error。"""
+        failure_type, message = finance_client._classify_provider_failure(
+            Exception("Unexpected error")
+        )
+        assert failure_type == "network_error"
+
+    @pytest.mark.asyncio
+    async def test_primary_success_no_fallback(self, finance_client):
+        """Contract: 主源成功时不应尝试 fallback。"""
+        mock_rows = [
+            {"symbol": "^DJI", "regularMarketPrice": 39000.0, "regularMarketChangePercent": 0.4, "regularMarketTime": 1710500000},
+            {"symbol": "^GSPC", "regularMarketPrice": 5200.0, "regularMarketChangePercent": 0.6, "regularMarketTime": 1710500000},
+            {"symbol": "^IXIC", "regularMarketPrice": 16500.0, "regularMarketChangePercent": 0.9, "regularMarketTime": 1710500000},
+            {"symbol": "^VIX", "regularMarketPrice": 13.5, "regularMarketChangePercent": -2.0, "regularMarketTime": 1710500000},
+            {"symbol": "DX-Y.NYB", "regularMarketPrice": 104.1, "regularMarketChangePercent": 0.1, "regularMarketTime": 1710500000},
+            {"symbol": "^TNX", "regularMarketPrice": 42.0, "regularMarketChange": 0.15, "regularMarketChangePercent": 0.35, "regularMarketTime": 1710500000},
+            {"symbol": "NVDA", "regularMarketPrice": 900.0, "regularMarketChangePercent": 1.2, "regularMarketTime": 1710500000},
+        ]
+        with patch.object(
+            finance_client, "_fetch_yahoo_quotes_sync", return_value=mock_rows,
+        ):
+            with patch.object(
+                finance_client, "_fetch_yahoo_chart_sync",
+            ) as mock_fallback:
+                result = await finance_client.get_global_market_context(date(2026, 3, 27))
+
+        assert result["status"] == "ok"
+        assert result["source"] == "yahoo_quote"
+        assert result["degraded"] is False
+        assert len(result["source_attempts"]) == 1
+        assert result["source_attempts"][0]["source"] == "yahoo_quote"
+        assert result["source_attempts"][0]["failure_type"] == "none"
+        mock_fallback.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_primary_401_triggers_fallback(self, finance_client):
+        """Contract: 主源 401 失败后应尝试 fallback。"""
+        mock_rows = [
+            {"symbol": "^DJI", "regularMarketPrice": 39000.0, "regularMarketChangePercent": 0.4, "regularMarketTime": 1710500000},
+            {"symbol": "^GSPC", "regularMarketPrice": 5200.0, "regularMarketChangePercent": 0.6, "regularMarketTime": 1710500000},
+            {"symbol": "^IXIC", "regularMarketPrice": 16500.0, "regularMarketChangePercent": 0.9, "regularMarketTime": 1710500000},
+            {"symbol": "^VIX", "regularMarketPrice": 13.5, "regularMarketChangePercent": -2.0, "regularMarketTime": 1710500000},
+            {"symbol": "DX-Y.NYB", "regularMarketPrice": 104.1, "regularMarketChangePercent": 0.1, "regularMarketTime": 1710500000},
+            {"symbol": "^TNX", "regularMarketPrice": 42.0, "regularMarketChange": 0.15, "regularMarketChangePercent": 0.35, "regularMarketTime": 1710500000},
+            {"symbol": "NVDA", "regularMarketPrice": 900.0, "regularMarketChangePercent": 1.2, "regularMarketTime": 1710500000},
+        ]
+        with patch.object(
+            finance_client, "_fetch_yahoo_quotes_sync",
+            side_effect=Exception("401 Client Error: Unauthorized"),
+        ):
+            with patch.object(
+                finance_client, "_fetch_yahoo_chart_sync", return_value=mock_rows,
+            ):
+                result = await finance_client.get_global_market_context(date(2026, 3, 27))
+
+        assert result["status"] == "ok"
+        assert result["source"] == "yahoo_chart"
+        assert result["degraded"] is True
+        assert len(result["source_attempts"]) == 2
+        assert result["source_attempts"][0]["source"] == "yahoo_quote"
+        assert result["source_attempts"][0]["failure_type"] == "unauthorized"
+        assert result["source_attempts"][1]["source"] == "yahoo_chart"
+        assert result["source_attempts"][1]["failure_type"] == "none"
+
+    @pytest.mark.asyncio
+    async def test_all_providers_fail_returns_error_with_attempts(self, finance_client):
+        """Contract: 所有 provider 均失败时返回 error 并附带完整尝试序列。"""
+        with patch.object(
+            finance_client, "_fetch_yahoo_quotes_sync",
+            side_effect=Exception("401 Client Error: Unauthorized"),
+        ):
+            with patch.object(
+                finance_client, "_fetch_yahoo_chart_sync",
+                side_effect=Exception("Connection refused"),
+            ):
+                result = await finance_client.get_global_market_context(date(2026, 3, 27))
+
+        assert result["status"] == "error"
+        assert result["degraded"] is False
+        assert len(result["source_attempts"]) == 2
+        assert result["source_attempts"][0]["failure_type"] == "unauthorized"
+        assert result["source_attempts"][1]["failure_type"] == "network_error"
+
+    @pytest.mark.asyncio
+    async def test_empty_primary_triggers_fallback(self, finance_client):
+        """Contract: 主源返回空数据时也应触发 fallback。"""
+        mock_rows = [
+            {"symbol": "^DJI", "regularMarketPrice": 39000.0, "regularMarketChangePercent": 0.4, "regularMarketTime": 1710500000},
+            {"symbol": "^GSPC", "regularMarketPrice": 5200.0, "regularMarketChangePercent": 0.6, "regularMarketTime": 1710500000},
+            {"symbol": "^IXIC", "regularMarketPrice": 16500.0, "regularMarketChangePercent": 0.9, "regularMarketTime": 1710500000},
+            {"symbol": "^VIX", "regularMarketPrice": 13.5, "regularMarketChangePercent": -2.0, "regularMarketTime": 1710500000},
+            {"symbol": "DX-Y.NYB", "regularMarketPrice": 104.1, "regularMarketChangePercent": 0.1, "regularMarketTime": 1710500000},
+            {"symbol": "^TNX", "regularMarketPrice": 42.0, "regularMarketChange": 0.15, "regularMarketChangePercent": 0.35, "regularMarketTime": 1710500000},
+            {"symbol": "NVDA", "regularMarketPrice": 900.0, "regularMarketChangePercent": 1.2, "regularMarketTime": 1710500000},
+        ]
+        with patch.object(
+            finance_client, "_fetch_yahoo_quotes_sync", return_value=[],
+        ):
+            with patch.object(
+                finance_client, "_fetch_yahoo_chart_sync", return_value=mock_rows,
+            ):
+                result = await finance_client.get_global_market_context(date(2026, 3, 27))
+
+        assert result["status"] == "ok"
+        assert result["source"] == "yahoo_chart"
+        assert result["degraded"] is True
+        assert result["source_attempts"][0]["failure_type"] == "empty"
+
+    @pytest.mark.asyncio
+    async def test_disabled_network_returns_error_with_empty_attempts(self, finance_client):
+        """Contract: 网络禁用时返回 error，source_attempts 为空。"""
+        with patch("src.api.finance._DISABLE_NETWORK", True):
+            result = await finance_client.get_global_market_context(date(2026, 3, 27))
+
+        assert result["status"] == "error"
+        assert result["source_attempts"] == []
+        assert result["degraded"] is False

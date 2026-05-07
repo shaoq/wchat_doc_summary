@@ -294,7 +294,13 @@ class MarketDataCacheService:
         context: dict[str, Any],
         fetch_time: datetime,
     ) -> None:
-        """按目标 A 股交易日 upsert 海外市场上下文。"""
+        """按目标 A 股交易日 upsert 海外市场上下文。
+
+        质量优先保护规则：
+        - ok 可以覆盖 partial/error
+        - partial 可以覆盖 error
+        - error 不得覆盖已有 ok/partial
+        """
         result = await session.execute(
             select(GlobalMarketContext).where(GlobalMarketContext.target_a_trade_date == trade_date)
         )
@@ -308,6 +314,15 @@ class MarketDataCacheService:
         source = context.get("source") or us_market.get("source")
 
         if existing:
+            # 质量优先保护：error 不得覆盖 ok/partial
+            existing_quality = str(existing.status)
+            quality_order = {"ok": 3, "partial": 2, "error": 1}
+            if quality_order.get(status, 0) < quality_order.get(existing_quality, 0):
+                logger.info(
+                    "海外市场上下文缓存保护: 新状态 %s 不覆盖已有 %s (%s)",
+                    status, existing_quality, trade_date,
+                )
+                return
             existing.status = status
             existing.captured_at = context.get("captured_at")
             existing.as_of = as_of

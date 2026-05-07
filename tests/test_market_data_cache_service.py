@@ -433,7 +433,7 @@ class TestGlobalMarketContextCache:
 
     @pytest.mark.asyncio
     async def test_global_market_context_upsert_overwrites_payload(self, integration_db, sample_data):
-        """重复保存同一交易日时，海外市场上下文应按目标交易日覆盖。"""
+        """重复保存同一交易日时，海外市场上下文质量相同时按目标交易日覆盖。"""
         service = MarketDataCacheService(integration_db)
         trade_date = date(2026, 3, 27)
 
@@ -441,11 +441,9 @@ class TestGlobalMarketContextCache:
 
         updated_context = {
             **sample_data["global_market_context"],
-            "status": "partial",
-            "message": "部分信号缺失",
+            "message": "更新后的消息",
             "us_market": {
                 **sample_data["global_market_context"]["us_market"],
-                "status": "partial",
                 "indices": sample_data["global_market_context"]["us_market"]["indices"][:1],
             },
         }
@@ -456,7 +454,7 @@ class TestGlobalMarketContextCache:
 
         cached = await service.get_cached(trade_date)
         assert cached is not None
-        assert cached["global_market_context"]["status"] == "partial"
+        assert cached["global_market_context"]["status"] == "ok"
         assert len(cached["global_market_context"]["us_market"]["indices"]) == 1
 
     @pytest.mark.asyncio
@@ -607,6 +605,139 @@ class TestBreadthQualityCacheProtection:
         assert cached is not None
         assert cached["volume"]["total_volume"] == 7000.0
         assert cached["statistics"]["up_count"] == 2000
+
+    @pytest.mark.asyncio
+    async def test_error_global_context_does_not_overwrite_ok(self, integration_db, sample_data):
+        """error 海外市场上下文不应覆盖已有 ok 缓存。"""
+        service = MarketDataCacheService(integration_db)
+        trade_date = date(2026, 3, 27)
+
+        # 第一次：写入 ok 海外上下文
+        await service.save_market_data(trade_date, sample_data)
+        cached = await service.get_cached(trade_date)
+        assert cached["global_market_context"]["status"] == "ok"
+
+        # 第二次：尝试写入 error 海外上下文
+        error_data = {
+            **sample_data,
+            "global_market_context": {
+                "status": "error",
+                "target_a_trade_date": "2026-03-27",
+                "message": "主源被拒绝访问",
+                "source": "yahoo_quote",
+                "source_attempts": [{"source": "yahoo_quote", "status": "error", "failure_type": "unauthorized", "message": "401"}],
+                "degraded": False,
+            },
+        }
+        await service.save_market_data(trade_date, error_data)
+
+        # 验证：ok 未被覆盖
+        cached = await service.get_cached(trade_date)
+        assert cached["global_market_context"]["status"] == "ok"
+        assert cached["global_market_context"]["us_market"]["indices"][0]["symbol"] == "DJIA"
+
+    @pytest.mark.asyncio
+    async def test_error_global_context_does_not_overwrite_partial(self, integration_db, sample_data):
+        """error 海外市场上下文不应覆盖已有 partial 缓存。"""
+        service = MarketDataCacheService(integration_db)
+        trade_date = date(2026, 3, 27)
+
+        # 第一次：写入 partial 海外上下文
+        partial_data = {
+            **sample_data,
+            "global_market_context": {
+                "status": "partial",
+                "target_a_trade_date": "2026-03-27",
+                "captured_at": "2026-03-27T22:30:00+08:00",
+                "as_of": "2026-03-27T22:29:00+08:00",
+                "session": "regular",
+                "source": "yahoo_quote",
+                "message": "部分缺失",
+                "us_market": {
+                    "status": "partial",
+                    "session": "regular",
+                    "as_of": "2026-03-27T22:29:00+08:00",
+                    "indices": [
+                        {"symbol": "DJIA", "name": "道琼斯", "price": 39000.0, "change_pct": 0.004},
+                    ],
+                    "risk_signals": {},
+                    "leaders": [],
+                    "source": "yahoo_quote",
+                },
+            },
+        }
+        await service.save_market_data(trade_date, partial_data)
+
+        # 第二次：尝试写入 error
+        error_data = {
+            **sample_data,
+            "global_market_context": {
+                "status": "error",
+                "target_a_trade_date": "2026-03-27",
+                "message": "网络错误",
+                "source": "yahoo_quote",
+                "source_attempts": [{"source": "yahoo_quote", "status": "error", "failure_type": "network_error", "message": "timeout"}],
+                "degraded": False,
+            },
+        }
+        await service.save_market_data(trade_date, error_data)
+
+        cached = await service.get_cached(trade_date)
+        assert cached["global_market_context"]["status"] == "partial"
+
+    @pytest.mark.asyncio
+    async def test_ok_global_context_overwrites_error(self, integration_db, sample_data):
+        """ok 海外市场上下文应覆盖已有 error 缓存。"""
+        service = MarketDataCacheService(integration_db)
+        trade_date = date(2026, 3, 27)
+
+        # 第一次：写入 error
+        error_data = {
+            **sample_data,
+            "global_market_context": {
+                "status": "error",
+                "target_a_trade_date": "2026-03-27",
+                "message": "不可用",
+                "source": "yahoo_quote",
+                "source_attempts": [],
+                "degraded": False,
+            },
+        }
+        await service.save_market_data(trade_date, error_data)
+
+        # 第二次：写入 ok
+        await service.save_market_data(trade_date, sample_data)
+
+        cached = await service.get_cached(trade_date)
+        assert cached["global_market_context"]["status"] == "ok"
+        assert cached["global_market_context"]["us_market"]["indices"][0]["symbol"] == "DJIA"
+
+    @pytest.mark.asyncio
+    async def test_provenance_metadata_round_trip(self, integration_db, sample_data):
+        """source_attempts 和 degraded 元数据应随缓存原样读回。"""
+        service = MarketDataCacheService(integration_db)
+        trade_date = date(2026, 3, 27)
+
+        context_with_provenance = {
+            **sample_data["global_market_context"],
+            "source": "yahoo_chart",
+            "degraded": True,
+            "source_attempts": [
+                {"source": "yahoo_quote", "status": "error", "failure_type": "unauthorized", "message": "401 Unauthorized"},
+                {"source": "yahoo_chart", "status": "ok", "failure_type": "none", "message": ""},
+            ],
+        }
+        data = {**sample_data, "global_market_context": context_with_provenance}
+        await service.save_market_data(trade_date, data)
+
+        cached = await service.get_cached(trade_date)
+        ctx = cached["global_market_context"]
+        assert ctx["status"] == "ok"
+        assert ctx["source"] == "yahoo_chart"
+        assert ctx["degraded"] is True
+        assert len(ctx["source_attempts"]) == 2
+        assert ctx["source_attempts"][0]["failure_type"] == "unauthorized"
+        assert ctx["source_attempts"][1]["source"] == "yahoo_chart"
 
     @pytest.mark.asyncio
     async def test_mixed_breadth_quality_only_writes_ok_items(self, integration_db, sample_data):

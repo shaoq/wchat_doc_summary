@@ -260,6 +260,8 @@ def _get_global_context_status_item(market_data: dict[str, Any]) -> dict[str, st
     us_market = context.get("us_market", {}) if isinstance(context.get("us_market"), dict) else {}
     session = context.get("session") or us_market.get("session") or "-"
     as_of = context.get("as_of") or us_market.get("as_of") or "-"
+    source = context.get("source") or us_market.get("source") or "-"
+    degraded = context.get("degraded", False)
     indices = us_market.get("indices", []) if isinstance(us_market.get("indices"), list) else []
     index_summary = ", ".join(
         f"{item.get('symbol', item.get('name', ''))} {_format_pct(item.get('change_pct'))}"
@@ -269,13 +271,27 @@ def _get_global_context_status_item(market_data: dict[str, Any]) -> dict[str, st
     if not index_summary:
         index_summary = context.get("message") or "暂无指数信号"
 
-    message = f"{index_summary} | session={session} | as_of={as_of}"
+    # 构建 fallback 状态后缀
+    fallback_suffix = ""
+    source_attempts = context.get("source_attempts", [])
+    if degraded:
+        fallback_suffix = " (fallback)"
+    elif status == "error" and source_attempts:
+        # 提取最终失败类型
+        last_attempt = source_attempts[-1] if source_attempts else {}
+        failure_type = last_attempt.get("failure_type", "")
+        if failure_type == "unauthorized":
+            fallback_suffix = " (上游拒绝访问)"
+        elif failure_type == "rate_limited":
+            fallback_suffix = " (上游限流)"
+
+    message = f"{index_summary} | session={session} | as_of={as_of}{fallback_suffix}"
     return _make_status_item(
         "海外市场",
         status if status in ("ok", "partial", "error") else "error",
         ok_message=message,
         empty_message="暂无海外市场上下文",
-        error_message=context.get("message", "获取失败"),
+        error_message=context.get("message", "获取失败") + fallback_suffix,
         summary=message,
     )
 

@@ -1509,3 +1509,133 @@ def test_approximate_limit_up_shows_candidate_label():
     assert result.exit_code == 0
     assert "近似候选" in output
     assert "2 只" in output
+
+
+# ---------------------------------------------------------------------------
+# Task 4.3: 海外市场 fallback 展示
+# ---------------------------------------------------------------------------
+
+
+class _GlobalContextFallbackAnalyzer(_FakeAnalyzer):
+    """主源失败后 fallback 成功的海外市场上下文。"""
+
+    async def collect_market_data(self, offline=False, trade_date=None, force=False):
+        return {
+            "indices": {"sh": {"name": "上证指数", "close": 3089.26, "change": 0.0045}},
+            "volume": {"sh_volume": 5000.0, "sz_volume": 7000.0, "total_volume": 12000.0},
+            "statistics": {"up_count": 2500, "down_count": 1800, "flat_count": 200},
+            "sectors": {"top_sectors": [], "bottom_sectors": []},
+            "limit_up": [],
+            "fetch_time": "2026-03-27T10:00:00",
+            "data_source": "api",
+            "global_market_context": {
+                "status": "ok",
+                "target_a_trade_date": "2026-03-27",
+                "captured_at": "2026-03-27T22:30:00+08:00",
+                "as_of": "2026-03-27T22:29:00+08:00",
+                "session": "regular",
+                "source": "yahoo_chart",
+                "degraded": True,
+                "source_attempts": [
+                    {"source": "yahoo_quote", "status": "error", "failure_type": "unauthorized", "message": "401"},
+                    {"source": "yahoo_chart", "status": "ok", "failure_type": "none", "message": ""},
+                ],
+                "us_market": {
+                    "status": "ok",
+                    "session": "regular",
+                    "as_of": "2026-03-27T22:29:00+08:00",
+                    "indices": [
+                        {"symbol": "DJIA", "name": "道琼斯", "price": 39000.0, "change_pct": 0.004},
+                    ],
+                    "risk_signals": {},
+                    "leaders": [],
+                    "source": "yahoo_chart",
+                },
+            },
+        }
+
+
+class _GlobalContextAllFailAnalyzer(_FakeAnalyzer):
+    """所有 provider 失败的海外市场上下文（主源 unauthorized）。"""
+
+    async def collect_market_data(self, offline=False, trade_date=None, force=False):
+        return {
+            "indices": {"sh": {"name": "上证指数", "close": 3089.26, "change": 0.0045}},
+            "volume": {"sh_volume": 5000.0, "sz_volume": 7000.0, "total_volume": 12000.0},
+            "statistics": {"up_count": 2500, "down_count": 1800, "flat_count": 200},
+            "sectors": {"top_sectors": [], "bottom_sectors": []},
+            "limit_up": [],
+            "fetch_time": "2026-03-27T10:00:00",
+            "data_source": "api",
+            "global_market_context": {
+                "status": "error",
+                "target_a_trade_date": "2026-03-27",
+                "message": "所有海外市场数据源不可用",
+                "source": "yahoo_quote",
+                "degraded": False,
+                "source_attempts": [
+                    {"source": "yahoo_quote", "status": "error", "failure_type": "unauthorized", "message": "401"},
+                ],
+            },
+        }
+
+
+def test_fallback_success_shows_fallback_label():
+    """fallback 成功时，CLI 应展示 (fallback) 标签。"""
+    runner = CliRunner()
+    _GlobalContextFallbackAnalyzer.instances = []
+    _FakeProcessor.instances = []
+
+    with patch("src.cli.ai.get_db", new=_fake_get_db):
+        with patch("src.cli.ai.MarketAnalyzer", _GlobalContextFallbackAnalyzer):
+            with patch("src.cli.ai.AIProcessor", _FakeProcessor):
+                result = runner.invoke(
+                    main,
+                    ["ai", "market-summary", "--date", "2026-03-27", "--force"],
+                )
+
+    output = result.output
+    assert result.exit_code == 0
+    assert "(fallback)" in output
+
+
+def test_all_providers_fail_shows_unauthorized_hint():
+    """所有 provider 失败且主源为 401 时，CLI 应展示上游拒绝访问提示。"""
+    runner = CliRunner()
+    _GlobalContextAllFailAnalyzer.instances = []
+    _FakeProcessor.instances = []
+
+    with patch("src.cli.ai.get_db", new=_fake_get_db):
+        with patch("src.cli.ai.MarketAnalyzer", _GlobalContextAllFailAnalyzer):
+            with patch("src.cli.ai.AIProcessor", _FakeProcessor):
+                result = runner.invoke(
+                    main,
+                    ["ai", "market-summary", "--date", "2026-03-27", "--force"],
+                )
+
+    output = result.output
+    assert result.exit_code == 0
+    assert "上游拒绝访问" in output
+
+
+def test_fallback_provenance_passed_to_processor():
+    """fallback 的 provenance 元数据应原样传给 AIProcessor。"""
+    runner = CliRunner()
+    _GlobalContextFallbackAnalyzer.instances = []
+    _FakeProcessor.instances = []
+
+    with patch("src.cli.ai.get_db", new=_fake_get_db):
+        with patch("src.cli.ai.MarketAnalyzer", _GlobalContextFallbackAnalyzer):
+            with patch("src.cli.ai.AIProcessor", _FakeProcessor):
+                result = runner.invoke(
+                    main,
+                    ["ai", "market-summary", "--date", "2026-03-27", "--force"],
+                )
+
+    assert result.exit_code == 0
+    call = _FakeProcessor.instances[0].generate_calls[0]
+    ctx = call["global_market_context"]
+    assert ctx["degraded"] is True
+    assert ctx["source"] == "yahoo_chart"
+    assert len(ctx["source_attempts"]) == 2
+    assert ctx["source_attempts"][0]["failure_type"] == "unauthorized"

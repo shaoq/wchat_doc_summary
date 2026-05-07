@@ -600,3 +600,101 @@ class TestStrategyEnhancement:
 
         assert len(prompts) == 1
         assert summary == complete_summary
+
+
+class TestGlobalMarketContextFallbackInPrompt:
+    """测试海外市场 fallback 元数据在 prompt 中的体现。"""
+
+    def _invoke_build_data_gaps(self, **overrides) -> str:
+        """调用 _build_data_gaps 方法。"""
+        processor = _make_processor()
+        defaults = {
+            "indices": {"sh000001": {"name": "上证", "close": 3100, "change": 0.01}},
+            "volume": {"total_volume": "8500"},
+            "stats": {"up_count": 100, "down_count": 50, "flat_count": 10},
+            "top_sectors": [{"name": "电力", "change": 0.03}],
+            "bottom_sectors": [{"name": "油气", "change": -0.01}],
+            "limit_up": [{"name": "测试股", "code": "000001"}],
+            "telegraphs": [{"title": "新闻"}],
+            "watch_items": [{"title": "看盘"}],
+            "articles": [{"title": "文章"}],
+            "global_market_context": _full_global_market_context(),
+        }
+        defaults.update(overrides)
+        return processor._build_data_gaps(**defaults)
+
+    def test_unauthorized_failure_in_data_gaps(self) -> None:
+        """401 失败时，数据缺口应包含'主源被拒绝访问'提示。"""
+        context = {
+            "status": "error",
+            "message": "所有海外市场数据源不可用",
+            "source": "yahoo_quote",
+            "source_attempts": [
+                {"source": "yahoo_quote", "status": "error", "failure_type": "unauthorized", "message": "401"},
+            ],
+            "degraded": False,
+        }
+        result = self._invoke_build_data_gaps(global_market_context=context)
+        assert "主源被拒绝访问" in result
+        assert "不得臆测隔夜美股表现" in result
+
+    def test_rate_limited_failure_in_data_gaps(self) -> None:
+        """限流失败时，数据缺口应包含'主源被限流'提示。"""
+        context = {
+            "status": "error",
+            "message": "所有海外市场数据源不可用",
+            "source": "yahoo_quote",
+            "source_attempts": [
+                {"source": "yahoo_quote", "status": "error", "failure_type": "rate_limited", "message": "429"},
+            ],
+            "degraded": False,
+        }
+        result = self._invoke_build_data_gaps(global_market_context=context)
+        assert "主源被限流" in result
+
+    def test_degraded_context_in_prompt(self) -> None:
+        """fallback 成功时，prompt 应包含 fallback 标签。"""
+        processor = _make_processor()
+        context = {
+            **_full_global_market_context(),
+            "source": "yahoo_chart",
+            "degraded": True,
+            "source_attempts": [
+                {"source": "yahoo_quote", "status": "error", "failure_type": "unauthorized", "message": "401"},
+                {"source": "yahoo_chart", "status": "ok", "failure_type": "none", "message": ""},
+            ],
+        }
+        text = processor._format_global_market_context_for_prompt(context)
+        assert "fallback" in text
+        assert "时效性可能受影响" in text
+
+    def test_partial_context_forbids_guessing(self) -> None:
+        """partial 海外上下文应包含'不得补全未知走势'约束。"""
+        processor = _make_processor()
+        context = {
+            "status": "partial",
+            "target_a_trade_date": "2024-03-15",
+            "captured_at": "2024-03-15T22:30:00+08:00",
+            "as_of": "2024-03-15T22:29:00+08:00",
+            "session": "regular",
+            "source": "yahoo_quote",
+            "message": "部分缺失",
+            "us_market": {
+                "status": "partial",
+                "session": "regular",
+                "indices": [
+                    {"symbol": "DJIA", "name": "道琼斯", "price": 39000.0, "change_pct": 0.004},
+                ],
+                "risk_signals": {},
+                "leaders": [],
+                "source": "yahoo_quote",
+            },
+        }
+        text = processor._format_global_market_context_for_prompt(context)
+        assert "不得补全未知走势" in text
+
+    def test_no_global_context_forbids_guessing(self) -> None:
+        """缺失海外上下文时，prompt 应禁止臆测美股走势。"""
+        processor = _make_processor()
+        text = processor._format_global_market_context_for_prompt(None)
+        assert "不得臆测" in text

@@ -1022,11 +1022,23 @@ class AIProcessor:
             gaps.append("海外市场上下文缺失")
         elif isinstance(global_market_context, dict):
             context_status = global_market_context.get("status")
+            source_attempts = global_market_context.get("source_attempts", [])
             if context_status == "partial":
                 gaps.append("海外市场上下文部分缺失，请勿补全未知海外信号")
             elif context_status != "ok":
                 message = global_market_context.get("message", "海外市场上下文不可用")
-                gaps.append(f"{message}，不得臆测隔夜美股表现")
+                # 使用结构化失败类型生成更精确的缺口提示
+                failure_hint = ""
+                if source_attempts:
+                    last_attempt = source_attempts[-1]
+                    failure_type = last_attempt.get("failure_type", "")
+                    if failure_type == "unauthorized":
+                        failure_hint = "（主源被拒绝访问）"
+                    elif failure_type == "rate_limited":
+                        failure_hint = "（主源被限流）"
+                    elif failure_type == "network_error":
+                        failure_hint = "（网络错误）"
+                gaps.append(f"{message}{failure_hint}，不得臆测隔夜美股表现")
         else:
             gaps.append("海外市场上下文格式异常，不得臆测隔夜美股表现")
 
@@ -1149,13 +1161,27 @@ class AIProcessor:
         session = context.get("session") or us_market.get("session") or "未知"
         as_of = context.get("as_of") or us_market.get("as_of") or "未知"
         source = context.get("source") or us_market.get("source") or "未知"
+        degraded = context.get("degraded", False)
+        source_attempts = context.get("source_attempts", [])
 
         if status not in ("ok", "partial"):
             message = context.get("message", "海外市场上下文不可用")
-            return f"{message}。不得臆测隔夜美股走势或海外风险偏好。"
+            # 提取结构化失败类型
+            failure_hint = ""
+            if source_attempts:
+                last_attempt = source_attempts[-1]
+                failure_type = last_attempt.get("failure_type", "")
+                if failure_type == "unauthorized":
+                    failure_hint = "（主源被拒绝访问）"
+                elif failure_type == "rate_limited":
+                    failure_hint = "（主源被限流）"
+                elif failure_type == "empty":
+                    failure_hint = "（主源返回空数据）"
+            return f"{message}{failure_hint}。不得臆测隔夜美股走势或海外风险偏好。"
 
+        source_label = f"{source} (fallback)" if degraded else source
         lines = [
-            f"状态：{status}；交易阶段：{session}；行情时间：{as_of}；来源：{source}",
+            f"状态：{status}；交易阶段：{session}；行情时间：{as_of}；来源：{source_label}",
         ]
 
         indices = us_market.get("indices", []) if isinstance(us_market.get("indices"), list) else []
@@ -1203,5 +1229,8 @@ class AIProcessor:
         if status == "partial":
             message = context.get("message", "海外市场上下文部分缺失")
             lines.append(f"注意：{message}。只能使用已给出的海外信号，不得补全未知走势。")
+
+        if degraded:
+            lines.append("注意：主源失败后通过 fallback 获取数据，时效性可能受影响。")
 
         return "\n".join(lines)
