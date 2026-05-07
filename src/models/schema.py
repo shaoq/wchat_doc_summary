@@ -1,7 +1,7 @@
 """数据模型定义 - 使用 SQLAlchemy ORM 定义数据库表结构。"""
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional
 
 from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, func, Date
@@ -58,6 +58,31 @@ class Feed(Base):
 
     def __repr__(self) -> str:
         return f"<Feed(id={self.id}, name='{self.name}')>"
+
+
+class FetchBatch(Base):
+    """批量抓取进度跟踪模型 - 记录每个订阅每日的抓取状态。"""
+
+    __tablename__ = "fetch_batches"
+    __table_args__ = (
+        UniqueConstraint("mp_id", "batch_date", name="uq_fetch_batches_mp_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    mp_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True, comment="公众号ID")
+    batch_date: Mapped[date] = mapped_column(Date, nullable=False, index=True, comment="批次日期")
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="pending", comment="状态: pending/done",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), comment="创建时间",
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now(), comment="更新时间",
+    )
+
+    def __repr__(self) -> str:
+        return f"<FetchBatch(mp_id='{self.mp_id}', date={self.batch_date}, status='{self.status}')>"
 
 
 class Article(Base):

@@ -240,8 +240,9 @@ def info(mp_id: str) -> None:
 @click.option('--all', 'fetch_all', is_flag=True, help='抓取所有订阅')
 @click.option('--days', 'days', type=int, default=None, help='抓取最近 N 天的文章')
 @click.option('--full', 'full', is_flag=True, help='抓取全部历史文章')
+@click.option('--force', 'force', is_flag=True, help='强制全新开始（忽略当日进度）')
 @click.argument('mp_id', required=False)
-def fetch(fetch_all: bool, days: int | None, full: bool, mp_id: str | None) -> None:
+def fetch(fetch_all: bool, days: int | None, full: bool, force: bool, mp_id: str | None) -> None:
     """拉取文章。
 
     MP_ID: 公众号 ID（可选，不指定时需使用 --all）
@@ -300,13 +301,9 @@ def fetch(fetch_all: bool, days: int | None, full: bool, mp_id: str | None) -> N
             console.print(f"[cyan]抓取范围: 最新 {latest_count} 条[/cyan]")
 
         if fetch_all:
-            # 抓取所有订阅
-            total_feeds = 0
+            # 抓取所有订阅（支持 batch 断点续传）
             results: dict[str, FetchSummary] = {}
             try:
-                feeds = await subscription_service.list_subscriptions(active_only=True)
-                total_feeds = len(feeds)
-
                 def on_fetch_all_progress(event: FetchProgressEvent) -> None:
                     if event.type == "subscription_start":
                         console.print(f"\n[bold cyan]{event.detail}[/bold cyan] {event.feed_name}")
@@ -325,20 +322,23 @@ def fetch(fetch_all: bool, days: int | None, full: bool, mp_id: str | None) -> N
 
                 results = await fetcher_service.fetch_all(
                     days=days, latest_count=latest_count, on_progress=on_fetch_all_progress,
+                    force=force,
                 )
             except RateLimitError:
-                completed = len(results)
-                console.print(f"\n[yellow]已被限流，已完成 {completed}/{total_feeds} 个订阅[/yellow]")
-                console.print("[dim]请稍后重试: wchat fetch --all[/dim]")
                 for feed_mp_id, summary in results.items():
                     _print_fetch_summary(feed_mp_id, summary)
+                console.print(f"\n[yellow]已被限流，已完成 {len(results)} 个订阅[/yellow]")
+                console.print("[dim]请稍后重试: wchat fetch --all[/dim]")
                 return
             except AuthExpiredError:
                 console.print("\n[red]Token 已失效，请重新登录: wchat login[/red]")
                 return
 
-            for feed_mp_id, summary in results.items():
-                _print_fetch_summary(feed_mp_id, summary)
+            if not results:
+                console.print("[green]今日所有订阅已同步完成[/green]")
+            else:
+                for feed_mp_id, summary in results.items():
+                    _print_fetch_summary(feed_mp_id, summary)
 
         elif mp_id:
             # 抓取指定公众号

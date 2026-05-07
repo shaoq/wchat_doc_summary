@@ -890,7 +890,10 @@ class TestRateLimitCircuitBreaker:
 
         fetcher_service._fetch_incremental_or_init_summary = AsyncMock(side_effect=mock_fetch_summary)
 
-        results = await fetcher_service.fetch_all()
+        feeds_list = [feed_1, feed_2, feed_3]
+        with patch.object(fetcher_service, "_ensure_today_batch", new_callable=AsyncMock), \
+             patch.object(fetcher_service, "_get_pending_feeds", new_callable=AsyncMock, return_value=feeds_list):
+            results = await fetcher_service.fetch_all()
 
         # MP_A 应成功
         assert results["MP_A"].inserted_count == 1
@@ -977,7 +980,11 @@ class TestRateLimitCircuitBreaker:
             raise AuthExpiredError("Token 失效", status_code=401, response_text="WeReadError401")
 
         fetcher_service._fetch_incremental_or_init_summary = AsyncMock(side_effect=mock_fetch_summary)
-        results = await fetcher_service.fetch_all()
+
+        feeds_list = [feed_1, feed_2, feed_3]
+        with patch.object(fetcher_service, "_ensure_today_batch", new_callable=AsyncMock), \
+             patch.object(fetcher_service, "_get_pending_feeds", new_callable=AsyncMock, return_value=feeds_list):
+            results = await fetcher_service.fetch_all()
 
         assert results["MP_A"].inserted_count == 1
         assert results["MP_B"].final_state == "error"
@@ -1061,7 +1068,11 @@ class TestAuthExpiredCircuitBreaker:
             raise AuthExpiredError("Token 失效", status_code=401, response_text="WeReadError401")
 
         fetcher_service._fetch_incremental_or_init_summary = AsyncMock(side_effect=mock_fetch_summary)
-        results = await fetcher_service.fetch_all()
+
+        feeds_list = [feed_1, feed_2, feed_3]
+        with patch.object(fetcher_service, "_ensure_today_batch", new_callable=AsyncMock), \
+             patch.object(fetcher_service, "_get_pending_feeds", new_callable=AsyncMock, return_value=feeds_list):
+            results = await fetcher_service.fetch_all()
 
         assert results["MP_A"].inserted_count == 1
         assert results["MP_B"].final_state == "error"

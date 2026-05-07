@@ -1,7 +1,7 @@
 """抓取回填去重测试 - 验证批量抓取中回填最多执行一次。"""
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.models.schema import Article, Feed
 from src.services.fetcher import FetcherService
@@ -90,7 +90,10 @@ class TestFetchBackfillDeduplication:
         # 追踪 backfill_publish_time 调用次数
         fetcher_service.backfill_publish_time = AsyncMock(return_value=0)
 
-        results = await fetcher_service.fetch_all(days=5)
+        with patch.object(fetcher_service, "_ensure_today_batch", new_callable=AsyncMock), \
+             patch.object(fetcher_service, "_get_pending_feeds", new_callable=AsyncMock, return_value=feeds), \
+             patch.object(fetcher_service, "_mark_batch_done", new_callable=AsyncMock):
+            results = await fetcher_service.fetch_all(days=5)
 
         # 验证结果
         assert "MP_1" in results

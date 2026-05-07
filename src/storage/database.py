@@ -101,6 +101,23 @@ class Database:
             },
         )
 
+        # 确保 fetch_batches 表存在（新增表）
+        existing_tables = inspector.get_table_names()
+        if "fetch_batches" not in existing_tables:
+            sync_conn.execute(text("""
+                CREATE TABLE fetch_batches (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    mp_id VARCHAR(128) NOT NULL,
+                    batch_date DATE NOT NULL,
+                    status VARCHAR(16) NOT NULL DEFAULT 'pending',
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT uq_fetch_batches_mp_date UNIQUE (mp_id, batch_date)
+                )
+            """))
+            sync_conn.execute(text("CREATE INDEX ix_fetch_batches_mp_id ON fetch_batches (mp_id)"))
+            sync_conn.execute(text("CREATE INDEX ix_fetch_batches_batch_date ON fetch_batches (batch_date)"))
+
     async def close(self) -> None:
         """关闭数据库连接。"""
         if self._engine:

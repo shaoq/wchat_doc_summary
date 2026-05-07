@@ -5,16 +5,16 @@ import hashlib
 import logging
 import random
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, case, delete, or_, select, update
 
 from src.api.article import fetch_article_content, parse_article_html
 from src.api.providers import ArticleListProvider, create_article_list_provider
 from src.api.weread import AuthExpiredError, RateLimitError, WeReadAPIError, WeReadClient
-from src.models.schema import Article
+from src.models.schema import Article, Feed, FetchBatch
 from src.services.subscription import SubscriptionService
 from src.storage.database import Database
 from src.utils.rate_limiter import RateLimiter
@@ -236,6 +236,87 @@ class FetcherService:
         self._article_interval = settings.fetch_article_interval
         self._subscription_delay = settings.fetch_subscription_delay
         self._subscription_jitter = settings.fetch_subscription_jitter
+
+    # ── Batch 进度管理 ──────────────────────────────────────────
+
+    async def _ensure_today_batch(self) -> None:
+        """确保今日的 batch 记录存在，补充新增订阅，清理旧数据。"""
+        today = date.today()
+
+        async with self.db.get_session() as session:
+            # 1. 清理 7 天前的旧 batch 记录
+            cutoff = today - timedelta(days=7)
+            await session.execute(
+                delete(FetchBatch).where(FetchBatch.batch_date < cutoff),
+            )
+
+            # 2. 获取当前活跃订阅的 mp_id 集合
+            active_feeds = await self.subscription_service.list_subscriptions(active_only=True)
+            active_mp_ids = {f.mp_id for f in active_feeds if f.mp_id}
+
+            # 3. 获取今日已有的 batch mp_id 集合
+            result = await session.execute(
+                select(FetchBatch.mp_id).where(FetchBatch.batch_date == today),
+            )
+            batched_mp_ids = set(result.scalars().all())
+
+            # 4. 为新增订阅插入 pending 记录
+            new_mp_ids = active_mp_ids - batched_mp_ids
+            if new_mp_ids:
+                for mp_id in new_mp_ids:
+                    session.add(FetchBatch(mp_id=mp_id, batch_date=today, status="pending"))
+                logger.info(f"Batch 补充 {len(new_mp_ids)} 个新订阅: {today}")
+
+            # 5. 首次创建（今天完全没有记录）
+            if not batched_mp_ids and not new_mp_ids and active_mp_ids:
+                for mp_id in active_mp_ids:
+                    session.add(FetchBatch(mp_id=mp_id, batch_date=today, status="pending"))
+                logger.info(f"创建新 batch: {len(active_mp_ids)} 个订阅, date={today}")
+
+    async def _get_pending_feeds(self) -> list[Feed]:
+        """获取今日状态为 pending 的订阅列表，按权重排序。"""
+        today = date.today()
+
+        async with self.db.get_session() as session:
+            result = await session.execute(
+                select(Feed)
+                .join(FetchBatch, Feed.mp_id == FetchBatch.mp_id)
+                .where(
+                    Feed.status == 1,
+                    FetchBatch.batch_date == today,
+                    FetchBatch.status == "pending",
+                )
+                .order_by(
+                    Feed.weight.desc(),
+                    case(
+                        (Feed.sync_time.is_(None), 0),
+                        else_=1,
+                    ),
+                    Feed.name.asc(),
+                ),
+            )
+            feeds = list(result.scalars().all())
+            logger.info(f"Batch pending 队列: {len(feeds)} 个订阅")
+            return feeds
+
+    async def _mark_batch_done(self, mp_id: str) -> None:
+        """将指定 mp_id 的今日 batch 记录标记为 done。"""
+        today = date.today()
+        async with self.db.get_session() as session:
+            await session.execute(
+                update(FetchBatch)
+                .where(FetchBatch.mp_id == mp_id, FetchBatch.batch_date == today)
+                .values(status="done"),
+            )
+
+    async def _reset_today_batch(self) -> None:
+        """删除今日所有 batch 记录（供 --force 使用）。"""
+        today = date.today()
+        async with self.db.get_session() as session:
+            await session.execute(
+                delete(FetchBatch).where(FetchBatch.batch_date == today),
+            )
+        logger.info(f"已清除今日 batch: {today}")
 
     async def _get_feed_or_raise(self, mp_id: str):
         """获取订阅对象，不存在则抛错。"""
@@ -756,13 +837,21 @@ class FetcherService:
         days: int | None = None,
         latest_count: int | None = None,
         on_progress: OnProgressCallback = None,
+        *,
+        force: bool = False,
     ) -> dict[str, FetchSummary]:
         """抓取所有已订阅公众号的文章。
+
+        使用 fetch_batches 表实现断点续传：
+        - 同日内重跑自动跳过已完成的订阅
+        - 每日自动重置，新的一天全新开始
+        - force=True 时清除今日 batch，强制全新开始
 
         Args:
             days: 抓取最近 N 天的文章，None 表示不限制
             latest_count: 仅抓取每个订阅的最新 N 条文章，None 表示不启用
             on_progress: 进度回调函数
+            force: 是否强制全新开始（忽略 batch 进度）
 
         Returns:
             字典，key 为 mp_id，value 为 FetchSummary
@@ -772,7 +861,19 @@ class FetcherService:
         else:
             logger.info(f"开始抓取所有订阅 (最近 {days if days else '全部'} 天)")
 
-        feeds = await self.subscription_service.list_subscriptions_for_fetch(active_only=True)
+        # Batch 管理
+        if force:
+            await self._reset_today_batch()
+
+        await self._ensure_today_batch()
+        feeds = await self._get_pending_feeds()
+
+        # 全部已完成
+        if not feeds:
+            logger.info("今日所有订阅已同步完成")
+            return {}
+
+        total_feeds = len(feeds)
         results: dict[str, FetchSummary] = {}
         backoff_delay = self._subscription_delay
 
@@ -781,7 +882,7 @@ class FetcherService:
                 continue
 
             self._emit(on_progress, FetchProgressEvent.subscription_start(
-                feed.mp_id, feed.name or feed.mp_id, idx, len(feeds),
+                feed.mp_id, feed.name or feed.mp_id, idx, total_feeds,
             ))
 
             try:
@@ -795,6 +896,7 @@ class FetcherService:
                         feed.mp_id, on_progress=on_progress,
                     )
                 results[feed.mp_id] = summary
+                await self._mark_batch_done(feed.mp_id)
                 backoff_delay = self._subscription_delay
 
                 self._emit(on_progress, FetchProgressEvent.subscription_done(
@@ -806,12 +908,15 @@ class FetcherService:
                 results[feed.mp_id] = FetchSummary(
                     mp_id=feed.mp_id, final_state=FetchFinalState.ERROR,
                 )
+                # 不标记 done — 保持 pending 以便下次重试
                 break
             except Exception as e:
                 logger.error(f"抓取失败: {feed.name} - {e}")
                 results[feed.mp_id] = FetchSummary(
                     mp_id=feed.mp_id, final_state=FetchFinalState.ERROR,
                 )
+                # 非致命错误标记 done，继续下一个
+                await self._mark_batch_done(feed.mp_id)
                 backoff_delay = min(backoff_delay * BATCH_BACKOFF_FACTOR, 60.0)
 
             # 订阅间等待 + 抖动（最后一个订阅不等）
