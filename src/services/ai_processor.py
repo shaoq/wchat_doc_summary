@@ -119,13 +119,15 @@ class AIProcessor:
         # 内容安全过滤相关：仅针对政治敏感词脱敏
         self._sensitive_patterns = [
             # 政治人物
-            (re.compile(r"(习近平|李克强|王岐山|胡锦涛|江泽民|温家宝|朱镕基)", re.IGNORECASE), "***"),
+            (re.compile(r"(习近平|李克强|王岐山|胡锦涛|江泽民|温家宝|朱镕基|魏凤和|李尚福)", re.IGNORECASE), "***"),
             # 政治组织/事件
             (re.compile(r"(中共|共产党|国民党|民进党|政治局|中纪委|政法委|六四|天安门|法轮功)", re.IGNORECASE), "***"),
             # 分离主义
             (re.compile(r"(台湾独立|藏独|疆独|港独|台独)", re.IGNORECASE), "***"),
             # 高级别政治动作
             (re.compile(r"(落马|双规|巡视组|查处|反腐风暴)", re.IGNORECASE), "***"),
+            # 军事/司法案件（匹配"XX案"模式中的军事/政治人物）
+            (re.compile(r"(军事法院|死刑缓期|受贿案.*宣判|一审宣判.*案)", re.IGNORECASE), "***"),
         ]
 
     async def summarize(self, article_id: int, max_length: int = 200) -> str:
