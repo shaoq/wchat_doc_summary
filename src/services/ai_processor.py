@@ -116,6 +116,18 @@ class AIProcessor:
         self._request_semaphore = asyncio.Semaphore(5)
         self._request_interval = 0.5
 
+        # 内容安全过滤相关：仅针对政治敏感词脱敏
+        self._sensitive_patterns = [
+            # 政治人物
+            (re.compile(r"(习近平|李克强|王岐山|胡锦涛|江泽民|温家宝|朱镕基)", re.IGNORECASE), "***"),
+            # 政治组织/事件
+            (re.compile(r"(中共|共产党|国民党|民进党|政治局|中纪委|政法委|六四|天安门|法轮功)", re.IGNORECASE), "***"),
+            # 分离主义
+            (re.compile(r"(台湾独立|藏独|疆独|港独|台独)", re.IGNORECASE), "***"),
+            # 高级别政治动作
+            (re.compile(r"(落马|双规|巡视组|查处|反腐风暴)", re.IGNORECASE), "***"),
+        ]
+
     async def summarize(self, article_id: int, max_length: int = 200) -> str:
         """生成文章摘要。
 
@@ -486,8 +498,66 @@ class AIProcessor:
         template = templates.get(task, "")
         return template.format(content=content, **kwargs)
 
+    def _sanitize_prompt(self, prompt: str) -> str:
+        """对 prompt 进行去敏感化处理，降低触发内容安全审查的概率。
+
+        策略：
+        1. 正则替换已知敏感词
+        2. 裁剪过长的新闻/电报原文（保留标题，截断正文）
+        3. 移除可能包含敏感内容的新闻条目（标题命中敏感词时整条移除）
+
+        Args:
+            prompt: 原始 prompt
+
+        Returns:
+            脱敏后的 prompt
+        """
+        result = prompt
+
+        # 第一步：逐行处理，移除标题命中敏感词的新闻/电报条目
+        lines = result.split("\n")
+        cleaned_lines = []
+        skip_next_summary = False
+        for line in lines:
+            # 检查该行是否命中敏感词
+            is_sensitive = False
+            for pattern, _ in self._sensitive_patterns:
+                if pattern.search(line):
+                    is_sensitive = True
+                    break
+
+            if is_sensitive:
+                # 如果是标题行（以数字. 或 - 开头），标记跳过后续摘要行
+                if re.match(r"^\s*(\d+\.|-)", line):
+                    skip_next_summary = True
+                    continue
+                # 其他命中行直接移除
+                continue
+
+            if skip_next_summary and line.strip().startswith("摘要："):
+                skip_next_summary = False
+                continue
+
+            skip_next_summary = False
+            cleaned_lines.append(line)
+
+        result = "\n".join(cleaned_lines)
+
+        # 第二步：对剩余内容做敏感词替换
+        for pattern, replacement in self._sensitive_patterns:
+            result = pattern.sub(replacement, result)
+
+        return result
+
+    def _is_content_safety_error(self, error: Exception) -> bool:
+        """判断是否为内容安全审查错误。"""
+        error_str = str(error)
+        return "'1301'" in error_str or "敏感内容" in error_str or "不安全" in error_str
+
     async def _call_api(self, prompt: str, max_tokens: int = 500) -> str:
         """调用 LLM API。
+
+        当遇到内容安全审查错误 (1301) 时，自动对 prompt 做去敏感化处理后重试。
 
         Args:
             prompt: 提示词
@@ -499,18 +569,31 @@ class AIProcessor:
         async with self._request_semaphore:
             await asyncio.sleep(self._request_interval)
 
+            current_prompt = prompt
+            sanitized = False
+
             for attempt in range(self.settings.max_retries + 1):
                 try:
                     response = await self.client.messages.create(
                         model=self.model,
                         max_tokens=max_tokens,
-                        messages=[{"role": "user", "content": prompt}],
+                        messages=[{"role": "user", "content": current_prompt}],
                     )
 
                     content = response.content[0]
                     return content.text if hasattr(content, "text") else str(content)
 
                 except Exception as e:
+                    is_safety = self._is_content_safety_error(e)
+
+                    if is_safety and not sanitized:
+                        # 首次遇到安全错误：去敏感化后重试
+                        logger.warning("触发内容安全审查，自动去敏感化后重试")
+                        current_prompt = self._sanitize_prompt(prompt)
+                        sanitized = True
+                        await asyncio.sleep(1)
+                        continue
+
                     if attempt < self.settings.max_retries:
                         wait_time = 2 ** attempt
                         logger.warning(
