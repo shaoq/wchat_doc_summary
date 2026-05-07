@@ -237,9 +237,52 @@ def _get_market_data_status_items(market_data: dict[str, Any]) -> list[dict[str,
     return items
 
 
+def _format_pct(value: Any) -> str:
+    try:
+        return f"{float(value) * 100:+.2f}%"
+    except (TypeError, ValueError):
+        return "N/A"
+
+
+def _get_global_context_status_item(market_data: dict[str, Any]) -> dict[str, str]:
+    """汇总海外市场上下文状态。"""
+    context = market_data.get("global_market_context")
+    if not isinstance(context, dict):
+        return _make_status_item(
+            "海外市场",
+            "empty",
+            ok_message="",
+            empty_message="暂无海外市场上下文",
+            summary="暂无海外市场上下文",
+        )
+
+    status = str(context.get("status", "error"))
+    us_market = context.get("us_market", {}) if isinstance(context.get("us_market"), dict) else {}
+    session = context.get("session") or us_market.get("session") or "-"
+    as_of = context.get("as_of") or us_market.get("as_of") or "-"
+    indices = us_market.get("indices", []) if isinstance(us_market.get("indices"), list) else []
+    index_summary = ", ".join(
+        f"{item.get('symbol', item.get('name', ''))} {_format_pct(item.get('change_pct'))}"
+        for item in indices[:3]
+        if isinstance(item, dict)
+    )
+    if not index_summary:
+        index_summary = context.get("message") or "暂无指数信号"
+
+    message = f"{index_summary} | session={session} | as_of={as_of}"
+    return _make_status_item(
+        "海外市场",
+        status if status in ("ok", "partial", "error") else "error",
+        ok_message=message,
+        empty_message="暂无海外市场上下文",
+        error_message=context.get("message", "获取失败"),
+        summary=message,
+    )
+
+
 def _render_market_data_statuses(market_data: dict[str, Any]) -> None:
     """输出市场数据逐项获取状态。"""
-    for item in _get_market_data_status_items(market_data):
+    for item in _get_market_data_status_items(market_data) + [_get_global_context_status_item(market_data)]:
         _status_detail(
             item["label"],
             item["status"],
@@ -291,7 +334,11 @@ def _get_news_status_items(news_data: dict[str, Any]) -> list[dict[str, str]]:
 def _render_pre_generation_summary(market_data: dict[str, Any], news_data: dict[str, Any]) -> None:
     """在生成报告前输出 AI 输入数据清单。"""
     console.print("[bold cyan][预检] AI 输入数据清单[/bold cyan]")
-    items = _get_market_data_status_items(market_data) + _get_news_status_items(news_data)
+    items = (
+        _get_market_data_status_items(market_data)
+        + [_get_global_context_status_item(market_data)]
+        + _get_news_status_items(news_data)
+    )
     for item in items:
         _status_detail(
             item["label"],
@@ -829,6 +876,7 @@ def market_summary(target_date: str | None, offline: bool, list_summaries: bool,
                 articles=news_data.get("articles", []),
                 telegraphs=news_data.get("telegraphs", []),
                 watch_items=news_data.get("watch_items", []),
+                global_market_context=market_data.get("global_market_context"),
             )
             elapsed = time.perf_counter() - start_time
 

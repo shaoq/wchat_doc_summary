@@ -45,6 +45,38 @@ def _full_market_data() -> dict:
             {"name": "华电辽能", "code": "600739"},
             {"name": "长城军工", "code": "601606"},
         ],
+        "global_market_context": _full_global_market_context(),
+    }
+
+
+def _full_global_market_context() -> dict:
+    """构造海外市场上下文。"""
+    return {
+        "status": "ok",
+        "target_a_trade_date": "2024-03-15",
+        "captured_at": "2024-03-15T22:30:00+08:00",
+        "as_of": "2024-03-15T22:29:00+08:00",
+        "session": "regular",
+        "source": "yahoo_quote",
+        "us_market": {
+            "status": "ok",
+            "session": "regular",
+            "as_of": "2024-03-15T22:29:00+08:00",
+            "indices": [
+                {"symbol": "DJIA", "name": "道琼斯工业平均指数", "price": 39000.0, "change_pct": 0.004},
+                {"symbol": "SPX", "name": "标普500", "price": 5200.0, "change_pct": 0.006},
+                {"symbol": "IXIC", "name": "纳斯达克综合指数", "price": 16500.0, "change_pct": 0.009},
+            ],
+            "risk_signals": {
+                "vix": {"name": "VIX波动率指数", "value": 13.5, "change_pct": -0.02},
+                "dxy": {"name": "美元指数", "value": 104.1, "change_pct": 0.001},
+                "us10y": {"name": "美国10年期国债收益率", "value": 4.2, "change_bp": 1.5},
+            },
+            "leaders": [
+                {"symbol": "NVDA", "name": "NVIDIA", "change_pct": 0.012},
+            ],
+            "source": "yahoo_quote",
+        },
     }
 
 
@@ -163,6 +195,7 @@ class TestBuildDataGaps:
             "telegraphs": [{"title": "新闻"}],
             "watch_items": [{"title": "看盘"}],
             "articles": [{"title": "文章"}],
+            "global_market_context": _full_global_market_context(),
         }
         defaults.update(overrides)
         return processor._build_data_gaps(**defaults)
@@ -246,9 +279,10 @@ class TestGenerateMarketSummaryPromptStructure:
             "证据组一：行情总览",
             "证据组二：板块信号",
             "证据组三：涨停与龙头线索",
-            "证据组四：财联社电报关键催化",
-            "证据组五：盘中轮动线索",
-            "证据组六：文章观点补充",
+            "证据组四：海外市场上下文",
+            "证据组五：财联社电报关键催化",
+            "证据组六：盘中轮动线索",
+            "证据组七：文章观点补充",
             "数据缺口提示",
         ]
 
@@ -321,6 +355,34 @@ class TestGenerateMarketSummaryPromptStructure:
         assert "数据缺口提示\n无" in captured_prompt
 
     @pytest.mark.asyncio
+    async def test_prompt_contains_global_market_context(self) -> None:
+        """Prompt 应包含海外市场上下文证据。"""
+        processor = _make_processor()
+        captured_prompt = ""
+        call_count = 0
+
+        async def capture_prompt(prompt: str, max_tokens: int = 1500) -> str:
+            nonlocal captured_prompt, call_count
+            call_count += 1
+            if call_count == 1:
+                captured_prompt = prompt
+            return "mock summary"
+
+        processor._call_api = capture_prompt
+
+        await processor.generate_market_summary(
+            trade_date="2024-03-15",
+            market_data=_full_market_data(),
+            articles=_full_articles(),
+            telegraphs=_full_telegraphs(),
+            watch_items=_full_watch_items(),
+        )
+
+        assert "海外市场上下文" in captured_prompt
+        assert "纳斯达克综合指数" in captured_prompt
+        assert "数据缺口提示\n无" in captured_prompt
+
+    @pytest.mark.asyncio
     async def test_prompt_shows_gaps_when_data_missing(self) -> None:
         """数据缺失时，data_gaps 区域应列出缺口。"""
         processor = _make_processor()
@@ -355,6 +417,7 @@ class TestGenerateMarketSummaryPromptStructure:
 
         assert "⚠️" in captured_prompt
         assert "观察模式" in captured_prompt
+        assert "海外市场上下文" in captured_prompt
 
 
 class TestDataSparseDowngrade:

@@ -632,6 +632,7 @@ class AIProcessor:
         articles: list[dict],
         telegraphs: list[dict] | None = None,
         watch_items: list[dict] | None = None,
+        global_market_context: dict | None = None,
     ) -> str:
         """生成市场总结。
 
@@ -641,6 +642,7 @@ class AIProcessor:
             articles: 相关文章列表
             telegraphs: 财联社重要电报列表（可选）
             watch_items: 财联社看盘数据列表（可选）
+            global_market_context: 海外市场上下文（可选）
 
         Returns:
             市场总结文本
@@ -679,6 +681,10 @@ class AIProcessor:
         # 格式化看盘数据
         watch_items_text = self._format_watch_items_for_prompt(watch_items[:50] if watch_items else [])
 
+        if global_market_context is None:
+            global_market_context = market_data.get("global_market_context")
+        global_market_context_text = self._format_global_market_context_for_prompt(global_market_context)
+
         # 构建数据缺口提示
         breadth_quality = market_data.get("breadth_quality", {})
         data_gaps = self._build_data_gaps(
@@ -693,6 +699,7 @@ class AIProcessor:
             articles=articles,
             stats_quality=breadth_quality.get("statistics"),
             limit_up_quality=market_data.get("limit_up_quality"),
+            global_market_context=global_market_context,
         )
 
         # 构建提示词
@@ -708,6 +715,7 @@ class AIProcessor:
             limit_up_stocks=limit_up_stocks,
             cls_telegraphs=telegraphs_text,
             cls_watch_items=watch_items_text,
+            global_market_context=global_market_context_text,
             articles=articles_text,
             data_gaps=data_gaps,
         )
@@ -730,6 +738,7 @@ class AIProcessor:
                 telegraphs=telegraphs or [],
                 watch_items=watch_items or [],
                 articles=articles,
+                global_market_context=global_market_context,
                 data_gaps=data_gaps,
             )
             enhanced_strategy = await self._call_api(
@@ -755,6 +764,7 @@ class AIProcessor:
         telegraphs: list,
         watch_items: list,
         articles: list,
+        global_market_context: dict | None,
         data_gaps: str,
     ) -> str:
         """构建第六节后续策略增强 prompt。"""
@@ -769,6 +779,7 @@ class AIProcessor:
             telegraphs=telegraphs,
             watch_items=watch_items,
             articles=articles,
+            global_market_context=global_market_context,
             data_gaps=data_gaps,
         )
 
@@ -815,6 +826,7 @@ class AIProcessor:
         telegraphs: list,
         watch_items: list,
         articles: list,
+        global_market_context: dict | None,
         data_gaps: str,
     ) -> str:
         """构建策略增强用的压缩证据摘要。"""
@@ -830,6 +842,7 @@ class AIProcessor:
             f"- 强势板块候选: {self._format_sectors_for_prompt(top_sectors[:5])}",
             f"- 弱势板块候选: {self._format_sectors_for_prompt(bottom_sectors[:5])}",
             f"- 涨停与核心个股样本: {self._format_stocks_for_prompt(limit_up[:12])}",
+            f"- 海外市场上下文: {self._format_global_market_context_for_prompt(global_market_context)}",
         ]
 
         watch_sector_counter: Counter[str] = Counter()
@@ -958,6 +971,7 @@ class AIProcessor:
         articles: list,
         stats_quality: dict | None = None,
         limit_up_quality: dict | None = None,
+        global_market_context: dict | None = None,
     ) -> str:
         """构建数据缺口提示文本。
 
@@ -975,6 +989,7 @@ class AIProcessor:
             articles: 文章列表
             stats_quality: 涨跌统计质量元数据
             limit_up_quality: 涨停股来源质量元数据
+            global_market_context: 海外市场上下文
 
         Returns:
             数据缺口描述文本，无缺口时返回"无"
@@ -1003,6 +1018,17 @@ class AIProcessor:
             gaps.append("盘中看盘数据缺失")
         if not articles:
             gaps.append("文章观点数据缺失")
+        if not global_market_context:
+            gaps.append("海外市场上下文缺失")
+        elif isinstance(global_market_context, dict):
+            context_status = global_market_context.get("status")
+            if context_status == "partial":
+                gaps.append("海外市场上下文部分缺失，请勿补全未知海外信号")
+            elif context_status != "ok":
+                message = global_market_context.get("message", "海外市场上下文不可用")
+                gaps.append(f"{message}，不得臆测隔夜美股表现")
+        else:
+            gaps.append("海外市场上下文格式异常，不得臆测隔夜美股表现")
 
         if not gaps:
             return "无"
@@ -1110,5 +1136,72 @@ class AIProcessor:
                 lines.append(f"- [{time_str}] {title}{extra_str}")
             elif content:
                 lines.append(f"- [{time_str}] {content}{extra_str}")
+
+        return "\n".join(lines)
+
+    def _format_global_market_context_for_prompt(self, context: dict | None) -> str:
+        """格式化海外市场上下文用于 prompt。"""
+        if not context:
+            return "无海外市场上下文。不得臆测隔夜美股走势或海外风险偏好。"
+
+        status = context.get("status", "error")
+        us_market = context.get("us_market", {}) if isinstance(context.get("us_market"), dict) else {}
+        session = context.get("session") or us_market.get("session") or "未知"
+        as_of = context.get("as_of") or us_market.get("as_of") or "未知"
+        source = context.get("source") or us_market.get("source") or "未知"
+
+        if status not in ("ok", "partial"):
+            message = context.get("message", "海外市场上下文不可用")
+            return f"{message}。不得臆测隔夜美股走势或海外风险偏好。"
+
+        lines = [
+            f"状态：{status}；交易阶段：{session}；行情时间：{as_of}；来源：{source}",
+        ]
+
+        indices = us_market.get("indices", []) if isinstance(us_market.get("indices"), list) else []
+        if indices:
+            lines.append("美股指数：")
+            for item in indices[:3]:
+                if not isinstance(item, dict):
+                    continue
+                change = item.get("change_pct")
+                sign = "+" if isinstance(change, (int, float)) and change >= 0 else ""
+                change_text = f"{sign}{change * 100:.2f}%" if isinstance(change, (int, float)) else "N/A"
+                lines.append(f"- {item.get('name', item.get('symbol', ''))}: {item.get('price', 'N/A')} ({change_text})")
+        else:
+            lines.append("美股指数：缺失")
+
+        risk_signals = us_market.get("risk_signals", {}) if isinstance(us_market.get("risk_signals"), dict) else {}
+        if risk_signals:
+            parts = []
+            for key, item in risk_signals.items():
+                if not isinstance(item, dict):
+                    continue
+                name = item.get("name", key)
+                value = item.get("value", "N/A")
+                if "change_bp" in item:
+                    parts.append(f"{name} {value} ({item['change_bp']:+.2f}bp)")
+                elif "change_pct" in item and isinstance(item["change_pct"], (int, float)):
+                    parts.append(f"{name} {value} ({item['change_pct'] * 100:+.2f}%)")
+                else:
+                    parts.append(f"{name} {value}")
+            lines.append("风险信号：" + "；".join(parts))
+        else:
+            lines.append("风险信号：缺失")
+
+        leaders = us_market.get("leaders", []) if isinstance(us_market.get("leaders"), list) else []
+        leader_parts = []
+        for item in leaders[:5]:
+            if not isinstance(item, dict):
+                continue
+            change = item.get("change_pct")
+            change_text = f"{change * 100:+.2f}%" if isinstance(change, (int, float)) else "N/A"
+            leader_parts.append(f"{item.get('name', item.get('symbol', ''))} {change_text}")
+        if leader_parts:
+            lines.append("行业/龙头代理：" + "；".join(leader_parts))
+
+        if status == "partial":
+            message = context.get("message", "海外市场上下文部分缺失")
+            lines.append(f"注意：{message}。只能使用已给出的海外信号，不得补全未知走势。")
 
         return "\n".join(lines)

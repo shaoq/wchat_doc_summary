@@ -200,6 +200,61 @@ class MarketAnalyzer:
         current_trade_date = self.get_latest_trade_date()
         return trade_date < current_trade_date
 
+    def _missing_global_market_context(self, trade_date: date, message: str) -> dict[str, Any]:
+        """构建海外市场上下文不可用的标准化占位结构。"""
+        return {
+            "status": "error",
+            "target_a_trade_date": trade_date.isoformat(),
+            "captured_at": None,
+            "as_of": None,
+            "session": None,
+            "source": "none",
+            "message": message,
+            "us_market": {
+                "status": "error",
+                "session": None,
+                "as_of": None,
+                "indices": [],
+                "risk_signals": {},
+                "leaders": [],
+                "source": "none",
+                "message": message,
+            },
+        }
+
+    def _global_context_is_cache_miss(self, context: Any) -> bool:
+        if not isinstance(context, dict):
+            return True
+        return context.get("source") == "cache" and context.get("status") == "error"
+
+    async def _attach_live_global_market_context(
+        self,
+        trade_date: date,
+        market_data: dict[str, Any],
+        *,
+        cache_after_fetch: bool,
+    ) -> dict[str, Any]:
+        """为在线当前交易日市场数据补充海外市场上下文。"""
+        try:
+            context = await self.finance_client.get_global_market_context(trade_date)
+        except Exception as e:
+            logger.warning("获取海外市场上下文失败: %s", e)
+            context = self._missing_global_market_context(
+                trade_date,
+                f"海外市场上下文获取失败: {e}",
+            )
+
+        market_data["global_market_context"] = context
+
+        if cache_after_fetch:
+            try:
+                await self._cache_service.save_market_data(trade_date, market_data)
+                logger.info("已缓存海外市场上下文: %s", trade_date)
+            except Exception as e:
+                logger.warning("海外市场上下文缓存写入失败: %s", e)
+
+        return market_data
+
     async def collect_market_data(
         self,
         offline: bool = False,
@@ -235,6 +290,10 @@ class MarketAnalyzer:
             if cached_data:
                 cached_data["offline"] = True
                 cached_data["data_source"] = "cache"
+                cached_data.setdefault(
+                    "global_market_context",
+                    self._missing_global_market_context(trade_date, "无可用海外市场上下文缓存"),
+                )
                 logger.info(f"离线模式命中缓存: {trade_date}")
                 return cached_data
             else:
@@ -246,6 +305,10 @@ class MarketAnalyzer:
                     "sectors": {},
                     "limit_up": [],
                     "fetch_time": datetime.now().isoformat(),
+                    "global_market_context": self._missing_global_market_context(
+                        trade_date,
+                        "离线模式: 无可用海外市场上下文缓存",
+                    ),
                     "offline": True,
                     "data_source": "none",
                     "error": "离线模式: 无可用本地市场数据",
@@ -257,6 +320,10 @@ class MarketAnalyzer:
             cached_data = await cache_service.get_cached(trade_date)
             if cached_data:
                 cached_data["data_source"] = "cache"
+                cached_data.setdefault(
+                    "global_market_context",
+                    self._missing_global_market_context(trade_date, "无可用海外市场上下文缓存"),
+                )
                 logger.info(f"历史交易日缓存命中: {trade_date}")
                 return cached_data
 
@@ -271,6 +338,10 @@ class MarketAnalyzer:
                 "sectors": {},
                 "limit_up": [],
                 "fetch_time": datetime.now().isoformat(),
+                "global_market_context": self._missing_global_market_context(
+                    trade_date,
+                    msg,
+                ),
                 "data_source": "none",
                 "error": msg,
             }
@@ -280,6 +351,11 @@ class MarketAnalyzer:
             logger.info(f"强制刷新模式: 跳过缓存，直接获取在线数据 ({trade_date})")
             try:
                 market_data = await self.finance_client.get_all_market_data(trade_date=trade_date)
+                await self._attach_live_global_market_context(
+                    trade_date,
+                    market_data,
+                    cache_after_fetch=False,
+                )
 
                 if cache_service.should_cache(trade_date):
                     await cache_service.save_market_data(trade_date, market_data)
@@ -296,6 +372,10 @@ class MarketAnalyzer:
                     "sectors": {},
                     "limit_up": [],
                     "fetch_time": datetime.now().isoformat(),
+                    "global_market_context": self._missing_global_market_context(
+                        trade_date,
+                        f"海外市场上下文不可用: {e}",
+                    ),
                     "data_source": "error",
                     "error": str(e),
                 }
@@ -305,12 +385,23 @@ class MarketAnalyzer:
         if cached_data:
             logger.info(f"缓存命中: {trade_date}")
             cached_data["data_source"] = "cache"
+            if self._global_context_is_cache_miss(cached_data.get("global_market_context")):
+                await self._attach_live_global_market_context(
+                    trade_date,
+                    cached_data,
+                    cache_after_fetch=cache_service.should_cache(trade_date),
+                )
             return cached_data
 
         # 缓存未命中，从 API 获取
         logger.info(f"缓存未命中，从 API 获取: {trade_date}")
         try:
             market_data = await self.finance_client.get_all_market_data(trade_date=trade_date)
+            await self._attach_live_global_market_context(
+                trade_date,
+                market_data,
+                cache_after_fetch=False,
+            )
 
             if cache_service.should_cache(trade_date):
                 await cache_service.save_market_data(trade_date, market_data)
@@ -327,6 +418,10 @@ class MarketAnalyzer:
                 "sectors": {},
                 "limit_up": [],
                 "fetch_time": datetime.now().isoformat(),
+                "global_market_context": self._missing_global_market_context(
+                    trade_date,
+                    f"海外市场上下文不可用: {e}",
+                ),
                 "data_source": "error",
                 "error": str(e),
             }

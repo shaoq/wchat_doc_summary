@@ -104,6 +104,96 @@ class TestIndexDataContract:
 
         assert result == {}
 
+
+class TestGlobalMarketContextContract:
+    """海外市场上下文契约测试。"""
+
+    def test_normalize_global_quote_rows_returns_dual_time_contract(self, finance_client):
+        """Contract: 返回目标交易日、抓取时间、行情时间和 session 字段。"""
+        rows = [
+            {
+                "symbol": "^DJI",
+                "regularMarketPrice": 39000.0,
+                "regularMarketChangePercent": 0.4,
+                "regularMarketTime": 1710500000,
+            },
+            {
+                "symbol": "^GSPC",
+                "regularMarketPrice": 5200.0,
+                "regularMarketChangePercent": 0.6,
+                "regularMarketTime": 1710500000,
+            },
+            {
+                "symbol": "^IXIC",
+                "regularMarketPrice": 16500.0,
+                "regularMarketChangePercent": 0.9,
+                "regularMarketTime": 1710500000,
+            },
+            {
+                "symbol": "^VIX",
+                "regularMarketPrice": 13.5,
+                "regularMarketChangePercent": -2.0,
+                "regularMarketTime": 1710500000,
+            },
+            {
+                "symbol": "DX-Y.NYB",
+                "regularMarketPrice": 104.1,
+                "regularMarketChangePercent": 0.1,
+                "regularMarketTime": 1710500000,
+            },
+            {
+                "symbol": "^TNX",
+                "regularMarketPrice": 42.0,
+                "regularMarketChange": 0.15,
+                "regularMarketChangePercent": 0.35,
+                "regularMarketTime": 1710500000,
+            },
+            {
+                "symbol": "NVDA",
+                "regularMarketPrice": 900.0,
+                "regularMarketChangePercent": 1.2,
+                "regularMarketTime": 1710500000,
+            },
+        ]
+
+        result = finance_client._normalize_global_quote_rows(rows, date(2026, 3, 27))
+
+        assert result["status"] == "ok"
+        assert result["target_a_trade_date"] == "2026-03-27"
+        assert result["captured_at"]
+        assert result["as_of"]
+        assert result["session"] in {"pre_market", "regular", "post_market", "closed"}
+        assert len(result["us_market"]["indices"]) == 3
+        assert set(result["us_market"]["risk_signals"]) == {"vix", "dxy", "us10y"}
+
+    def test_normalize_global_quote_rows_marks_partial_without_fabricating(self, finance_client):
+        """Contract: 部分缺失时保留可用数据，不用零值占位。"""
+        rows = [
+            {
+                "symbol": "^DJI",
+                "regularMarketPrice": 39000.0,
+                "regularMarketChangePercent": 0.4,
+                "regularMarketTime": 1710500000,
+            }
+        ]
+
+        result = finance_client._normalize_global_quote_rows(rows, date(2026, 3, 27))
+
+        assert result["status"] == "partial"
+        assert len(result["us_market"]["indices"]) == 1
+        assert result["us_market"]["indices"][0]["symbol"] == "DJIA"
+        assert result["us_market"]["risk_signals"] == {}
+
+    @pytest.mark.asyncio
+    async def test_global_market_context_disabled_network_returns_error(self, finance_client):
+        """Contract: 禁用网络时返回标准 error payload。"""
+        with patch("src.api.finance._DISABLE_NETWORK", True):
+            result = await finance_client.get_global_market_context(date(2026, 3, 27))
+
+        assert result["status"] == "error"
+        assert result["target_a_trade_date"] == "2026-03-27"
+        assert result["us_market"]["indices"] == []
+
     @pytest.mark.asyncio
     async def test_fallback_to_akshare(self, finance_client, mock_indices_data):
         """Contract: 腾讯失败时降级到 akshare。"""
@@ -912,12 +1002,7 @@ class TestBreadthQualityContract:
                 {"status": "partial", "source": "pytdx_quotes", "actual_count": 100, "expected_count": 5518},
             ),
         ):
-            with patch.object(
-                finance_client, "_get_statistics_from_spot_em",
-                new_callable=AsyncMock,
-                side_effect=Exception("fail"),
-            ):
-                statistics, quality = await finance_client._get_statistics_with_quality()
+            statistics, quality = await finance_client._get_statistics_with_quality()
 
         assert statistics == {"up_count": 1, "down_count": 1, "flat_count": 0}
         assert quality["status"] == "partial"
@@ -1263,7 +1348,7 @@ class TestLegacyFallbackRegression:
         assert quality["source"] == "akshare_spot_em"
 
     @pytest.mark.asyncio
-    async def test_statistics_fallback_uses_akshare(self, finance_client):
+    async def test_statistics_partial_keeps_pytdx_sample_without_akshare_fallback(self, finance_client):
         with patch.object(
             finance_client, "_fetch_pytdx_statistics",
             new_callable=AsyncMock,
@@ -1271,17 +1356,12 @@ class TestLegacyFallbackRegression:
                 {"up_count": 1, "down_count": 1, "flat_count": 0},
                 {"status": "partial", "source": "pytdx_quotes", "actual_count": 100, "expected_count": 5518},
             ),
-        ), patch.object(
-            finance_client, "_get_statistics_from_spot_em",
-            new_callable=AsyncMock,
-            return_value={"up_count": 2, "down_count": 1, "flat_count": 0},
-        ) as mock_fallback:
+        ):
             statistics, quality = await finance_client._get_statistics_with_quality()
 
         assert statistics == {"up_count": 1, "down_count": 1, "flat_count": 0}
         assert quality["source"] == "pytdx_quotes"
         assert quality["status"] == "partial"
-        mock_fallback.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_statistics_fallback_failure_returns_zeros(self, finance_client):
@@ -1293,13 +1373,8 @@ class TestLegacyFallbackRegression:
                 {"up_count": 1, "down_count": 1, "flat_count": 0},
                 {"status": "error", "source": "pytdx_quotes", "actual_count": 0, "expected_count": 5518},
             ),
-        ), patch.object(
-            finance_client, "_get_statistics_from_spot_em",
-            new_callable=AsyncMock,
-            side_effect=Exception("akshare fail"),
-        ) as mock_fallback:
+        ):
             statistics, quality = await finance_client._get_statistics_with_quality()
 
         assert statistics == {"up_count": 0, "down_count": 0, "flat_count": 0}
         assert quality["status"] == "error"
-        mock_fallback.assert_not_awaited()

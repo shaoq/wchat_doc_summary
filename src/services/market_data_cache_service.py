@@ -1,5 +1,6 @@
 """市场数据缓存服务 - 提供市场数据的本地缓存存储和查询功能。"""
 
+import json
 import logging
 from datetime import date, datetime, time
 from typing import Any, Optional
@@ -8,6 +9,7 @@ from sqlalchemy import delete, select
 
 from src.api.finance import FinanceClient
 from src.models.schema import (
+    GlobalMarketContext,
     LimitUpStock,
     MarketIndex,
     MarketSector,
@@ -60,6 +62,28 @@ class MarketDataCacheService:
         """
         self.db = db
         self.finance_client = finance_client or FinanceClient()
+
+    def _build_missing_global_context(self, trade_date: date) -> dict[str, Any]:
+        """构建缓存缺失时的海外市场上下文占位结构。"""
+        return {
+            "status": "error",
+            "target_a_trade_date": trade_date.isoformat(),
+            "captured_at": None,
+            "as_of": None,
+            "session": None,
+            "source": "cache",
+            "message": "无可用海外市场上下文缓存",
+            "us_market": {
+                "status": "error",
+                "session": None,
+                "as_of": None,
+                "indices": [],
+                "risk_signals": {},
+                "leaders": [],
+                "source": "cache",
+                "message": "无可用海外市场上下文缓存",
+            },
+        }
 
     def should_cache(self, trade_date: date) -> bool:
         """判断是否应该缓存数据。
@@ -131,6 +155,11 @@ class MarketDataCacheService:
             )
             limit_up_data = limit_up_result.scalars().all()
 
+            global_context_result = await session.execute(
+                select(GlobalMarketContext).where(GlobalMarketContext.target_a_trade_date == trade_date)
+            )
+            global_context_data = global_context_result.scalar_one_or_none()
+
         # 如果没有任何缓存数据，返回 None
         if not any([index_data, volume_data, stats_data, sectors_data, limit_up_data]):
             return None
@@ -142,6 +171,7 @@ class MarketDataCacheService:
             "statistics": self._format_statistics_data(stats_data),
             "sectors": self._format_sectors_data(sectors_data),
             "limit_up": self._format_limit_up_data(limit_up_data),
+            "global_market_context": self._format_global_context_data(global_context_data, trade_date),
             "fetch_time": index_data.fetch_time.isoformat() if index_data and index_data.fetch_time else None,
             "cached": True,
         }
@@ -237,6 +267,66 @@ class MarketDataCacheService:
             }
             for s in stocks
         ]
+
+    def _format_global_context_data(
+        self,
+        context: GlobalMarketContext | None,
+        trade_date: date,
+    ) -> dict[str, Any]:
+        """格式化海外市场上下文缓存。"""
+        if not context:
+            return self._build_missing_global_context(trade_date)
+
+        try:
+            payload = json.loads(context.payload)
+        except json.JSONDecodeError:
+            logger.warning("海外市场上下文缓存 JSON 解析失败: %s", trade_date)
+            return self._build_missing_global_context(trade_date)
+
+        if isinstance(payload, dict):
+            return payload
+        return self._build_missing_global_context(trade_date)
+
+    async def _save_global_market_context(
+        self,
+        session: Any,
+        trade_date: date,
+        context: dict[str, Any],
+        fetch_time: datetime,
+    ) -> None:
+        """按目标 A 股交易日 upsert 海外市场上下文。"""
+        result = await session.execute(
+            select(GlobalMarketContext).where(GlobalMarketContext.target_a_trade_date == trade_date)
+        )
+        existing = result.scalar_one_or_none()
+
+        payload = json.dumps(context, ensure_ascii=False)
+        status = str(context.get("status", "error"))
+        us_market = context.get("us_market", {}) if isinstance(context.get("us_market"), dict) else {}
+        as_of = context.get("as_of") or us_market.get("as_of")
+        session_name = context.get("session") or us_market.get("session")
+        source = context.get("source") or us_market.get("source")
+
+        if existing:
+            existing.status = status
+            existing.captured_at = context.get("captured_at")
+            existing.as_of = as_of
+            existing.session = session_name
+            existing.source = source
+            existing.payload = payload
+            existing.updated_at = fetch_time
+            return
+
+        session.add(GlobalMarketContext(
+            target_a_trade_date=trade_date,
+            status=status,
+            captured_at=context.get("captured_at"),
+            as_of=as_of,
+            session=session_name,
+            source=source,
+            payload=payload,
+            updated_at=fetch_time,
+        ))
 
     async def save_market_data(self, trade_date: date, data: dict[str, Any]) -> None:
         """保存市场数据到缓存。
@@ -396,6 +486,10 @@ class MarketDataCacheService:
                         industry=stock_data.get("industry"),
                     ))
 
+            global_context = data.get("global_market_context")
+            if isinstance(global_context, dict):
+                await self._save_global_market_context(session, trade_date, global_context, fetch_time)
+
             await session.commit()
 
         logger.info(f"市场数据已缓存: {trade_date}")
@@ -439,6 +533,11 @@ class MarketDataCacheService:
             # 删除涨停股数据
             result = await session.execute(
                 delete(LimitUpStock).where(LimitUpStock.trade_date == trade_date)
+            )
+            total_deleted += result.rowcount
+
+            result = await session.execute(
+                delete(GlobalMarketContext).where(GlobalMarketContext.target_a_trade_date == trade_date)
             )
             total_deleted += result.rowcount
 

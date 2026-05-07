@@ -16,8 +16,9 @@ import os
 import re
 import subprocess
 from collections.abc import Mapping
-from datetime import date, datetime
+from datetime import date, datetime, time as time_type
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 import akshare as ak
 import httpx
@@ -45,6 +46,8 @@ _AKSHARE_BREADTH_SOURCE = "akshare_spot_em"
 _NEAR_COMPLETE_ABS_THRESHOLD = 50
 _NEAR_COMPLETE_PCT_THRESHOLD = 0.01
 _RECOVERY_MAX_ROUNDS = 2
+_SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+_NEW_YORK_TZ = ZoneInfo("America/New_York")
 
 
 @contextlib.contextmanager
@@ -305,6 +308,23 @@ class FinanceClient:
             "akshare_a_spot_filter",
         ),
     }
+    GLOBAL_CONTEXT_SOURCE = "yahoo_quote"
+    GLOBAL_INDEX_SYMBOLS: dict[str, tuple[str, str]] = {
+        "^DJI": ("DJIA", "道琼斯工业平均指数"),
+        "^GSPC": ("SPX", "标普500"),
+        "^IXIC": ("IXIC", "纳斯达克综合指数"),
+    }
+    GLOBAL_RISK_SYMBOLS: dict[str, tuple[str, str]] = {
+        "^VIX": ("vix", "VIX波动率指数"),
+        "DX-Y.NYB": ("dxy", "美元指数"),
+        "^TNX": ("us10y", "美国10年期国债收益率"),
+    }
+    GLOBAL_LEADER_SYMBOLS: dict[str, str] = {
+        "^SOX": "费城半导体指数",
+        "NVDA": "NVIDIA",
+        "MSFT": "Microsoft",
+        "AAPL": "Apple",
+    }
 
     def __init__(
         self,
@@ -346,6 +366,233 @@ class FinanceClient:
         if referer:
             session.headers["Referer"] = referer
         return session
+
+    def _empty_global_market_context(
+        self,
+        target_a_trade_date: date,
+        *,
+        status: str = "error",
+        message: str = "海外市场上下文不可用",
+        source: str = GLOBAL_CONTEXT_SOURCE,
+    ) -> dict[str, Any]:
+        captured_at = datetime.now(_SHANGHAI_TZ).isoformat()
+        session = self._detect_us_market_session()
+        return {
+            "status": status,
+            "target_a_trade_date": target_a_trade_date.isoformat(),
+            "captured_at": captured_at,
+            "as_of": None,
+            "session": session,
+            "source": source,
+            "message": message,
+            "us_market": {
+                "status": status,
+                "session": session,
+                "as_of": None,
+                "indices": [],
+                "risk_signals": {},
+                "leaders": [],
+                "source": source,
+                "message": message,
+            },
+        }
+
+    def _detect_us_market_session(self, now: datetime | None = None) -> str:
+        """根据纽约当地时间粗略判断美股交易阶段。"""
+        ny_now = (now or datetime.now(_NEW_YORK_TZ)).astimezone(_NEW_YORK_TZ)
+        if ny_now.weekday() >= 5:
+            return "closed"
+
+        current = ny_now.time()
+        if time_type(4, 0) <= current < time_type(9, 30):
+            return "pre_market"
+        if time_type(9, 30) <= current < time_type(16, 0):
+            return "regular"
+        if time_type(16, 0) <= current < time_type(20, 0):
+            return "post_market"
+        return "closed"
+
+    def _quote_as_of(self, quote: Mapping[str, Any]) -> str | None:
+        timestamp = self._first_present(
+            quote.get("regularMarketTime"),
+            quote.get("postMarketTime"),
+            quote.get("preMarketTime"),
+        )
+        try:
+            if timestamp:
+                return datetime.fromtimestamp(int(timestamp), tz=_SHANGHAI_TZ).isoformat()
+        except (TypeError, ValueError, OSError):
+            return None
+        return None
+
+    def _first_present(self, *values: Any) -> Any:
+        for value in values:
+            if value is not None and value != "":
+                return value
+        return None
+
+    def _quote_price(self, quote: Mapping[str, Any]) -> float | None:
+        return self._to_float(
+            self._first_present(
+                quote.get("regularMarketPrice"),
+                quote.get("postMarketPrice"),
+                quote.get("preMarketPrice"),
+            )
+        )
+
+    def _quote_change_pct(self, quote: Mapping[str, Any]) -> float | None:
+        value = self._to_float(
+            self._first_present(
+                quote.get("regularMarketChangePercent"),
+                quote.get("postMarketChangePercent"),
+                quote.get("preMarketChangePercent"),
+            )
+        )
+        return round(value / 100, 6) if value is not None else None
+
+    def _normalize_global_quote_rows(
+        self,
+        rows: list[Mapping[str, Any]],
+        target_a_trade_date: date,
+    ) -> dict[str, Any]:
+        by_symbol = {str(row.get("symbol", "")): row for row in rows}
+        as_of_values = [self._quote_as_of(row) for row in rows]
+        as_of = max([value for value in as_of_values if value], default=None)
+        session = self._detect_us_market_session()
+
+        indices: list[dict[str, Any]] = []
+        missing: list[str] = []
+        for yahoo_symbol, (symbol, name) in self.GLOBAL_INDEX_SYMBOLS.items():
+            row = by_symbol.get(yahoo_symbol)
+            if not row:
+                missing.append(symbol)
+                continue
+            price = self._quote_price(row)
+            change_pct = self._quote_change_pct(row)
+            if price is None or change_pct is None:
+                missing.append(symbol)
+                continue
+            indices.append({
+                "symbol": symbol,
+                "name": name,
+                "price": price,
+                "change_pct": change_pct,
+            })
+
+        risk_signals: dict[str, dict[str, Any]] = {}
+        for yahoo_symbol, (key, name) in self.GLOBAL_RISK_SYMBOLS.items():
+            row = by_symbol.get(yahoo_symbol)
+            if not row:
+                missing.append(key)
+                continue
+            value = self._quote_price(row)
+            change_pct = self._quote_change_pct(row)
+            if value is None:
+                missing.append(key)
+                continue
+            signal = {"name": name, "value": value}
+            if key == "us10y":
+                change = self._to_float(row.get("regularMarketChange"))
+                if change is not None:
+                    signal["change_bp"] = round(change * 10, 2)
+            elif change_pct is not None:
+                signal["change_pct"] = change_pct
+            risk_signals[key] = signal
+
+        leaders: list[dict[str, Any]] = []
+        for yahoo_symbol, name in self.GLOBAL_LEADER_SYMBOLS.items():
+            row = by_symbol.get(yahoo_symbol)
+            if not row:
+                continue
+            change_pct = self._quote_change_pct(row)
+            if change_pct is None:
+                continue
+            leaders.append({
+                "symbol": str(row.get("symbol", yahoo_symbol)).lstrip("^"),
+                "name": name,
+                "change_pct": change_pct,
+            })
+
+        status = "ok"
+        if not indices and not risk_signals and not leaders:
+            status = "error"
+        elif len(indices) < len(self.GLOBAL_INDEX_SYMBOLS) or len(risk_signals) < len(self.GLOBAL_RISK_SYMBOLS):
+            status = "partial"
+
+        message = "海外市场上下文获取完成"
+        if status == "partial":
+            message = f"海外市场上下文部分可用，缺失: {', '.join(missing)}" if missing else "海外市场上下文部分可用"
+        elif status == "error":
+            message = "海外市场上下文不可用"
+
+        captured_at = datetime.now(_SHANGHAI_TZ).isoformat()
+        return {
+            "status": status,
+            "target_a_trade_date": target_a_trade_date.isoformat(),
+            "captured_at": captured_at,
+            "as_of": as_of,
+            "session": session,
+            "source": self.GLOBAL_CONTEXT_SOURCE,
+            "message": message,
+            "us_market": {
+                "status": status,
+                "session": session,
+                "as_of": as_of,
+                "indices": indices,
+                "risk_signals": risk_signals,
+                "leaders": leaders[:5],
+                "source": self.GLOBAL_CONTEXT_SOURCE,
+                "message": message,
+            },
+        }
+
+    def _fetch_yahoo_quotes_sync(self, symbols: list[str]) -> list[Mapping[str, Any]]:
+        session = self._requests_session(referer="https://finance.yahoo.com/")
+        try:
+            response = session.get(
+                "https://query1.finance.yahoo.com/v7/finance/quote",
+                params={"symbols": ",".join(symbols)},
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            result = payload.get("quoteResponse", {}).get("result", [])
+            if not isinstance(result, list):
+                raise ValueError("invalid yahoo quote result")
+            return [row for row in result if isinstance(row, Mapping)]
+        finally:
+            session.close()
+
+    async def get_global_market_context(self, target_a_trade_date: date) -> dict[str, Any]:
+        """获取与 A 股目标交易日关联的海外市场上下文。"""
+        if _DISABLE_NETWORK:
+            return self._empty_global_market_context(
+                target_a_trade_date,
+                status="error",
+                message="网络请求已禁用",
+                source="disabled",
+            )
+
+        symbols = (
+            list(self.GLOBAL_INDEX_SYMBOLS)
+            + list(self.GLOBAL_RISK_SYMBOLS)
+            + list(self.GLOBAL_LEADER_SYMBOLS)
+        )
+        try:
+            loop = asyncio.get_event_loop()
+            rows = await loop.run_in_executor(None, lambda: self._fetch_yahoo_quotes_sync(symbols))
+            if not rows:
+                return self._empty_global_market_context(
+                    target_a_trade_date,
+                    message="海外市场上游返回空数据",
+                )
+            return self._normalize_global_quote_rows(rows, target_a_trade_date)
+        except Exception as e:
+            logger.warning("海外市场上下文获取失败: %s", e)
+            return self._empty_global_market_context(
+                target_a_trade_date,
+                message=f"海外市场上下文获取失败: {e}",
+            )
 
     def _parse_jsonp_payload(self, payload: str) -> Any:
         text = payload.strip()

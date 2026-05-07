@@ -9,6 +9,31 @@ from click.testing import CliRunner
 from src.cli import main
 
 
+def _global_context(status="ok"):
+    return {
+        "status": status,
+        "target_a_trade_date": "2026-03-27",
+        "captured_at": "2026-03-27T22:30:00+08:00",
+        "as_of": "2026-03-27T22:29:00+08:00" if status != "error" else None,
+        "session": "regular" if status != "error" else None,
+        "source": "yahoo_quote",
+        "message": "海外市场上下文获取完成" if status != "error" else "海外市场上下文不可用",
+        "us_market": {
+            "status": status,
+            "session": "regular" if status != "error" else None,
+            "as_of": "2026-03-27T22:29:00+08:00" if status != "error" else None,
+            "indices": [
+                {"symbol": "DJIA", "name": "道琼斯工业平均指数", "price": 39000.0, "change_pct": 0.004},
+                {"symbol": "SPX", "name": "标普500", "price": 5200.0, "change_pct": 0.006},
+                {"symbol": "IXIC", "name": "纳斯达克综合指数", "price": 16500.0, "change_pct": 0.009},
+            ] if status != "error" else [],
+            "risk_signals": {},
+            "leaders": [],
+            "source": "yahoo_quote",
+        },
+    }
+
+
 class _FakeAnalyzer:
     """可记录调用参数的 MarketAnalyzer 替身。"""
 
@@ -43,6 +68,7 @@ class _FakeAnalyzer:
             "statistics": {},
             "sectors": {},
             "limit_up": [],
+            "global_market_context": _global_context(),
             "fetch_time": "2026-03-27T10:00:00",
             "data_source": "api",
         }
@@ -207,6 +233,7 @@ class _PartialMarketDataAnalyzer(_FakeAnalyzer):
             "statistics": {"up_count": 2500, "down_count": 1800, "flat_count": 200},
             "sectors": {"top_sectors": [], "bottom_sectors": []},
             "limit_up": [],
+            "global_market_context": _global_context(),
             "fetch_time": "2026-03-27T10:00:00",
             "data_source": "api",
         }
@@ -695,11 +722,35 @@ def test_market_stage_shows_component_level_statuses():
     assert "涨跌统计: 已获取 2500/1800/200" in output
     assert "板块: 暂无板块数据" in output
     assert "涨停股: 0 只" in output
+    assert "海外市场: DJIA +0.40%, SPX +0.60%, IXIC +0.90%" in output
+    assert "session=regular" in output
 
     idx_stage1 = output.find("[1/3] 获取市场数据")
     idx_indices = output.find("指数: 已获取 2 个指数")
+    idx_global = output.find("海外市场:")
     idx_stage2 = output.find("[2/3] 获取新闻数据")
     assert idx_stage1 < idx_indices < idx_stage2, "市场数据逐项状态应位于阶段 1 与阶段 2 之间"
+    assert idx_indices < idx_global < idx_stage2, "海外市场状态应位于阶段 1 与阶段 2 之间"
+
+
+def test_market_summary_passes_global_context_to_processor():
+    """AI 生成调用应收到独立的海外市场上下文参数。"""
+    runner = CliRunner()
+    _FakeAnalyzer.instances = []
+    _FakeProcessor.instances = []
+
+    with patch("src.cli.ai.get_db", new=_fake_get_db):
+        with patch("src.cli.ai.MarketAnalyzer", _FakeAnalyzer):
+            with patch("src.cli.ai.AIProcessor", _FakeProcessor):
+                result = runner.invoke(
+                    main,
+                    ["ai", "market-summary", "--date", "2026-03-27", "--force"],
+                )
+
+    assert result.exit_code == 0
+    call = _FakeProcessor.instances[0].generate_calls[0]
+    assert call["global_market_context"]["status"] == "ok"
+    assert call["global_market_context"]["us_market"]["indices"][2]["symbol"] == "IXIC"
 
 
 def test_save_path_in_stage_three():
@@ -1458,4 +1509,3 @@ def test_approximate_limit_up_shows_candidate_label():
     assert result.exit_code == 0
     assert "近似候选" in output
     assert "2 只" in output
-

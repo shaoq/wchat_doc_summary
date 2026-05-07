@@ -118,6 +118,25 @@ class Database:
             sync_conn.execute(text("CREATE INDEX ix_fetch_batches_mp_id ON fetch_batches (mp_id)"))
             sync_conn.execute(text("CREATE INDEX ix_fetch_batches_batch_date ON fetch_batches (batch_date)"))
 
+        if "global_market_contexts" not in existing_tables:
+            sync_conn.execute(text("""
+                CREATE TABLE global_market_contexts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    target_a_trade_date DATE NOT NULL UNIQUE,
+                    status VARCHAR(16) NOT NULL,
+                    captured_at VARCHAR(64),
+                    as_of VARCHAR(64),
+                    session VARCHAR(32),
+                    source VARCHAR(64),
+                    payload TEXT NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+            sync_conn.execute(
+                text("CREATE INDEX ix_global_market_contexts_target_a_trade_date ON global_market_contexts (target_a_trade_date)")
+            )
+
     async def close(self) -> None:
         """关闭数据库连接。"""
         if self._engine:

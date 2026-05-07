@@ -461,3 +461,38 @@ class LimitUpStock(Base):
 
     def __repr__(self) -> str:
         return f"<LimitUpStock(trade_date='{self.trade_date}', code='{self.stock_code}')>"
+
+
+class GlobalMarketContext(Base):
+    """海外市场上下文缓存模型。"""
+
+    __tablename__ = "global_market_contexts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    target_a_trade_date: Mapped[datetime] = mapped_column(
+        Date,
+        nullable=False,
+        unique=True,
+        index=True,
+        comment="目标A股交易日期",
+    )
+    status: Mapped[str] = mapped_column(String(16), nullable=False, comment="状态: ok/partial/error")
+    captured_at: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, comment="系统抓取时间")
+    as_of: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, comment="行情时间")
+    session: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, comment="美股交易阶段")
+    source: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, comment="数据来源")
+    payload: Mapped[str] = mapped_column(Text, nullable=False, comment="标准化上下文(JSON)")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        comment="创建时间",
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        comment="更新时间",
+    )
+
+    def __repr__(self) -> str:
+        return f"<GlobalMarketContext(target_a_trade_date='{self.target_a_trade_date}', status='{self.status}')>"

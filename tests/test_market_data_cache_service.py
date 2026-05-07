@@ -43,6 +43,29 @@ def sample_data() -> dict:
             {"code": "000001", "name": "股票A", "change": 0.10, "limit_days": 2, "industry": "科技"},
             {"code": "000002", "name": "股票B", "change": 0.10, "limit_days": 1, "industry": "金融"},
         ],
+        "global_market_context": {
+            "status": "ok",
+            "target_a_trade_date": "2026-03-27",
+            "captured_at": "2026-03-27T22:30:00+08:00",
+            "as_of": "2026-03-27T22:29:00+08:00",
+            "session": "regular",
+            "source": "yahoo_quote",
+            "us_market": {
+                "status": "ok",
+                "session": "regular",
+                "as_of": "2026-03-27T22:29:00+08:00",
+                "indices": [
+                    {"symbol": "DJIA", "name": "道琼斯工业平均指数", "price": 39000.0, "change_pct": 0.004},
+                    {"symbol": "SPX", "name": "标普500", "price": 5200.0, "change_pct": 0.006},
+                    {"symbol": "IXIC", "name": "纳斯达克综合指数", "price": 16500.0, "change_pct": 0.009},
+                ],
+                "risk_signals": {
+                    "vix": {"name": "VIX波动率指数", "value": 13.5, "change_pct": -0.02},
+                },
+                "leaders": [],
+                "source": "yahoo_quote",
+            },
+        },
     }
 
 
@@ -103,6 +126,7 @@ class TestGetCached:
             MagicMock(scalar_one_or_none=MagicMock(return_value=None)),
             MagicMock(scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[])))),
             MagicMock(scalars=MagicMock(return_value=MagicMock(all=MagicMock(return_value=[])))),
+            MagicMock(scalar_one_or_none=MagicMock(return_value=None)),
         ]
         mock_session.execute = AsyncMock(side_effect=query_results)
 
@@ -178,6 +202,8 @@ class TestGetCached:
                 result.scalars.return_value.all.return_value = [mock_sector]
             elif "limit_up_stocks" in str(query):
                 result.scalars.return_value.all.return_value = [mock_stock]
+            elif "global_market_contexts" in str(query):
+                result.scalar_one_or_none.return_value = None
             return result
 
         mock_session.execute.side_effect = mock_execute
@@ -191,6 +217,7 @@ class TestGetCached:
         assert "indices" in result
         assert "volume" in result
         assert "statistics" in result
+        assert result["global_market_context"]["status"] == "error"
 
 
 class TestSaveMarketData:
@@ -260,8 +287,8 @@ class TestDeleteCache:
         service = MarketDataCacheService(mock_db)
         deleted_count = await service.delete_cache(date.today())
 
-        # 验证删除了 5 种数据类型
-        assert mock_session.execute.call_count == 5
+        # 验证删除了 6 种数据类型
+        assert mock_session.execute.call_count == 6
         assert mock_session.commit.called
         assert deleted_count >= 0
 
@@ -383,6 +410,70 @@ class TestSaveMarketDataUpsertIntegration:
         top_sectors = cached["sectors"]["top_sectors"]
         bk001 = next(s for s in top_sectors if s["code"] == "BK001")
         assert bk001["change"] == pytest.approx(0.08)
+
+
+class TestGlobalMarketContextCache:
+    """测试海外市场上下文缓存。"""
+
+    @pytest.mark.asyncio
+    async def test_save_and_read_global_market_context(self, integration_db, sample_data):
+        """保存市场数据时应同时保存海外市场上下文，并以同结构读回。"""
+        service = MarketDataCacheService(integration_db)
+        trade_date = date(2026, 3, 27)
+
+        await service.save_market_data(trade_date, sample_data)
+
+        cached = await service.get_cached(trade_date)
+        assert cached is not None
+        context = cached["global_market_context"]
+        assert context["status"] == "ok"
+        assert context["target_a_trade_date"] == "2026-03-27"
+        assert context["session"] == "regular"
+        assert context["us_market"]["indices"][0]["symbol"] == "DJIA"
+
+    @pytest.mark.asyncio
+    async def test_global_market_context_upsert_overwrites_payload(self, integration_db, sample_data):
+        """重复保存同一交易日时，海外市场上下文应按目标交易日覆盖。"""
+        service = MarketDataCacheService(integration_db)
+        trade_date = date(2026, 3, 27)
+
+        await service.save_market_data(trade_date, sample_data)
+
+        updated_context = {
+            **sample_data["global_market_context"],
+            "status": "partial",
+            "message": "部分信号缺失",
+            "us_market": {
+                **sample_data["global_market_context"]["us_market"],
+                "status": "partial",
+                "indices": sample_data["global_market_context"]["us_market"]["indices"][:1],
+            },
+        }
+        await service.save_market_data(trade_date, {
+            **sample_data,
+            "global_market_context": updated_context,
+        })
+
+        cached = await service.get_cached(trade_date)
+        assert cached is not None
+        assert cached["global_market_context"]["status"] == "partial"
+        assert len(cached["global_market_context"]["us_market"]["indices"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_missing_global_market_context_cache_is_explicit(self, integration_db, sample_data):
+        """有 A 股缓存但没有海外上下文时，应返回显式缺失状态。"""
+        service = MarketDataCacheService(integration_db)
+        trade_date = date(2026, 3, 27)
+
+        data_without_context = dict(sample_data)
+        data_without_context.pop("global_market_context")
+        await service.save_market_data(trade_date, data_without_context)
+
+        cached = await service.get_cached(trade_date)
+        assert cached is not None
+        assert cached["global_market_context"]["status"] == "error"
+        assert cached["global_market_context"]["source"] == "cache"
+        assert "无可用海外市场上下文缓存" in cached["global_market_context"]["message"]
 
 
 class TestBreadthQualityCacheProtection:
