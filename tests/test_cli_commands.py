@@ -3,7 +3,7 @@
 验证模块化后命令面保持不变。
 """
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 from click.testing import CliRunner
 
@@ -193,6 +193,7 @@ class TestFetchCommandBehavior:
             "MP_WXS_test",
             days=None,
             latest_count=10,
+            on_progress=ANY,
         )
 
     def test_fetch_full_overrides_days(self):
@@ -217,6 +218,7 @@ class TestFetchCommandBehavior:
             "MP_WXS_test",
             days=None,
             latest_count=None,
+            on_progress=ANY,
         )
 
     def test_subscribe_wechat2rss_does_not_require_login(self):

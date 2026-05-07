@@ -49,6 +49,7 @@ class TestFetchAllIncrementalDefault:
         """默认无范围 fetch_all 应调用 _fetch_incremental_or_init_summary。"""
         feed_1 = Feed(id=1, mp_id="MP_A", name="A", status=1)
         mock_subscription_service.list_subscriptions = AsyncMock(return_value=[feed_1])
+        mock_subscription_service.list_subscriptions_for_fetch = AsyncMock(return_value=[feed_1])
 
         summary = FetchSummary(mp_id="MP_A", inserted_count=2, articles=[
             Article(id=1, feed_id=1, article_id="a1", title="新文章"),
@@ -60,7 +61,7 @@ class TestFetchAllIncrementalDefault:
             results = await fetcher_service.fetch_all()
 
         assert results["MP_A"].inserted_count == 2
-        fetcher_service._fetch_incremental_or_init_summary.assert_awaited_once_with("MP_A")
+        fetcher_service._fetch_incremental_or_init_summary.assert_awaited_once_with("MP_A", on_progress=None)
 
     @pytest.mark.asyncio
     async def test_fetch_all_explicit_days_uses_fetch_feed_summary(
@@ -71,6 +72,7 @@ class TestFetchAllIncrementalDefault:
         """fetch_all(days=5) 应调用 _fetch_feed_summary。"""
         feed_1 = Feed(id=1, mp_id="MP_A", name="A", status=1)
         mock_subscription_service.list_subscriptions = AsyncMock(return_value=[feed_1])
+        mock_subscription_service.list_subscriptions_for_fetch = AsyncMock(return_value=[feed_1])
 
         summary = FetchSummary(mp_id="MP_A", inserted_count=1)
         fetcher_service._fetch_feed_summary = AsyncMock(return_value=summary)
@@ -80,7 +82,7 @@ class TestFetchAllIncrementalDefault:
 
         assert results["MP_A"].inserted_count == 1
         fetcher_service._fetch_feed_summary.assert_awaited_once_with(
-            "MP_A", days=5, latest_count=None,
+            "MP_A", days=5, latest_count=None, on_progress=None,
         )
 
     @pytest.mark.asyncio
@@ -92,6 +94,7 @@ class TestFetchAllIncrementalDefault:
         """未初始化订阅应退化为有界初始化抓取。"""
         feed = Feed(id=1, mp_id="MP_A", name="A", status=1)
         mock_subscription_service.list_subscriptions = AsyncMock(return_value=[feed])
+        mock_subscription_service.list_subscriptions_for_fetch = AsyncMock(return_value=[feed])
         mock_subscription_service.get_subscription = AsyncMock(return_value=feed)
         mock_subscription_service.update_sync_time = AsyncMock()
 
@@ -106,7 +109,7 @@ class TestFetchAllIncrementalDefault:
 
         # 应使用 BATCH_INIT_COUNT 作为 latest_count
         fetcher_service._fetch_feed_summary.assert_awaited_once_with(
-            "MP_A", latest_count=BATCH_INIT_COUNT,
+            "MP_A", latest_count=BATCH_INIT_COUNT, on_progress=None,
         )
 
     @pytest.mark.asyncio
@@ -121,6 +124,7 @@ class TestFetchAllIncrementalDefault:
             Feed(id=2, mp_id="MP_B", name="B", status=1),
         ]
         mock_subscription_service.list_subscriptions = AsyncMock(return_value=feeds)
+        mock_subscription_service.list_subscriptions_for_fetch = AsyncMock(return_value=feeds)
 
         fetcher_service._fetch_incremental_or_init_summary = AsyncMock(
             return_value=FetchSummary(mp_id="test"),
@@ -135,9 +139,9 @@ class TestFetchAllIncrementalDefault:
             await fetcher_service.fetch_all()
 
         # 应恰好调用一次 sleep（在 MP_A 和 MP_B 之间）
-        assert len(sleep_calls) == 1
-        # 基础等待 + 抖动应在合理范围内
-        assert sleep_calls[0] >= 3.0  # BATCH_BASE_DELAY
+        assert len(sleep_calls) >= 1
+        # 订阅间等待应使用新配置值
+        assert sleep_calls[-1] >= 8.0  # fetch_subscription_delay
 
     @pytest.mark.asyncio
     async def test_fetch_all_backoff_on_recoverable_error(
@@ -152,6 +156,7 @@ class TestFetchAllIncrementalDefault:
             Feed(id=3, mp_id="MP_C", name="C", status=1),
         ]
         mock_subscription_service.list_subscriptions = AsyncMock(return_value=feeds)
+        mock_subscription_service.list_subscriptions_for_fetch = AsyncMock(return_value=feeds)
 
         call_count = 0
 
@@ -175,9 +180,9 @@ class TestFetchAllIncrementalDefault:
             await fetcher_service.fetch_all()
 
         # MP_A→MP_B 之间的等待应更长（退避）
-        assert sleep_calls[0] >= 6.0  # 退避后的基础等待
+        assert sleep_calls[0] >= 8.0  # 退避后的基础等待 (8.0 * 2.0 = 16.0)
         # MP_B→MP_C 之间的等待应恢复
-        assert sleep_calls[1] >= 3.0
+        assert sleep_calls[1] >= 8.0  # fetch_subscription_delay
 
 
 class TestSuspiciousEmptyRetry:

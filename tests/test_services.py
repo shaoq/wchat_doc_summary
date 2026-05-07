@@ -331,6 +331,7 @@ class TestFetcherService:
             "MP_WXS_test",
             page_size=10,
             max_pages=1,
+            on_progress=None,
         )
 
     @pytest.mark.asyncio
@@ -874,6 +875,9 @@ class TestRateLimitCircuitBreaker:
         mock_subscription_service.list_subscriptions = AsyncMock(
             return_value=[feed_1, feed_2, feed_3]
         )
+        mock_subscription_service.list_subscriptions_for_fetch = AsyncMock(
+            return_value=[feed_1, feed_2, feed_3]
+        )
 
         article_a = Article(id=1, feed_id=1, article_id="a1", title="文章A")
 
@@ -961,6 +965,9 @@ class TestRateLimitCircuitBreaker:
         mock_subscription_service.list_subscriptions = AsyncMock(
             return_value=[feed_1, feed_2, feed_3]
         )
+        mock_subscription_service.list_subscriptions_for_fetch = AsyncMock(
+            return_value=[feed_1, feed_2, feed_3]
+        )
 
         article_a = Article(id=1, feed_id=1, article_id="a1", title="文章A")
 
@@ -1040,6 +1047,9 @@ class TestAuthExpiredCircuitBreaker:
         feed_3 = Feed(id=3, mp_id="MP_C", name="公众号C", status=1)
 
         mock_subscription_service.list_subscriptions = AsyncMock(
+            return_value=[feed_1, feed_2, feed_3]
+        )
+        mock_subscription_service.list_subscriptions_for_fetch = AsyncMock(
             return_value=[feed_1, feed_2, feed_3]
         )
 

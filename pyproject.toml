@@ -24,6 +24,7 @@ dependencies = [
     "chinese-calendar>=4.0.0",
     "akshare>=1.12.0",
     "pytdx>=1.72",
+    "markdownify>=0.13.0",
 ]
 
 [project.optional-dependencies]

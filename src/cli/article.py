@@ -12,6 +12,7 @@ from src.cli.utils import console, run_async
 from src.models.schema import Article, Feed
 from src.services.subscription import SubscriptionService
 from src.storage.database import get_db
+from src.utils.html_converter import html_to_markdown
 
 # 导出相关常量
 EXPORT_BASE_DIR = Path("output/export_articles")
@@ -173,9 +174,9 @@ def build_article_markdown(article_obj: Article) -> str:
     if article_obj.summary:
         lines.append(f"> {article_obj.summary}\n\n")
 
-    # 正文
+    # 正文（HTML → Markdown）
     if article_obj.content:
-        lines.append(f"{article_obj.content}\n")
+        lines.append(f"{html_to_markdown(article_obj.content)}\n")
 
     return "".join(lines)
 

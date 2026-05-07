@@ -80,6 +80,42 @@ class Settings(BaseSettings):
         le=100,
         description="每次 API 请求获取的文章数量",
     )
+    fetch_page_interval: float = Field(
+        default=6.0,
+        ge=0,
+        le=60,
+        description="列表翻页间隔（秒）",
+    )
+    fetch_article_interval: float = Field(
+        default=6.0,
+        ge=0,
+        le=60,
+        description="文章内容抓取间隔（秒）",
+    )
+    fetch_subscription_delay: float = Field(
+        default=8.0,
+        ge=0,
+        le=120,
+        description="订阅间基础等待（秒）",
+    )
+    fetch_subscription_jitter: float = Field(
+        default=4.0,
+        ge=0,
+        le=30,
+        description="订阅间抖动上限（秒）",
+    )
+    fetch_rate_limit: int = Field(
+        default=12,
+        ge=1,
+        le=120,
+        description="全局每分钟最大请求数",
+    )
+    fetch_rate_window: int = Field(
+        default=60,
+        ge=10,
+        le=300,
+        description="滑动窗口大小（秒）",
+    )
 
     # 应用配置
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = Field(

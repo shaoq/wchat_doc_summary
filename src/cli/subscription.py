@@ -2,7 +2,6 @@
 
 import click
 from rich.panel import Panel
-from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
 from config.settings import get_settings
@@ -10,7 +9,7 @@ from src.api.weread import AuthExpiredError, RateLimitError, WeReadClient
 from src.cli.utils import console, run_async
 from src.models.schema import Feed
 from src.services.auth import AuthService
-from src.services.fetcher import DEFAULT_LATEST_COUNT, FetchFinalState, FetchSummary, FetcherService
+from src.services.fetcher import DEFAULT_LATEST_COUNT, FetchFinalState, FetchProgressEvent, FetchSummary, FetcherService
 from src.services.subscription import SubscriptionService
 from src.storage.database import get_db
 
@@ -303,25 +302,36 @@ def fetch(fetch_all: bool, days: int | None, full: bool, mp_id: str | None) -> N
         if fetch_all:
             # 抓取所有订阅
             total_feeds = 0
+            results: dict[str, FetchSummary] = {}
             try:
                 feeds = await subscription_service.list_subscriptions(active_only=True)
                 total_feeds = len(feeds)
 
-                with Progress(
-                    SpinnerColumn(),
-                    TextColumn("[progress.description]{task.description}"),
-                    console=console,
-                ) as progress:
-                    task = progress.add_task("抓取所有订阅...", total=None)
+                def on_fetch_all_progress(event: FetchProgressEvent) -> None:
+                    if event.type == "subscription_start":
+                        console.print(f"\n[bold cyan]{event.detail}[/bold cyan] {event.feed_name}")
+                    elif event.type == "page_fetch":
+                        console.print(f"  [dim]├─ {event.detail}[/dim]")
+                    elif event.type == "article_fetch":
+                        console.print(f"  [dim]├─ {event.detail}[/dim]")
+                    elif event.type == "article_skip":
+                        console.print(f"  [dim]├─ {event.detail}[/dim]")
+                    elif event.type == "waiting":
+                        console.print(f"  {event.detail}")
+                    elif event.type == "rate_limited":
+                        console.print(f"  [yellow]{event.detail}[/yellow]")
+                    elif event.type == "subscription_done":
+                        console.print(f"  [green]└─ {event.detail}[/green]")
 
-                    results = await fetcher_service.fetch_all(days=days, latest_count=latest_count)
+                results = await fetcher_service.fetch_all(
+                    days=days, latest_count=latest_count, on_progress=on_fetch_all_progress,
+                )
             except RateLimitError:
-                completed = len(results) if 'results' in dir() else 0
+                completed = len(results)
                 console.print(f"\n[yellow]已被限流，已完成 {completed}/{total_feeds} 个订阅[/yellow]")
                 console.print("[dim]请稍后重试: wchat fetch --all[/dim]")
-                if 'results' in dir():
-                    for feed_mp_id, summary in results.items():
-                        _print_fetch_summary(feed_mp_id, summary)
+                for feed_mp_id, summary in results.items():
+                    _print_fetch_summary(feed_mp_id, summary)
                 return
             except AuthExpiredError:
                 console.print("\n[red]Token 已失效，请重新登录: wchat login[/red]")
@@ -333,17 +343,24 @@ def fetch(fetch_all: bool, days: int | None, full: bool, mp_id: str | None) -> N
         elif mp_id:
             # 抓取指定公众号
             try:
-                with Progress(
-                    SpinnerColumn(),
-                    TextColumn("[progress.description]{task.description}"),
-                    console=console,
-                ) as progress:
-                    task = progress.add_task(f"抓取 {mp_id}...", total=None)
-                    articles = await fetcher_service.fetch_feed(
-                        mp_id,
-                        days=days,
-                        latest_count=latest_count,
-                    )
+                def on_fetch_progress(event: FetchProgressEvent) -> None:
+                    if event.type == "page_fetch":
+                        console.print(f"  [dim]├─ {event.detail}[/dim]")
+                    elif event.type == "article_fetch":
+                        console.print(f"  [dim]├─ {event.detail}[/dim]")
+                    elif event.type == "article_skip":
+                        console.print(f"  [dim]├─ {event.detail}[/dim]")
+                    elif event.type == "waiting":
+                        console.print(f"  {event.detail}")
+                    elif event.type == "rate_limited":
+                        console.print(f"  [yellow]{event.detail}[/yellow]")
+
+                articles = await fetcher_service.fetch_feed(
+                    mp_id,
+                    days=days,
+                    latest_count=latest_count,
+                    on_progress=on_fetch_progress,
+                )
             except RateLimitError:
                 console.print(f"\n[yellow]已被限流，请稍后重试: wchat fetch {mp_id}[/yellow]")
                 return

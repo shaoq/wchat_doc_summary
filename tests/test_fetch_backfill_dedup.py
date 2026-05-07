@@ -62,6 +62,7 @@ class TestFetchBackfillDeduplication:
             Feed(id=2, mp_id="MP_2", name="公众号2", status=1),
         ]
         mock_subscription_service.list_subscriptions = AsyncMock(return_value=feeds)
+        mock_subscription_service.list_subscriptions_for_fetch = AsyncMock(return_value=feeds)
         mock_subscription_service.get_subscription = AsyncMock(
             side_effect=lambda mp_id: next(
                 (f for f in feeds if f.mp_id == mp_id), None

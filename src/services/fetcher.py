@@ -6,7 +6,7 @@ import logging
 import random
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import and_, or_, select
@@ -17,6 +17,7 @@ from src.api.weread import AuthExpiredError, RateLimitError, WeReadAPIError, WeR
 from src.models.schema import Article
 from src.services.subscription import SubscriptionService
 from src.storage.database import Database
+from src.utils.rate_limiter import RateLimiter
 
 from config.settings import get_settings
 
@@ -27,6 +28,69 @@ BATCH_INIT_COUNT = 10  # 未初始化订阅的批量初始化抓取条数
 BATCH_BASE_DELAY = 3.0  # 订阅间基础等待秒数
 BATCH_JITTER = 2.0  # 随机抖动上限秒数
 BATCH_BACKOFF_FACTOR = 2.0  # 异常后退避倍数
+
+
+@dataclass
+class FetchProgressEvent:
+    """抓取进度事件。"""
+
+    type: str  # subscription_start / page_fetch / article_fetch / article_skip / subscription_done / waiting / rate_limited
+    mp_id: str
+    feed_name: str = ""
+    detail: str = ""
+
+    @staticmethod
+    def subscription_start(mp_id: str, feed_name: str, index: int, total: int) -> "FetchProgressEvent":
+        return FetchProgressEvent(
+            type="subscription_start", mp_id=mp_id, feed_name=feed_name,
+            detail=f"[{index}/{total}]",
+        )
+
+    @staticmethod
+    def page_fetched(mp_id: str, page: int, article_count: int) -> "FetchProgressEvent":
+        return FetchProgressEvent(
+            type="page_fetch", mp_id=mp_id,
+            detail=f"获取列表页 {page} ✓ ({article_count} 篇)",
+        )
+
+    @staticmethod
+    def article_fetched(mp_id: str, title: str, is_new: bool) -> "FetchProgressEvent":
+        status = "新" if is_new else "失败"
+        return FetchProgressEvent(
+            type="article_fetch", mp_id=mp_id,
+            detail=f"抓取: {title} ({status})",
+        )
+
+    @staticmethod
+    def article_skipped(mp_id: str, title: str) -> "FetchProgressEvent":
+        return FetchProgressEvent(
+            type="article_skip", mp_id=mp_id,
+            detail=f"跳过: {title} (已存在)",
+        )
+
+    @staticmethod
+    def subscription_done(mp_id: str, feed_name: str, inserted: int, existing: int) -> "FetchProgressEvent":
+        return FetchProgressEvent(
+            type="subscription_done", mp_id=mp_id, feed_name=feed_name,
+            detail=f"完成: {inserted} 篇新增, {existing} 篇已存在",
+        )
+
+    @staticmethod
+    def waiting(mp_id: str, seconds: float, reason: str = "") -> "FetchProgressEvent":
+        return FetchProgressEvent(
+            type="waiting", mp_id=mp_id,
+            detail=f"⏳ 等待 {seconds:.1f}s {reason}后继续...",
+        )
+
+    @staticmethod
+    def rate_limited_event(mp_id: str, wait_seconds: float, limit: int, window: int) -> "FetchProgressEvent":
+        return FetchProgressEvent(
+            type="rate_limited", mp_id=mp_id,
+            detail=f"⏳ 全局限速: 已达 {limit} 次/{window}s，等待 {wait_seconds:.0f}s...",
+        )
+
+
+OnProgressCallback = Callable[[FetchProgressEvent], None] | None
 
 
 class FetchFinalState:
@@ -163,6 +227,16 @@ class FetcherService:
         if article_provider is not None:
             self._providers[article_provider.name] = article_provider
 
+        settings = get_settings()
+        self._rate_limiter = RateLimiter(
+            max_requests=settings.fetch_rate_limit,
+            window_seconds=settings.fetch_rate_window,
+        )
+        self._page_interval = settings.fetch_page_interval
+        self._article_interval = settings.fetch_article_interval
+        self._subscription_delay = settings.fetch_subscription_delay
+        self._subscription_jitter = settings.fetch_subscription_jitter
+
     async def _get_feed_or_raise(self, mp_id: str):
         """获取订阅对象，不存在则抛错。"""
         feed = await self.subscription_service.get_subscription(mp_id)
@@ -170,6 +244,41 @@ class FetcherService:
             logger.error(f"未找到订阅: {mp_id}")
             raise ValueError(f"未找到订阅: {mp_id}")
         return feed
+
+    def _emit(self, on_progress: OnProgressCallback, event: FetchProgressEvent) -> None:
+        """发送进度事件。"""
+        if on_progress is not None:
+            on_progress(event)
+
+    async def _throttle_before_request(
+        self,
+        mp_id: str,
+        on_progress: OnProgressCallback = None,
+    ) -> None:
+        """请求前执行全局限速。"""
+        settings = get_settings()
+        before = len(self._rate_limiter._timestamps)
+        await self._rate_limiter.acquire()
+        after = len(self._rate_limiter._timestamps)
+        if after > before + 1:
+            self._emit(on_progress, FetchProgressEvent.rate_limited_event(
+                mp_id,
+                wait_seconds=0,
+                limit=settings.fetch_rate_limit,
+                window=settings.fetch_rate_window,
+            ))
+
+    async def _wait_with_progress(
+        self,
+        seconds: float,
+        mp_id: str,
+        reason: str = "",
+        on_progress: OnProgressCallback = None,
+    ) -> None:
+        """等待并输出进度提示。"""
+        if seconds > 0:
+            self._emit(on_progress, FetchProgressEvent.waiting(mp_id, seconds, reason))
+            await asyncio.sleep(seconds)
 
     def _resolve_feed_provider(self, mp_id: str, provider_name: str | None) -> str | None:
         """兼容历史订阅的 Provider 推断。"""
@@ -378,6 +487,7 @@ class FetcherService:
         days: int | None = None,
         page_size: int | None = None,
         latest_count: int | None = None,
+        on_progress: OnProgressCallback = None,
     ) -> list[Article]:
         """抓取指定公众号的文章。
 
@@ -387,12 +497,14 @@ class FetcherService:
             days: 抓取最近 N 天的文章，None 表示不限制
             page_size: 每页文章数量，None 表示使用配置默认值
             latest_count: 仅抓取最新 N 条文章，None 表示不启用
+            on_progress: 进度回调函数
 
         Returns:
             抓取到的文章列表
         """
         summary = await self._fetch_feed_summary(
             mp_id, max_pages=max_pages, days=days, page_size=page_size, latest_count=latest_count,
+            on_progress=on_progress,
         )
         return summary.articles
 
@@ -403,6 +515,7 @@ class FetcherService:
         days: int | None = None,
         page_size: int | None = None,
         latest_count: int | None = None,
+        on_progress: OnProgressCallback = None,
     ) -> FetchSummary:
         """抓取指定公众号的文章并返回详细摘要。"""
         if page_size is None:
@@ -430,6 +543,7 @@ class FetcherService:
 
         try:
             if latest_count is not None:
+                await self._throttle_before_request(mp_id, on_progress)
                 article_list, _ = await self._get_latest_articles_with_retry(
                     mp_id,
                     latest_count,
@@ -437,10 +551,20 @@ class FetcherService:
                 )
                 summary.list_returned_count = len(article_list)
                 for article_info in article_list:
+                    await self._throttle_before_request(mp_id, on_progress)
                     status, article = await self._fetch_and_save_article(feed.id, article_info)
                     if status == "inserted":
                         inserted.append(article)  # type: ignore[arg-type]
+                        self._emit(on_progress, FetchProgressEvent.article_fetched(mp_id, article_info.get("title", ""), is_new=True))
+                    elif status == "existing":
+                        self._emit(on_progress, FetchProgressEvent.article_skipped(mp_id, article_info.get("title", "")))
+                    else:
+                        self._emit(on_progress, FetchProgressEvent.article_fetched(mp_id, article_info.get("title", ""), is_new=False))
                     self._update_summary_counts(summary, status)
+
+                    # 文章间等待（已存在的跳过不等待）
+                    if status != "existing":
+                        await self._wait_with_progress(self._article_interval, mp_id, "", on_progress)
 
                 await self.subscription_service.update_sync_time(mp_id)
                 summary.final_state = self._determine_state(summary)
@@ -449,11 +573,19 @@ class FetcherService:
                     mp_id,
                     page_size=latest_count,
                     max_pages=1,
+                    on_progress=on_progress,
                 )
                 summary.articles = inserted
                 return summary
 
             for page in range(1, max_pages + 1):
+                # 翻页间隔（第一页不等待）
+                if page > 1:
+                    await self._wait_with_progress(self._page_interval, mp_id, "", on_progress)
+
+                # 全局限速
+                await self._throttle_before_request(mp_id, on_progress)
+
                 # 获取文章列表（第一页使用可疑空页重试）
                 article_list, current_page_size, was_suspicious = await self._get_article_page_with_suspicious_retry(
                     mp_id,
@@ -471,6 +603,7 @@ class FetcherService:
                     logger.info(f"第 {page} 页无文章，停止抓取")
                     break
 
+                self._emit(on_progress, FetchProgressEvent.page_fetched(mp_id, page, len(article_list)))
                 summary.list_returned_count += len(article_list)
 
                 # 时间过滤：检查是否所有文章都早于截止时间
@@ -486,10 +619,20 @@ class FetcherService:
                             logger.debug(f"跳过早期文章: {article_info.get('title', '')}")
                             continue
 
+                    await self._throttle_before_request(mp_id, on_progress)
                     status, article = await self._fetch_and_save_article(feed.id, article_info)
                     if status == "inserted":
                         inserted.append(article)  # type: ignore[arg-type]
+                        self._emit(on_progress, FetchProgressEvent.article_fetched(mp_id, article_info.get("title", ""), is_new=True))
+                    elif status == "existing":
+                        self._emit(on_progress, FetchProgressEvent.article_skipped(mp_id, article_info.get("title", "")))
+                    else:
+                        self._emit(on_progress, FetchProgressEvent.article_fetched(mp_id, article_info.get("title", ""), is_new=False))
                     self._update_summary_counts(summary, status)
+
+                    # 文章间等待（已存在的跳过不等待）
+                    if status != "existing":
+                        await self._wait_with_progress(self._article_interval, mp_id, "", on_progress)
 
                 if len(article_list) < current_page_size:
                     logger.info(f"已获取所有文章，共 {page} 页")
@@ -612,12 +755,14 @@ class FetcherService:
         self,
         days: int | None = None,
         latest_count: int | None = None,
+        on_progress: OnProgressCallback = None,
     ) -> dict[str, FetchSummary]:
         """抓取所有已订阅公众号的文章。
 
         Args:
             days: 抓取最近 N 天的文章，None 表示不限制
             latest_count: 仅抓取每个订阅的最新 N 条文章，None 表示不启用
+            on_progress: 进度回调函数
 
         Returns:
             字典，key 为 mp_id，value 为 FetchSummary
@@ -629,20 +774,33 @@ class FetcherService:
 
         feeds = await self.subscription_service.list_subscriptions_for_fetch(active_only=True)
         results: dict[str, FetchSummary] = {}
-        backoff_delay = BATCH_BASE_DELAY
+        backoff_delay = self._subscription_delay
 
-        for feed in feeds:
+        for idx, feed in enumerate(feeds, 1):
             if not feed.mp_id:
                 continue
+
+            self._emit(on_progress, FetchProgressEvent.subscription_start(
+                feed.mp_id, feed.name or feed.mp_id, idx, len(feeds),
+            ))
+
             try:
                 if latest_count is not None or days is not None:
                     summary = await self._fetch_feed_summary(
                         feed.mp_id, days=days, latest_count=latest_count,
+                        on_progress=on_progress,
                     )
                 else:
-                    summary = await self._fetch_incremental_or_init_summary(feed.mp_id)
+                    summary = await self._fetch_incremental_or_init_summary(
+                        feed.mp_id, on_progress=on_progress,
+                    )
                 results[feed.mp_id] = summary
-                backoff_delay = BATCH_BASE_DELAY
+                backoff_delay = self._subscription_delay
+
+                self._emit(on_progress, FetchProgressEvent.subscription_done(
+                    feed.mp_id, feed.name or feed.mp_id,
+                    summary.inserted_count, summary.existing_count,
+                ))
             except (RateLimitError, AuthExpiredError) as e:
                 logger.warning(f"不可恢复错误中断批量抓取: {feed.name} - {e}")
                 results[feed.mp_id] = FetchSummary(
@@ -654,14 +812,13 @@ class FetcherService:
                 results[feed.mp_id] = FetchSummary(
                     mp_id=feed.mp_id, final_state=FetchFinalState.ERROR,
                 )
-                backoff_delay = min(backoff_delay * BATCH_BACKOFF_FACTOR, 30.0)
+                backoff_delay = min(backoff_delay * BATCH_BACKOFF_FACTOR, 60.0)
 
             # 订阅间等待 + 抖动（最后一个订阅不等）
             if feed != feeds[-1] and feed.mp_id:
-                jitter = random.uniform(0, BATCH_JITTER)
+                jitter = random.uniform(0, self._subscription_jitter)
                 wait = backoff_delay + jitter
-                logger.debug(f"订阅间等待 {wait:.1f}s")
-                await asyncio.sleep(wait)
+                await self._wait_with_progress(wait, feed.mp_id, "切换订阅，", on_progress)
 
         total = sum(s.inserted_count for s in results.values())
         logger.info(f"全部抓取完成: {total} 篇新文章")
@@ -679,6 +836,7 @@ class FetcherService:
     async def _fetch_incremental_or_init_summary(
         self,
         mp_id: str,
+        on_progress: OnProgressCallback = None,
     ) -> FetchSummary:
         """批量模式的默认抓取路径，返回摘要。"""
         feed = await self._get_feed_or_raise(mp_id)
@@ -686,9 +844,9 @@ class FetcherService:
 
         if latest_time is None:
             logger.info(f"订阅未初始化，退化为最新 {BATCH_INIT_COUNT} 条初始化抓取: {mp_id}")
-            return await self._fetch_feed_summary(mp_id, latest_count=BATCH_INIT_COUNT)
+            return await self._fetch_feed_summary(mp_id, latest_count=BATCH_INIT_COUNT, on_progress=on_progress)
 
-        return await self._fetch_incremental_summary(mp_id)
+        return await self._fetch_incremental_summary(mp_id, on_progress=on_progress)
 
     async def fetch_incremental(
         self,
@@ -705,6 +863,7 @@ class FetcherService:
         mp_id: str,
         max_pages: int = 5,
         page_size: int | None = None,
+        on_progress: OnProgressCallback = None,
     ) -> FetchSummary:
         """增量抓取，返回详细摘要。"""
         if page_size is None:
@@ -716,7 +875,7 @@ class FetcherService:
 
         if latest_time is None:
             logger.info(f"未找到已抓取文章，增量抓取退化为全量抓取: {mp_id}")
-            return await self._fetch_feed_summary(mp_id, max_pages=max_pages, days=None, page_size=page_size)
+            return await self._fetch_feed_summary(mp_id, max_pages=max_pages, days=None, page_size=page_size, on_progress=on_progress)
 
         logger.info(f"开始增量抓取: mp_id={mp_id}, latest_time={latest_time.isoformat()}")
 
@@ -726,6 +885,11 @@ class FetcherService:
         suspicious_empty = False
 
         for page in range(1, max_pages + 1):
+            # 翻页间隔（第一页不等待）
+            if page > 1:
+                await self._wait_with_progress(self._page_interval, mp_id, "", on_progress)
+
+            await self._throttle_before_request(mp_id, on_progress)
             article_list, current_page_size, was_suspicious = await self._get_article_page_with_suspicious_retry(
                 mp_id,
                 provider=provider,
@@ -738,6 +902,7 @@ class FetcherService:
                     suspicious_empty = True
                 break
 
+            self._emit(on_progress, FetchProgressEvent.page_fetched(mp_id, page, len(article_list)))
             summary.list_returned_count += len(article_list)
 
             for article_info in article_list:
@@ -747,10 +912,20 @@ class FetcherService:
                     should_stop = True
                     continue
 
+                await self._throttle_before_request(mp_id, on_progress)
                 status, article = await self._fetch_and_save_article(feed.id, article_info)
                 if status == "inserted":
                     inserted.append(article)  # type: ignore[arg-type]
+                    self._emit(on_progress, FetchProgressEvent.article_fetched(mp_id, article_info.get("title", ""), is_new=True))
+                elif status == "existing":
+                    self._emit(on_progress, FetchProgressEvent.article_skipped(mp_id, article_info.get("title", "")))
+                else:
+                    self._emit(on_progress, FetchProgressEvent.article_fetched(mp_id, article_info.get("title", ""), is_new=False))
                 self._update_summary_counts(summary, status)
+
+                # 文章间等待（已存在的跳过不等待）
+                if status != "existing":
+                    await self._wait_with_progress(self._article_interval, mp_id, "", on_progress)
 
             if should_stop or len(article_list) < current_page_size:
                 break
@@ -762,7 +937,7 @@ class FetcherService:
         else:
             summary.final_state = self._determine_state(summary)
             await self.subscription_service.update_sync_time(mp_id)
-            await self.backfill_publish_time(mp_id)
+            await self.backfill_publish_time(mp_id, on_progress=on_progress)
 
         summary.articles = inserted
         logger.info(f"增量抓取完成: {summary.inserted_count} 篇新文章")
@@ -773,6 +948,7 @@ class FetcherService:
         mp_id: str,
         page_size: int | None = None,
         max_pages: int = 5,
+        on_progress: OnProgressCallback = None,
     ) -> int:
         """批量更新已存在文章的发布时间。
 
@@ -809,6 +985,9 @@ class FetcherService:
 
         for page in range(1, max_pages + 1):
             try:
+                if page > 1:
+                    await self._wait_with_progress(self._page_interval, mp_id, "", on_progress)
+                await self._throttle_before_request(mp_id, on_progress)
                 article_list, current_page_size = await self._get_article_page(
                     mp_id,
                     provider=provider,
