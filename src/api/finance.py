@@ -706,7 +706,7 @@ class FinanceClient:
                 failure_type=failure_type,
                 message=message,
             ))
-            logger.warning("海外市场主源获取失败: %s", message)
+            logger.debug("海外市场主源获取失败: %s", message)
 
         # Provider 2: Yahoo v8 chart (fallback)
         try:
@@ -740,9 +740,16 @@ class FinanceClient:
                 failure_type=failure_type,
                 message=message,
             ))
-            logger.warning("海外市场 fallback 获取失败: %s", message)
+            logger.debug("海外市场 fallback 获取失败: %s", message)
 
-        # 所有 provider 均失败
+        # 所有 provider 均失败 — 输出一次聚合 warning
+        failure_summary = ", ".join(
+            f"{a['source']}={a['failure_type']}" for a in source_attempts if a["failure_type"] != "none"
+        )
+        logger.warning(
+            "海外市场上下文所有数据源失败: %s",
+            failure_summary or "unknown",
+        )
         last_attempt = source_attempts[-1] if source_attempts else None
         result = self._empty_global_market_context(
             target_a_trade_date,
@@ -972,6 +979,7 @@ class FinanceClient:
             return {"up_count": 0, "down_count": 0, "flat_count": 0}, error_quality
 
         expected_count = 0
+        attempt_errors: list[str] = []
         for host, port in _PYTDX_HOSTS:
             api = TdxHq_API(heartbeat=False, multithread=False)
             try:
@@ -1015,8 +1023,15 @@ class FinanceClient:
                         expected_count=expected_count,
                     )
             except Exception as e:
-                logger.warning("pytdx 主站 %s:%s 失败: %s", host, port, e)
+                err_msg = f"{host}:{port} - {e}"
+                attempt_errors.append(err_msg)
+                logger.debug("pytdx 主站尝试失败: %s", err_msg)
 
+        last_error = attempt_errors[-1] if attempt_errors else "unknown"
+        logger.warning(
+            "pytdx 涨跌统计全部主站失败: attempts=%d, last_error=%s",
+            len(attempt_errors), last_error,
+        )
         fallback_quality = self._build_quality(
             status="error" if expected_count == 0 else "partial",
             source=_PYTDX_STATS_SOURCE,
