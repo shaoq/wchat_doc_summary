@@ -1,9 +1,3 @@
-## MODIFIED Requirements
-
-### Requirement: Downstream article time comparisons use the normalized Shanghai-local contract
-
-*(此 requirement 内容不变，无需修改。article-fetcher 的变更仅体现在抓取流程中等待行为由固定间隔变更为抖动间隔，不影响时间比较逻辑。)*
-
 ## ADDED Requirements
 
 ### Requirement: 抓取流程中的等待调用使用抖动间隔
