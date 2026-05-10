@@ -494,3 +494,37 @@ class TestAuthExpiredError:
         # 非 AuthExpiredError，应为普通 WeReadAPIError
         assert not isinstance(exc_info.value, AuthExpiredError)
         assert not isinstance(exc_info.value, RateLimitError)
+
+    @pytest.mark.asyncio
+    async def test_auth_expired_with_500_status_code(self) -> None:
+        """HTTP 500 + WeReadError401 也应触发 AuthExpiredError，不重试。"""
+        client = WeReadClient(base_url="https://api.example.com")
+        client.max_retries = 3
+
+        call_count = 0
+
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_response = MagicMock()
+            mock_response.status_code = 500
+            mock_response.text = '{"message":"WeReadError401","statusCode":500}'
+            mock_response.raise_for_status = MagicMock(
+                side_effect=httpx.HTTPStatusError(
+                    "Error",
+                    request=MagicMock(),
+                    response=mock_response,
+                )
+            )
+
+            async def count_calls(*args, **kwargs):
+                nonlocal call_count
+                call_count += 1
+                return mock_response
+
+            mock_client.return_value.__aenter__.return_value.request = count_calls
+
+            with pytest.raises(AuthExpiredError) as exc_info:
+                await client._request("GET", "/api/v2/platform/mps/MP_WXS_test/articles")
+
+        assert call_count == 1
+        assert "WeReadError401" in str(exc_info.value)
+        assert exc_info.value.status_code == 500

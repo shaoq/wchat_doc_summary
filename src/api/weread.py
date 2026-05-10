@@ -143,11 +143,8 @@ class WeReadClient:
                             response_text=e.response.text,
                         ) from e
 
-                    # Token 失效检测：401 + WeReadError401 → 立即抛出，不重试
-                    if (
-                        e.response.status_code == 401
-                        and "WeReadError401" in e.response.text
-                    ):
+                    # Token 失效检测：body 含 WeReadError401 → 立即抛出，不重试
+                    if "WeReadError401" in e.response.text:
                         logger.warning(f"Token 失效: {e.response.text}")
                         raise AuthExpiredError(
                             f"Token 已失效: {e.response.text}",
