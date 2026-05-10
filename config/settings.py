@@ -86,11 +86,23 @@ class Settings(BaseSettings):
         le=60,
         description="列表翻页间隔（秒）",
     )
+    fetch_page_jitter: float = Field(
+        default=3.0,
+        ge=0,
+        le=30,
+        description="翻页间随机抖动上限（秒）",
+    )
     fetch_article_interval: float = Field(
         default=6.0,
         ge=0,
         le=60,
         description="文章内容抓取间隔（秒）",
+    )
+    fetch_article_jitter: float = Field(
+        default=3.0,
+        ge=0,
+        le=30,
+        description="文章间随机抖动上限（秒）",
     )
     fetch_subscription_delay: float = Field(
         default=8.0,

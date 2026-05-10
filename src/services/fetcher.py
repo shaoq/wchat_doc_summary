@@ -233,7 +233,9 @@ class FetcherService:
             window_seconds=settings.fetch_rate_window,
         )
         self._page_interval = settings.fetch_page_interval
+        self._page_jitter = settings.fetch_page_jitter
         self._article_interval = settings.fetch_article_interval
+        self._article_jitter = settings.fetch_article_jitter
         self._subscription_delay = settings.fetch_subscription_delay
         self._subscription_jitter = settings.fetch_subscription_jitter
 
@@ -360,6 +362,18 @@ class FetcherService:
         if seconds > 0:
             self._emit(on_progress, FetchProgressEvent.waiting(mp_id, seconds, reason))
             await asyncio.sleep(seconds)
+
+    async def _jittered_wait(
+        self,
+        base: float,
+        jitter: float,
+        mp_id: str,
+        reason: str = "",
+        on_progress: OnProgressCallback = None,
+    ) -> None:
+        """带随机抖动的等待，实际等待 = base + random(0, jitter)。"""
+        actual = base + random.uniform(0, jitter)
+        await self._wait_with_progress(actual, mp_id, reason, on_progress)
 
     def _resolve_feed_provider(self, mp_id: str, provider_name: str | None) -> str | None:
         """兼容历史订阅的 Provider 推断。"""
@@ -645,7 +659,7 @@ class FetcherService:
 
                     # 文章间等待（已存在的跳过不等待）
                     if status != "existing":
-                        await self._wait_with_progress(self._article_interval, mp_id, "", on_progress)
+                        await self._jittered_wait(self._article_interval, self._article_jitter, mp_id, "", on_progress)
 
                 await self.subscription_service.update_sync_time(mp_id)
                 summary.final_state = self._determine_state(summary)
@@ -662,7 +676,7 @@ class FetcherService:
             for page in range(1, max_pages + 1):
                 # 翻页间隔（第一页不等待）
                 if page > 1:
-                    await self._wait_with_progress(self._page_interval, mp_id, "", on_progress)
+                    await self._jittered_wait(self._page_interval, self._page_jitter, mp_id, "", on_progress)
 
                 # 全局限速
                 await self._throttle_before_request(mp_id, on_progress)
@@ -713,7 +727,7 @@ class FetcherService:
 
                     # 文章间等待（已存在的跳过不等待）
                     if status != "existing":
-                        await self._wait_with_progress(self._article_interval, mp_id, "", on_progress)
+                        await self._jittered_wait(self._article_interval, self._article_jitter, mp_id, "", on_progress)
 
                 if len(article_list) < current_page_size:
                     logger.info(f"已获取所有文章，共 {page} 页")
@@ -992,7 +1006,7 @@ class FetcherService:
         for page in range(1, max_pages + 1):
             # 翻页间隔（第一页不等待）
             if page > 1:
-                await self._wait_with_progress(self._page_interval, mp_id, "", on_progress)
+                await self._jittered_wait(self._page_interval, self._page_jitter, mp_id, "", on_progress)
 
             await self._throttle_before_request(mp_id, on_progress)
             article_list, current_page_size, was_suspicious = await self._get_article_page_with_suspicious_retry(
@@ -1030,7 +1044,7 @@ class FetcherService:
 
                 # 文章间等待（已存在的跳过不等待）
                 if status != "existing":
-                    await self._wait_with_progress(self._article_interval, mp_id, "", on_progress)
+                    await self._jittered_wait(self._article_interval, self._article_jitter, mp_id, "", on_progress)
 
             if should_stop or len(article_list) < current_page_size:
                 break
@@ -1091,7 +1105,7 @@ class FetcherService:
         for page in range(1, max_pages + 1):
             try:
                 if page > 1:
-                    await self._wait_with_progress(self._page_interval, mp_id, "", on_progress)
+                    await self._jittered_wait(self._page_interval, self._page_jitter, mp_id, "", on_progress)
                 await self._throttle_before_request(mp_id, on_progress)
                 article_list, current_page_size = await self._get_article_page(
                     mp_id,
