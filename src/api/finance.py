@@ -485,7 +485,20 @@ class FinanceClient:
                 quote.get("preMarketChangePercent"),
             )
         )
-        return round(value / 100, 6) if value is not None else None
+        if value is not None:
+            return round(value / 100, 6)
+
+        price = self._quote_price(quote)
+        previous_close = self._to_float(
+            self._first_present(
+                quote.get("regularMarketPreviousClose"),
+                quote.get("chartPreviousClose"),
+                quote.get("previousClose"),
+            )
+        )
+        if price is None or previous_close in (None, 0):
+            return None
+        return round((price - previous_close) / previous_close, 6)
 
     def _normalize_global_quote_rows(
         self,
@@ -623,6 +636,9 @@ class FinanceClient:
                     results.append({
                         "symbol": symbol,
                         "regularMarketPrice": meta.get("regularMarketPrice"),
+                        "regularMarketPreviousClose": meta.get("regularMarketPreviousClose"),
+                        "chartPreviousClose": meta.get("chartPreviousClose"),
+                        "previousClose": meta.get("previousClose"),
                         "regularMarketChangePercent": meta.get("regularMarketChangePercent"),
                         "regularMarketChange": meta.get("regularMarketChange"),
                         "regularMarketTime": meta.get("regularMarketTime"),

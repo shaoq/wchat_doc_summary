@@ -16,6 +16,6 @@
 
 ## 4. 测试与回归
 
-- [ ] 4.1 更新 `tests/test_finance_contracts.py`，覆盖 provider fallback、401 分类和来源元数据 contract
+- [x] 4.1 更新 `tests/test_finance_contracts.py`，覆盖 provider fallback、401 分类和来源元数据 contract
 - [x] 4.2 更新 `tests/test_market_data_cache_service.py`，覆盖质量优先缓存保护和 provenance 回放
 - [x] 4.3 更新 `tests/test_market_summary_cli_flow.py` 与 `tests/test_market_summary_structure.py`，覆盖 fallback 展示与 prompt 缺口约束

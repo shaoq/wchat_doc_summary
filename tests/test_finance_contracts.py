@@ -1483,6 +1483,40 @@ class TestProviderFallbackContract:
         assert result["source_attempts"][1]["failure_type"] == "none"
 
     @pytest.mark.asyncio
+    async def test_chart_fallback_derives_change_pct_from_previous_close(self, finance_client):
+        """Contract: chart fallback 缺少涨跌幅时应从前收价派生。"""
+        mock_rows = [
+            {"symbol": "^DJI", "regularMarketPrice": 49596.97, "chartPreviousClose": 49910.59, "regularMarketTime": 1778187250},
+            {"symbol": "^GSPC", "regularMarketPrice": 7337.11, "chartPreviousClose": 7365.12, "regularMarketTime": 1778187233},
+            {"symbol": "^IXIC", "regularMarketPrice": 25806.195, "chartPreviousClose": 25838.943, "regularMarketTime": 1778188559},
+            {"symbol": "^VIX", "regularMarketPrice": 17.08, "chartPreviousClose": 17.39, "regularMarketTime": 1778184901},
+            {"symbol": "DX-Y.NYB", "regularMarketPrice": 98.257, "chartPreviousClose": 98.067, "regularMarketTime": 1778191494},
+            {"symbol": "^TNX", "regularMarketPrice": 4.392, "chartPreviousClose": 4.356, "regularMarketTime": 1778180393},
+            {"symbol": "^SOX", "regularMarketPrice": 11160.993, "chartPreviousClose": 11472.755, "regularMarketTime": 1778188559},
+            {"symbol": "NVDA", "regularMarketPrice": 211.5, "chartPreviousClose": 207.665, "regularMarketTime": 1778184002},
+        ]
+        with patch.object(
+            finance_client, "_fetch_yahoo_quotes_sync",
+            side_effect=Exception("401 Client Error: Unauthorized"),
+        ):
+            with patch.object(
+                finance_client, "_fetch_yahoo_chart_sync", return_value=mock_rows,
+            ):
+                result = await finance_client.get_global_market_context(date(2026, 5, 8))
+
+        assert result["status"] == "ok"
+        assert result["source"] == "yahoo_chart"
+        assert result["degraded"] is True
+        assert "DJIA" not in result["message"]
+        assert "SPX" not in result["message"]
+        assert "IXIC" not in result["message"]
+        indices = {item["symbol"]: item for item in result["us_market"]["indices"]}
+        assert set(indices) == {"DJIA", "SPX", "IXIC"}
+        assert indices["DJIA"]["change_pct"] == pytest.approx(-0.006284)
+        assert indices["SPX"]["change_pct"] == pytest.approx(-0.003803)
+        assert indices["IXIC"]["change_pct"] == pytest.approx(-0.001267)
+
+    @pytest.mark.asyncio
     async def test_all_providers_fail_returns_error_with_attempts(self, finance_client):
         """Contract: 所有 provider 均失败时返回 error 并附带完整尝试序列。"""
         with patch.object(
