@@ -10,6 +10,7 @@ import chinese_calendar as calendar
 
 from src.api.finance import FinanceClient, FinanceAPIError
 from src.models.schema import Article, MarketSummary
+from src.services import trade_calendar as _tc
 from src.storage.database import Database, CRUDOperations
 
 logger = logging.getLogger(__name__)
@@ -55,13 +56,7 @@ class MarketAnalyzer:
         Returns:
             是否为交易日
         """
-        if check_date is None:
-            check_date = date.today()
-        # 周末一律不是交易日（排除调休工作日周末）
-        if check_date.weekday() >= 5:
-            return False
-        # 法定节假日不是交易日
-        return calendar.is_workday(check_date)
+        return _tc.is_trade_day(check_date)
 
     def get_next_trade_date(self, trade_date: date) -> date:
         """获取下一个交易日。
@@ -94,12 +89,7 @@ class MarketAnalyzer:
         Raises:
             ValueError: 30 天内未找到上一个交易日
         """
-        check_date = trade_date - timedelta(days=1)
-        for _ in range(30):
-            if self.is_trade_day(check_date):
-                return check_date
-            check_date -= timedelta(days=1)
-        raise ValueError(f"30 天内未找到上一个交易日: {trade_date}")
+        return _tc.get_previous_trade_date(trade_date)
 
     def calculate_article_time_window(self, trade_date: date) -> tuple[datetime, datetime]:
         """计算文章时间窗口。

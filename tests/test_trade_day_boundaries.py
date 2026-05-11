@@ -18,21 +18,21 @@ class TestIsTradeDay:
 
     # ---- 普通工作日 ----
 
-    @patch("src.services.market_analyzer.calendar")
+    @patch("src.services.trade_calendar.chinese_calendar")
     def test_monday_is_trade_day(self, mock_calendar, analyzer):
         """周一应为交易日。"""
         mock_calendar.is_workday.return_value = True
         # 2026-03-30 是周一
         assert analyzer.is_trade_day(date(2026, 3, 30)) is True
 
-    @patch("src.services.market_analyzer.calendar")
+    @patch("src.services.trade_calendar.chinese_calendar")
     def test_friday_is_trade_day(self, mock_calendar, analyzer):
         """周五应为交易日。"""
         mock_calendar.is_workday.return_value = True
         # 2026-03-27 是周五
         assert analyzer.is_trade_day(date(2026, 3, 27)) is True
 
-    @patch("src.services.market_analyzer.calendar")
+    @patch("src.services.trade_calendar.chinese_calendar")
     def test_midweek_is_trade_day(self, mock_calendar, analyzer):
         """周三应为交易日（普通工作日）。"""
         mock_calendar.is_workday.return_value = True
@@ -41,7 +41,7 @@ class TestIsTradeDay:
 
     # ---- 周末 ----
 
-    @patch("src.services.market_analyzer.calendar")
+    @patch("src.services.trade_calendar.chinese_calendar")
     def test_saturday_is_not_trade_day(self, mock_calendar, analyzer):
         """周六不是交易日（weekday() == 5，先返回 False）。"""
         # 即使 chinese_calendar 认为是工作日也应排除
@@ -51,7 +51,7 @@ class TestIsTradeDay:
         # weekday() >= 5 先返回 False，不会调用 calendar.is_workday
         mock_calendar.is_workday.assert_not_called()
 
-    @patch("src.services.market_analyzer.calendar")
+    @patch("src.services.trade_calendar.chinese_calendar")
     def test_sunday_is_not_trade_day(self, mock_calendar, analyzer):
         """周日不是交易日（weekday() == 6，先返回 False）。"""
         mock_calendar.is_workday.return_value = True
@@ -61,7 +61,7 @@ class TestIsTradeDay:
 
     # ---- 法定节假日 ----
 
-    @patch("src.services.market_analyzer.calendar")
+    @patch("src.services.trade_calendar.chinese_calendar")
     def test_holiday_is_not_trade_day(self, mock_calendar, analyzer):
         """法定节假日不是交易日（calendar.is_workday 返回 False）。"""
         mock_calendar.is_workday.return_value = False
@@ -70,7 +70,7 @@ class TestIsTradeDay:
 
     # ---- 调休工作日周末 ----
 
-    @patch("src.services.market_analyzer.calendar")
+    @patch("src.services.trade_calendar.chinese_calendar")
     def test_adjusted_workday_weekend_still_not_trade_day(self, mock_calendar, analyzer):
         """调休工作日周末仍不是交易日（保守规则：weekday() >= 5 先返回 False）。
 
@@ -87,7 +87,7 @@ class TestIsTradeDay:
 
     # ---- 默认参数 ----
 
-    @patch("src.services.market_analyzer.calendar")
+    @patch("src.services.trade_calendar.chinese_calendar")
     def test_none_defaults_to_today(self, mock_calendar, analyzer):
         """传入 None 时默认使用今天。"""
         mock_calendar.is_workday.return_value = True
@@ -108,7 +108,7 @@ class TestGetNextTradeDate:
         """创建 MarketAnalyzer 实例。"""
         return MarketAnalyzer.__new__(MarketAnalyzer)
 
-    @patch("src.services.market_analyzer.calendar")
+    @patch("src.services.trade_calendar.chinese_calendar")
     def test_next_trade_date_skips_weekend(self, mock_calendar, analyzer):
         """周五的下一个交易日应为周一（跨越周末）。"""
         # 2026-03-27 周五 -> 下一个交易日应为 2026-03-30 周一
@@ -124,7 +124,7 @@ class TestGetNextTradeDate:
         result = analyzer.get_next_trade_date(date(2026, 3, 27))
         assert result == date(2026, 3, 30)
 
-    @patch("src.services.market_analyzer.calendar")
+    @patch("src.services.trade_calendar.chinese_calendar")
     def test_next_trade_date_consecutive_workday(self, mock_calendar, analyzer):
         """周一的下一个交易日应为周二。"""
         mock_calendar.is_workday.return_value = True
@@ -132,7 +132,7 @@ class TestGetNextTradeDate:
         result = analyzer.get_next_trade_date(date(2026, 3, 30))
         assert result == date(2026, 3, 31)
 
-    @patch("src.services.market_analyzer.calendar")
+    @patch("src.services.trade_calendar.chinese_calendar")
     def test_next_trade_date_skips_holiday(self, mock_calendar, analyzer):
         """遇到法定节假日应跳过。"""
         # 2026-01-01 周四（元旦）-> 应跳过
@@ -147,7 +147,7 @@ class TestGetNextTradeDate:
         result = analyzer.get_next_trade_date(date(2025, 12, 31))
         assert result == date(2026, 1, 2)
 
-    @patch("src.services.market_analyzer.calendar")
+    @patch("src.services.trade_calendar.chinese_calendar")
     def test_next_trade_date_raises_when_not_found(self, mock_calendar, analyzer):
         """30 天内找不到交易日时应抛出 ValueError。"""
         mock_calendar.is_workday.return_value = False
@@ -163,7 +163,7 @@ class TestCalculateArticleTimeWindow:
         """创建 MarketAnalyzer 实例。"""
         return MarketAnalyzer.__new__(MarketAnalyzer)
 
-    @patch("src.services.market_analyzer.calendar")
+    @patch("src.services.trade_calendar.chinese_calendar")
     def test_window_precise_boundaries(self, mock_calendar, analyzer):
         """时间窗口应为 trade_date 15:00 ~ next_trading_date 09:15。"""
         mock_calendar.is_workday.return_value = True
@@ -175,7 +175,7 @@ class TestCalculateArticleTimeWindow:
         assert start == datetime(2026, 3, 25, 15, 0)
         assert end == datetime(2026, 3, 26, 9, 15)
 
-    @patch("src.services.market_analyzer.calendar")
+    @patch("src.services.trade_calendar.chinese_calendar")
     def test_window_friday_to_monday(self, mock_calendar, analyzer):
         """周五到周一的窗口跨越（周五 15:00 ~ 周一 09:15）。"""
         mock_calendar.is_workday.return_value = True
@@ -187,7 +187,7 @@ class TestCalculateArticleTimeWindow:
         assert start == datetime(2026, 3, 27, 15, 0)
         assert end == datetime(2026, 3, 30, 9, 15)
 
-    @patch("src.services.market_analyzer.calendar")
+    @patch("src.services.trade_calendar.chinese_calendar")
     def test_window_before_holiday(self, mock_calendar, analyzer):
         """节假日前一天的窗口应跨越假期。"""
         def is_workday_side_effect(d):
@@ -204,7 +204,7 @@ class TestCalculateArticleTimeWindow:
         assert start == datetime(2025, 12, 31, 15, 0)
         assert end == datetime(2026, 1, 2, 9, 15)
 
-    @patch("src.services.market_analyzer.calendar")
+    @patch("src.services.trade_calendar.chinese_calendar")
     def test_window_duration_friday_to_monday(self, mock_calendar, analyzer):
         """周五到周一窗口时长应为 3 天（跨周末）。"""
         mock_calendar.is_workday.return_value = True
@@ -218,7 +218,7 @@ class TestCalculateArticleTimeWindow:
         expected_duration = timedelta(days=2, hours=18, minutes=15)
         assert duration == expected_duration
 
-    @patch("src.services.market_analyzer.calendar")
+    @patch("src.services.trade_calendar.chinese_calendar")
     def test_window_duration_consecutive_days(self, mock_calendar, analyzer):
         """相邻交易日窗口时长应为 18 小时 15 分钟。"""
         mock_calendar.is_workday.return_value = True
@@ -241,7 +241,7 @@ class TestGetLatestTradeDate:
         """创建 MarketAnalyzer 实例。"""
         return MarketAnalyzer.__new__(MarketAnalyzer)
 
-    @patch("src.services.market_analyzer.calendar")
+    @patch("src.services.trade_calendar.chinese_calendar")
     def test_saturday_falls_back_to_friday(self, mock_calendar, analyzer):
         """周六应回退到最近的交易日（周五）。"""
         mock_calendar.is_workday.return_value = True
@@ -251,7 +251,7 @@ class TestGetLatestTradeDate:
         result = analyzer.get_latest_trade_date(target_date=saturday)
         assert result == date(2026, 4, 3)  # 周五
 
-    @patch("src.services.market_analyzer.calendar")
+    @patch("src.services.trade_calendar.chinese_calendar")
     def test_sunday_falls_back_to_friday(self, mock_calendar, analyzer):
         """周日应回退到最近的交易日（周五）。"""
         mock_calendar.is_workday.return_value = True
@@ -261,7 +261,7 @@ class TestGetLatestTradeDate:
         result = analyzer.get_latest_trade_date(target_date=sunday)
         assert result == date(2026, 4, 3)  # 周五
 
-    @patch("src.services.market_analyzer.calendar")
+    @patch("src.services.trade_calendar.chinese_calendar")
     def test_holiday_falls_back_to_previous_trade_day(self, mock_calendar, analyzer):
         """法定节假日应回退到前一个交易日。"""
         def is_workday_side_effect(d):
@@ -274,7 +274,7 @@ class TestGetLatestTradeDate:
         result = analyzer.get_latest_trade_date(target_date=new_year)
         assert result == date(2025, 12, 31)  # 周三
 
-    @patch("src.services.market_analyzer.calendar")
+    @patch("src.services.trade_calendar.chinese_calendar")
     def test_trade_day_returns_itself(self, mock_calendar, analyzer):
         """交易日应返回自身（非今天场景）。"""
         mock_calendar.is_workday.return_value = True
@@ -283,7 +283,7 @@ class TestGetLatestTradeDate:
         result = analyzer.get_latest_trade_date(target_date=wednesday)
         assert result == wednesday
 
-    @patch("src.services.market_analyzer.calendar")
+    @patch("src.services.trade_calendar.chinese_calendar")
     def test_long_holiday_falls_back_multiple_days(self, mock_calendar, analyzer):
         """长假期间应持续回退到最近交易日。"""
         def is_workday_side_effect(d):
@@ -300,7 +300,7 @@ class TestGetLatestTradeDate:
         result = analyzer.get_latest_trade_date(target_date=date(2026, 2, 20))
         assert result == date(2026, 2, 13)
 
-    @patch("src.services.market_analyzer.calendar")
+    @patch("src.services.trade_calendar.chinese_calendar")
     def test_degradation_when_no_trade_day_found(self, mock_calendar, analyzer):
         """30 天内找不到交易日时降级返回目标日期。"""
         mock_calendar.is_workday.return_value = False
@@ -311,7 +311,7 @@ class TestGetLatestTradeDate:
         assert result == target
 
     @patch("src.services.market_analyzer.date")
-    @patch("src.services.market_analyzer.calendar")
+    @patch("src.services.trade_calendar.chinese_calendar")
     def test_today_is_saturday_falls_back_to_friday(self, mock_calendar, mock_date, analyzer):
         """今天为周六时，get_latest_trade_date() 应回退到周五。"""
         mock_calendar.is_workday.return_value = True
@@ -322,7 +322,7 @@ class TestGetLatestTradeDate:
         assert result == date(2026, 4, 3)  # 周五
 
     @patch("src.services.market_analyzer.date")
-    @patch("src.services.market_analyzer.calendar")
+    @patch("src.services.trade_calendar.chinese_calendar")
     def test_today_is_sunday_falls_back_to_friday(self, mock_calendar, mock_date, analyzer):
         """今天为周日时，get_latest_trade_date() 应回退到周五。"""
         mock_calendar.is_workday.return_value = True
@@ -334,7 +334,7 @@ class TestGetLatestTradeDate:
 
     @patch("src.services.market_analyzer.datetime")
     @patch("src.services.market_analyzer.date")
-    @patch("src.services.market_analyzer.calendar")
+    @patch("src.services.trade_calendar.chinese_calendar")
     def test_trade_day_before_open_uses_previous(self, mock_calendar, mock_date, mock_datetime, analyzer):
         """交易日开盘前应使用上一个交易日。"""
         mock_calendar.is_workday.return_value = True
@@ -350,7 +350,7 @@ class TestGetLatestTradeDate:
 
     @patch("src.services.market_analyzer.datetime")
     @patch("src.services.market_analyzer.date")
-    @patch("src.services.market_analyzer.calendar")
+    @patch("src.services.trade_calendar.chinese_calendar")
     def test_trade_day_after_open_returns_today(self, mock_calendar, mock_date, mock_datetime, analyzer):
         """交易日开盘后应返回今天。"""
         mock_calendar.is_workday.return_value = True
@@ -373,7 +373,7 @@ class TestGetPreviousTradeDate:
         """创建 MarketAnalyzer 实例。"""
         return MarketAnalyzer.__new__(MarketAnalyzer)
 
-    @patch("src.services.market_analyzer.calendar")
+    @patch("src.services.trade_calendar.chinese_calendar")
     def test_monday_previous_is_friday(self, mock_calendar, analyzer):
         """周一的上一个交易日应为上周五。"""
         mock_calendar.is_workday.return_value = True
@@ -382,7 +382,7 @@ class TestGetPreviousTradeDate:
         result = analyzer.get_previous_trade_date(monday)
         assert result == date(2026, 3, 27)  # 上周五
 
-    @patch("src.services.market_analyzer.calendar")
+    @patch("src.services.trade_calendar.chinese_calendar")
     def test_consecutive_day_previous(self, mock_calendar, analyzer):
         """周四的上一个交易日应为周三。"""
         mock_calendar.is_workday.return_value = True
@@ -391,11 +391,11 @@ class TestGetPreviousTradeDate:
         result = analyzer.get_previous_trade_date(thursday)
         assert result == date(2026, 3, 25)  # 周三
 
-    @patch("src.services.market_analyzer.calendar")
+    @patch("src.services.trade_calendar.chinese_calendar")
     def test_raises_when_no_previous_found(self, mock_calendar, analyzer):
         """30 天内找不到上一个交易日时应抛出 ValueError。"""
         mock_calendar.is_workday.return_value = False
-        with pytest.raises(ValueError, match="30 天内未找到上一个交易日"):
+        with pytest.raises(ValueError, match="30 天内未找到交易日"):
             analyzer.get_previous_trade_date(date(2026, 3, 30))
 
 
@@ -407,7 +407,7 @@ class TestCalculateWatchTimeWindow:
         """创建 MarketAnalyzer 实例。"""
         return MarketAnalyzer.__new__(MarketAnalyzer)
 
-    @patch("src.services.market_analyzer.calendar")
+    @patch("src.services.trade_calendar.chinese_calendar")
     def test_watch_window_regular_trading_day(self, mock_calendar, analyzer):
         """看盘窗口应为 trade_date 09:00 ~ trade_date 15:00。"""
         mock_calendar.is_workday.return_value = True
@@ -418,7 +418,7 @@ class TestCalculateWatchTimeWindow:
         assert start == datetime(2026, 3, 25, 9, 0)
         assert end == datetime(2026, 3, 25, 15, 0)
 
-    @patch("src.services.market_analyzer.calendar")
+    @patch("src.services.trade_calendar.chinese_calendar")
     def test_watch_window_friday(self, mock_calendar, analyzer):
         """周五看盘窗口应仅为周五 09:00 ~ 15:00，不跨越周末。"""
         mock_calendar.is_workday.return_value = True
@@ -429,7 +429,7 @@ class TestCalculateWatchTimeWindow:
         assert start == datetime(2026, 3, 27, 9, 0)
         assert end == datetime(2026, 3, 27, 15, 0)
 
-    @patch("src.services.market_analyzer.calendar")
+    @patch("src.services.trade_calendar.chinese_calendar")
     def test_watch_window_duration(self, mock_calendar, analyzer):
         """看盘窗口时长应为 6 小时。"""
         mock_calendar.is_workday.return_value = True
@@ -449,7 +449,7 @@ class TestCalculateTelegraphTimeWindow:
         """创建 MarketAnalyzer 实例。"""
         return MarketAnalyzer.__new__(MarketAnalyzer)
 
-    @patch("src.services.market_analyzer.calendar")
+    @patch("src.services.trade_calendar.chinese_calendar")
     def test_telegraph_window_regular_trading_day(self, mock_calendar, analyzer):
         """电报窗口应为 trade_date 09:00 ~ next_trade_date 09:15。"""
         mock_calendar.is_workday.return_value = True
@@ -460,7 +460,7 @@ class TestCalculateTelegraphTimeWindow:
         assert start == datetime(2026, 3, 25, 9, 0)
         assert end == datetime(2026, 3, 26, 9, 15)
 
-    @patch("src.services.market_analyzer.calendar")
+    @patch("src.services.trade_calendar.chinese_calendar")
     def test_telegraph_window_friday_to_monday(self, mock_calendar, analyzer):
         """周五电报窗口应从周五 09:00 到周一 09:15（跨越周末）。"""
         mock_calendar.is_workday.return_value = True
@@ -471,7 +471,7 @@ class TestCalculateTelegraphTimeWindow:
         assert start == datetime(2026, 3, 27, 9, 0)
         assert end == datetime(2026, 3, 30, 9, 15)
 
-    @patch("src.services.market_analyzer.calendar")
+    @patch("src.services.trade_calendar.chinese_calendar")
     def test_telegraph_window_crosses_holiday(self, mock_calendar, analyzer):
         """电报窗口应跨越节假日。"""
         def is_workday_side_effect(d):
@@ -496,7 +496,7 @@ class TestCalculateArticleTimeWindowRefined:
         """创建 MarketAnalyzer 实例。"""
         return MarketAnalyzer.__new__(MarketAnalyzer)
 
-    @patch("src.services.market_analyzer.calendar")
+    @patch("src.services.trade_calendar.chinese_calendar")
     def test_article_window_regular_trading_day(self, mock_calendar, analyzer):
         """文章窗口应为 trade_date 15:00 ~ next_trade_date 09:15。"""
         mock_calendar.is_workday.return_value = True
@@ -507,7 +507,7 @@ class TestCalculateArticleTimeWindowRefined:
         assert start == datetime(2026, 3, 25, 15, 0)
         assert end == datetime(2026, 3, 26, 9, 15)
 
-    @patch("src.services.market_analyzer.calendar")
+    @patch("src.services.trade_calendar.chinese_calendar")
     def test_article_window_friday_to_monday(self, mock_calendar, analyzer):
         """周五文章窗口应为周五 15:00 ~ 周一 09:15。"""
         mock_calendar.is_workday.return_value = True

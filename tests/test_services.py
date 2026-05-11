@@ -891,7 +891,7 @@ class TestRateLimitCircuitBreaker:
         fetcher_service._fetch_incremental_or_init_summary = AsyncMock(side_effect=mock_fetch_summary)
 
         feeds_list = [feed_1, feed_2, feed_3]
-        with patch.object(fetcher_service, "_ensure_today_batch", new_callable=AsyncMock), \
+        with patch.object(fetcher_service, "_ensure_batch", new_callable=AsyncMock), \
              patch.object(fetcher_service, "_get_pending_feeds", new_callable=AsyncMock, return_value=feeds_list):
             results = await fetcher_service.fetch_all()
 
@@ -982,7 +982,7 @@ class TestRateLimitCircuitBreaker:
         fetcher_service._fetch_incremental_or_init_summary = AsyncMock(side_effect=mock_fetch_summary)
 
         feeds_list = [feed_1, feed_2, feed_3]
-        with patch.object(fetcher_service, "_ensure_today_batch", new_callable=AsyncMock), \
+        with patch.object(fetcher_service, "_ensure_batch", new_callable=AsyncMock), \
              patch.object(fetcher_service, "_get_pending_feeds", new_callable=AsyncMock, return_value=feeds_list):
             results = await fetcher_service.fetch_all()
 
@@ -1070,7 +1070,7 @@ class TestAuthExpiredCircuitBreaker:
         fetcher_service._fetch_incremental_or_init_summary = AsyncMock(side_effect=mock_fetch_summary)
 
         feeds_list = [feed_1, feed_2, feed_3]
-        with patch.object(fetcher_service, "_ensure_today_batch", new_callable=AsyncMock), \
+        with patch.object(fetcher_service, "_ensure_batch", new_callable=AsyncMock), \
              patch.object(fetcher_service, "_get_pending_feeds", new_callable=AsyncMock, return_value=feeds_list):
             results = await fetcher_service.fetch_all()
 

@@ -90,7 +90,7 @@ class TestFetchBackfillDeduplication:
         # 追踪 backfill_publish_time 调用次数
         fetcher_service.backfill_publish_time = AsyncMock(return_value=0)
 
-        with patch.object(fetcher_service, "_ensure_today_batch", new_callable=AsyncMock), \
+        with patch.object(fetcher_service, "_ensure_batch", new_callable=AsyncMock), \
              patch.object(fetcher_service, "_get_pending_feeds", new_callable=AsyncMock, return_value=feeds), \
              patch.object(fetcher_service, "_mark_batch_done", new_callable=AsyncMock):
             results = await fetcher_service.fetch_all(days=5)

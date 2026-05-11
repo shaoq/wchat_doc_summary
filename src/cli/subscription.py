@@ -11,6 +11,7 @@ from src.models.schema import Feed
 from src.services.auth import AuthService
 from src.services.fetcher import DEFAULT_LATEST_COUNT, FetchFinalState, FetchProgressEvent, FetchSummary, FetcherService
 from src.services.subscription import SubscriptionService
+from src.services.trade_calendar import get_effective_fetch_trade_date
 from src.storage.database import get_db
 
 
@@ -335,7 +336,8 @@ def fetch(fetch_all: bool, days: int | None, full: bool, force: bool, mp_id: str
                 return
 
             if not results:
-                console.print("[green]今日所有订阅已同步完成[/green]")
+                effective_date = get_effective_fetch_trade_date()
+                console.print(f"[green]交易日 {effective_date} 的订阅已同步完成[/green]")
             else:
                 for feed_mp_id, summary in results.items():
                     _print_fetch_summary(feed_mp_id, summary)

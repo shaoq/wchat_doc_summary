@@ -58,7 +58,7 @@ class TestFetchAllIncrementalDefault:
         fetcher_service._fetch_incremental_or_init_summary = AsyncMock(return_value=summary)
 
         with patch("src.services.fetcher.asyncio.sleep", new=AsyncMock()), \
-             patch.object(fetcher_service, "_ensure_today_batch", new_callable=AsyncMock), \
+             patch.object(fetcher_service, "_ensure_batch", new_callable=AsyncMock), \
              patch.object(fetcher_service, "_get_pending_feeds", new_callable=AsyncMock, return_value=[feed_1]), \
              patch.object(fetcher_service, "_mark_batch_done", new_callable=AsyncMock):
             results = await fetcher_service.fetch_all()
@@ -81,7 +81,7 @@ class TestFetchAllIncrementalDefault:
         fetcher_service._fetch_feed_summary = AsyncMock(return_value=summary)
 
         with patch("src.services.fetcher.asyncio.sleep", new=AsyncMock()), \
-             patch.object(fetcher_service, "_ensure_today_batch", new_callable=AsyncMock), \
+             patch.object(fetcher_service, "_ensure_batch", new_callable=AsyncMock), \
              patch.object(fetcher_service, "_get_pending_feeds", new_callable=AsyncMock, return_value=[feed_1]), \
              patch.object(fetcher_service, "_mark_batch_done", new_callable=AsyncMock):
             results = await fetcher_service.fetch_all(days=5)
@@ -111,7 +111,7 @@ class TestFetchAllIncrementalDefault:
         fetcher_service._fetch_feed_summary = AsyncMock(return_value=summary)
 
         with patch("src.services.fetcher.asyncio.sleep", new=AsyncMock()), \
-             patch.object(fetcher_service, "_ensure_today_batch", new_callable=AsyncMock), \
+             patch.object(fetcher_service, "_ensure_batch", new_callable=AsyncMock), \
              patch.object(fetcher_service, "_get_pending_feeds", new_callable=AsyncMock, return_value=[feed]), \
              patch.object(fetcher_service, "_mark_batch_done", new_callable=AsyncMock):
             results = await fetcher_service.fetch_all()
@@ -145,7 +145,7 @@ class TestFetchAllIncrementalDefault:
             sleep_calls.append(seconds)
 
         with patch("src.services.fetcher.asyncio.sleep", side_effect=mock_sleep), \
-             patch.object(fetcher_service, "_ensure_today_batch", new_callable=AsyncMock), \
+             patch.object(fetcher_service, "_ensure_batch", new_callable=AsyncMock), \
              patch.object(fetcher_service, "_get_pending_feeds", new_callable=AsyncMock, return_value=feeds), \
              patch.object(fetcher_service, "_mark_batch_done", new_callable=AsyncMock):
             await fetcher_service.fetch_all()
@@ -189,7 +189,7 @@ class TestFetchAllIncrementalDefault:
             sleep_calls.append(seconds)
 
         with patch("src.services.fetcher.asyncio.sleep", side_effect=mock_sleep), \
-             patch.object(fetcher_service, "_ensure_today_batch", new_callable=AsyncMock), \
+             patch.object(fetcher_service, "_ensure_batch", new_callable=AsyncMock), \
              patch.object(fetcher_service, "_get_pending_feeds", new_callable=AsyncMock, return_value=feeds), \
              patch.object(fetcher_service, "_mark_batch_done", new_callable=AsyncMock):
             await fetcher_service.fetch_all()

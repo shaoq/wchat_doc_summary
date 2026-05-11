@@ -16,6 +16,7 @@ from src.api.providers import ArticleListProvider, create_article_list_provider
 from src.api.weread import AuthExpiredError, RateLimitError, WeReadAPIError, WeReadClient
 from src.models.schema import Article, Feed, FetchBatch
 from src.services.subscription import SubscriptionService
+from src.services.trade_calendar import get_effective_fetch_trade_date
 from src.storage.database import Database
 from src.utils.rate_limiter import RateLimiter
 
@@ -241,13 +242,11 @@ class FetcherService:
 
     # ── Batch 进度管理 ──────────────────────────────────────────
 
-    async def _ensure_today_batch(self) -> None:
-        """确保今日的 batch 记录存在，补充新增订阅，清理旧数据。"""
-        today = date.today()
-
+    async def _ensure_batch(self, effective_date: date) -> None:
+        """确保有效交易日的 batch 记录存在，补充新增订阅，清理旧数据。"""
         async with self.db.get_session() as session:
-            # 1. 清理 7 天前的旧 batch 记录
-            cutoff = today - timedelta(days=7)
+            # 1. 清理有效交易日 7 天前的旧 batch 记录
+            cutoff = effective_date - timedelta(days=7)
             await session.execute(
                 delete(FetchBatch).where(FetchBatch.batch_date < cutoff),
             )
@@ -256,9 +255,9 @@ class FetcherService:
             active_feeds = await self.subscription_service.list_subscriptions(active_only=True)
             active_mp_ids = {f.mp_id for f in active_feeds if f.mp_id}
 
-            # 3. 获取今日已有的 batch mp_id 集合
+            # 3. 获取有效交易日已有的 batch mp_id 集合
             result = await session.execute(
-                select(FetchBatch.mp_id).where(FetchBatch.batch_date == today),
+                select(FetchBatch.mp_id).where(FetchBatch.batch_date == effective_date),
             )
             batched_mp_ids = set(result.scalars().all())
 
@@ -266,26 +265,24 @@ class FetcherService:
             new_mp_ids = active_mp_ids - batched_mp_ids
             if new_mp_ids:
                 for mp_id in new_mp_ids:
-                    session.add(FetchBatch(mp_id=mp_id, batch_date=today, status="pending"))
-                logger.info(f"Batch 补充 {len(new_mp_ids)} 个新订阅: {today}")
+                    session.add(FetchBatch(mp_id=mp_id, batch_date=effective_date, status="pending"))
+                logger.info(f"Batch 补充 {len(new_mp_ids)} 个新订阅: {effective_date}")
 
-            # 5. 首次创建（今天完全没有记录）
+            # 5. 首次创建（有效交易日完全没有记录）
             if not batched_mp_ids and not new_mp_ids and active_mp_ids:
                 for mp_id in active_mp_ids:
-                    session.add(FetchBatch(mp_id=mp_id, batch_date=today, status="pending"))
-                logger.info(f"创建新 batch: {len(active_mp_ids)} 个订阅, date={today}")
+                    session.add(FetchBatch(mp_id=mp_id, batch_date=effective_date, status="pending"))
+                logger.info(f"创建新 batch: {len(active_mp_ids)} 个订阅, date={effective_date}")
 
-    async def _get_pending_feeds(self) -> list[Feed]:
-        """获取今日状态为 pending 的订阅列表，按权重排序。"""
-        today = date.today()
-
+    async def _get_pending_feeds(self, effective_date: date) -> list[Feed]:
+        """获取有效交易日状态为 pending 的订阅列表，按权重排序。"""
         async with self.db.get_session() as session:
             result = await session.execute(
                 select(Feed)
                 .join(FetchBatch, Feed.mp_id == FetchBatch.mp_id)
                 .where(
                     Feed.status == 1,
-                    FetchBatch.batch_date == today,
+                    FetchBatch.batch_date == effective_date,
                     FetchBatch.status == "pending",
                 )
                 .order_by(
@@ -301,24 +298,22 @@ class FetcherService:
             logger.info(f"Batch pending 队列: {len(feeds)} 个订阅")
             return feeds
 
-    async def _mark_batch_done(self, mp_id: str) -> None:
-        """将指定 mp_id 的今日 batch 记录标记为 done。"""
-        today = date.today()
+    async def _mark_batch_done(self, mp_id: str, effective_date: date) -> None:
+        """将指定 mp_id 的有效交易日 batch 记录标记为 done。"""
         async with self.db.get_session() as session:
             await session.execute(
                 update(FetchBatch)
-                .where(FetchBatch.mp_id == mp_id, FetchBatch.batch_date == today)
+                .where(FetchBatch.mp_id == mp_id, FetchBatch.batch_date == effective_date)
                 .values(status="done"),
             )
 
-    async def _reset_today_batch(self) -> None:
-        """删除今日所有 batch 记录（供 --force 使用）。"""
-        today = date.today()
+    async def _reset_batch(self, effective_date: date) -> None:
+        """删除有效交易日所有 batch 记录（供 --force 使用）。"""
         async with self.db.get_session() as session:
             await session.execute(
-                delete(FetchBatch).where(FetchBatch.batch_date == today),
+                delete(FetchBatch).where(FetchBatch.batch_date == effective_date),
             )
-        logger.info(f"已清除今日 batch: {today}")
+        logger.info(f"已清除交易日 batch: {effective_date}")
 
     async def _get_feed_or_raise(self, mp_id: str):
         """获取订阅对象，不存在则抛错。"""
@@ -856,10 +851,10 @@ class FetcherService:
     ) -> dict[str, FetchSummary]:
         """抓取所有已订阅公众号的文章。
 
-        使用 fetch_batches 表实现断点续传：
-        - 同日内重跑自动跳过已完成的订阅
-        - 每日自动重置，新的一天全新开始
-        - force=True 时清除今日 batch，强制全新开始
+        使用 fetch_batches 表实现断点续传，按有效 A 股交易日追踪进度：
+        - 同一有效交易日内重跑自动跳过已完成的订阅
+        - 有效交易日跨越 09:15 边界自动切换
+        - force=True 时清除有效交易日 batch，强制全新开始
 
         Args:
             days: 抓取最近 N 天的文章，None 表示不限制
@@ -875,16 +870,18 @@ class FetcherService:
         else:
             logger.info(f"开始抓取所有订阅 (最近 {days if days else '全部'} 天)")
 
-        # Batch 管理
-        if force:
-            await self._reset_today_batch()
+        # Batch 管理：一次计算有效交易日，贯穿整个 fetch_all 调用
+        effective_date = get_effective_fetch_trade_date()
 
-        await self._ensure_today_batch()
-        feeds = await self._get_pending_feeds()
+        if force:
+            await self._reset_batch(effective_date)
+
+        await self._ensure_batch(effective_date)
+        feeds = await self._get_pending_feeds(effective_date)
 
         # 全部已完成
         if not feeds:
-            logger.info("今日所有订阅已同步完成")
+            logger.info(f"交易日 {effective_date} 的订阅已同步完成")
             return {}
 
         total_feeds = len(feeds)
@@ -910,7 +907,7 @@ class FetcherService:
                         feed.mp_id, on_progress=on_progress,
                     )
                 results[feed.mp_id] = summary
-                await self._mark_batch_done(feed.mp_id)
+                await self._mark_batch_done(feed.mp_id, effective_date)
                 backoff_delay = self._subscription_delay
 
                 self._emit(on_progress, FetchProgressEvent.subscription_done(
@@ -930,7 +927,7 @@ class FetcherService:
                     mp_id=feed.mp_id, final_state=FetchFinalState.ERROR,
                 )
                 # 非致命错误标记 done，继续下一个
-                await self._mark_batch_done(feed.mp_id)
+                await self._mark_batch_done(feed.mp_id, effective_date)
                 backoff_delay = min(backoff_delay * BATCH_BACKOFF_FACTOR, 60.0)
 
             # 订阅间等待 + 抖动（最后一个订阅不等）
