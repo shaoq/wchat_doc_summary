@@ -556,7 +556,9 @@ class AIProcessor:
         error_str = str(error)
         return "'1301'" in error_str or "敏感内容" in error_str or "不安全" in error_str
 
-    async def _call_api(self, prompt: str, max_tokens: int = 500) -> str:
+    async def _call_api(
+        self, prompt: str, max_tokens: int = 500, *, stage: str = ""
+    ) -> str:
         """调用 LLM API。
 
         当遇到内容安全审查错误 (1301) 时，自动对 prompt 做去敏感化处理后重试。
@@ -564,6 +566,8 @@ class AIProcessor:
         Args:
             prompt: 提示词
             max_tokens: 最大 token 数
+            stage: 调用阶段标识（如 "initial-summary"、"strategy-enhancement"），
+                   用于日志中区分失败来源
 
         Returns:
             LLM 响应文本
@@ -573,6 +577,7 @@ class AIProcessor:
 
             current_prompt = prompt
             sanitized = False
+            stage_label = f" [{stage}]" if stage else ""
 
             for attempt in range(self.settings.max_retries + 1):
                 try:
@@ -590,21 +595,35 @@ class AIProcessor:
 
                     if is_safety and not sanitized:
                         # 首次遇到安全错误：去敏感化后重试
-                        logger.warning("触发内容安全审查，自动去敏感化后重试")
+                        logger.warning(
+                            "触发内容安全审查，自动去敏感化后重试%s", stage_label
+                        )
                         current_prompt = self._sanitize_prompt(prompt)
                         sanitized = True
                         await asyncio.sleep(1)
                         continue
 
+                    if is_safety and sanitized:
+                        # 已经去敏后仍触发安全审查：不再重复去敏
+                        logger.error(
+                            "内容安全审查在去敏后仍然失败%s，保留原始错误",
+                            stage_label,
+                        )
+                        raise
+
                     if attempt < self.settings.max_retries:
                         wait_time = 2 ** attempt
                         logger.warning(
-                            f"API 调用失败 (尝试 {attempt + 1}/{self.settings.max_retries + 1})，"
-                            f"{wait_time}秒后重试: {e}"
+                            "API 调用失败%s (尝试 %d/%d)，%d秒后重试: %s",
+                            stage_label,
+                            attempt + 1,
+                            self.settings.max_retries + 1,
+                            wait_time,
+                            e,
                         )
                         await asyncio.sleep(wait_time)
                     else:
-                        logger.error(f"API 调用最终失败: {e}")
+                        logger.error("API 调用最终失败%s: %s", stage_label, e)
                         raise
 
         raise RuntimeError("不应该到达这里")
@@ -721,11 +740,13 @@ class AIProcessor:
         )
 
         # 调用 API
-        logger.info(f"开始生成市场总结: {trade_date}")
-        summary = await self._call_api(prompt, max_tokens=MARKET_SUMMARY_MAX_TOKENS)
+        logger.info("开始生成市场总结: %s", trade_date)
+        summary = await self._call_api(
+            prompt, max_tokens=MARKET_SUMMARY_MAX_TOKENS, stage="initial-summary"
+        )
 
         if self._strategy_section_needs_enhancement(summary):
-            logger.info("检测到“后续策略建议与风险提示”内容偏弱，开始二次增强")
+            logger.info("检测到后续策略建议与风险提示内容偏弱，开始二次增强")
             strategy_prompt = self._build_strategy_enhancement_prompt(
                 trade_date=trade_date,
                 summary=summary,
@@ -741,13 +762,24 @@ class AIProcessor:
                 global_market_context=global_market_context,
                 data_gaps=data_gaps,
             )
-            enhanced_strategy = await self._call_api(
-                strategy_prompt,
-                max_tokens=MARKET_STRATEGY_ENHANCEMENT_MAX_TOKENS,
-            )
-            summary = self._merge_strategy_section(summary, enhanced_strategy)
+            try:
+                enhanced_strategy = await self._call_api(
+                    strategy_prompt,
+                    max_tokens=MARKET_STRATEGY_ENHANCEMENT_MAX_TOKENS,
+                    stage="strategy-enhancement",
+                )
+                summary = self._merge_strategy_section(summary, enhanced_strategy)
+            except Exception as e:
+                if self._is_content_safety_error(e):
+                    logger.warning(
+                        "策略增强因内容安全审查失败，保留首轮总结 [strategy-enhancement]"
+                    )
+                else:
+                    logger.warning(
+                        "策略增强调用失败，保留首轮总结 [strategy-enhancement]: %s", e
+                    )
 
-        logger.info(f"市场总结生成完成")
+        logger.info("市场总结生成完成")
 
         return summary
 
@@ -767,8 +799,12 @@ class AIProcessor:
         global_market_context: dict | None,
         data_gaps: str,
     ) -> str:
-        """构建第六节后续策略增强 prompt。"""
-        summary_without_strategy = self._remove_strategy_section(summary).strip()
+        """构建第六节后续策略增强 prompt。
+
+        使用结构化策略证据和简洁前五节摘要代替完整 prose，
+        同时过滤电报/文章标题中的敏感内容。
+        """
+        prior_context = self._build_prior_context_digest(summary)
         strategy_digest = self._build_strategy_evidence_digest(
             indices_summary=indices_summary,
             volume=volume,
@@ -785,8 +821,8 @@ class AIProcessor:
 
         return f"""你正在补写并强化一份 A 股市场总结的最后一节。交易日期：{trade_date}
 
-现有总结前五节如下，请保持其判断口径一致，不要重复前五节内容：
-{summary_without_strategy}
+前五节核心结论摘要（请保持判断口径一致）：
+{prior_context}
 
 以下是只允许使用的策略辅助证据，请围绕这些信号展开，不要脱离证据泛化发挥：
 {strategy_digest}
@@ -806,14 +842,66 @@ class AIProcessor:
      - **依据**: [明确引用指数/成交额/板块/涨停/电报/看盘/文章中的具体证据]
      - **应对**: [次日触发条件、确认信号、节奏或仓位表达]
      - **风险**: [风险点、失效条件、何时放弃]
-5. 不得出现“继续关注”“值得留意”“主线清晰”等无证据支撑的空话。
-6. 必须明确策略态度是“看多 / 观察 / 回避”中的哪一种，不能模糊。
-7. 若某类证据不足，必须写成“观察 / 等待验证 / 暂不下判断”，不能强行给出进攻性结论。
+5. 不得出现"继续关注""值得留意""主线清晰"等无证据支撑的空话。
+6. 必须明确策略态度是"看多 / 观察 / 回避"中的哪一种，不能模糊。
+7. 若某类证据不足，必须写成"观察 / 等待验证 / 暂不下判断"，不能强行给出进攻性结论。
 8. 主线与板块策略要回答持续性、分歧回流预期、跟风与主线的区分。
 9. 个股与情绪策略要回答高标带动性、涨停溢价、炸板反馈、接力还是等待。
 10. 关键消息与事件策略要回答隔夜发酵可能、日内刺激还是中期催化，以及确认信号。
 
 现在只输出完整的第六节正文："""
+
+    def _build_prior_context_digest(self, summary: str) -> str:
+        """从前五节总结中提取各节核心结论的简洁摘要。
+
+        代替将完整 prose 传入策略增强 prompt，仅保留各节的关键结论要点。
+
+        Args:
+            summary: 完整的 market summary 文本
+
+        Returns:
+            各节核心结论的简洁摘要文本
+        """
+        summary_without_strategy = self._remove_strategy_section(summary).strip()
+        if not summary_without_strategy:
+            return "无前五节内容"
+
+        section_headers = [
+            ("一、市场概览", "市场概览"),
+            ("二、主线与轮动", "主线与轮动"),
+            ("三、个股与情绪", "个股与情绪"),
+            ("四、关键信息催化", "关键信息催化"),
+            ("五、明日观察清单", "明日观察清单"),
+        ]
+
+        lines: list[str] = []
+        for marker, label in section_headers:
+            # 提取该节的第一行非空内容作为核心结论
+            section_text = self._extract_section_text(
+                summary_without_strategy, marker
+            )
+            if section_text:
+                # 取前 120 字符作为简洁摘要
+                core = section_text.strip().replace("\n", " ")[:120]
+                lines.append(f"- {label}: {core}")
+            else:
+                lines.append(f"- {label}: 无")
+
+        return "\n".join(lines)
+
+    def _extract_section_text(self, text: str, section_marker: str) -> str:
+        """从文本中提取指定章节的内容。
+
+        Args:
+            text: 完整文本
+            section_marker: 章节标记（如 "一、市场概览"）
+
+        Returns:
+            该章节的文本内容
+        """
+        pattern = rf"(?ms)^##\s*{re.escape(section_marker)}\s*\n(.*?)(?=^##\s|\Z)"
+        match = re.search(pattern, text)
+        return match.group(1).strip() if match else ""
 
     def _build_strategy_evidence_digest(
         self,
@@ -874,22 +962,22 @@ class AIProcessor:
             lines.append("- 盘中高频个股: 无明显重复提及个股")
 
         if telegraphs:
-            telegraph_titles = "；".join(
-                t.get("title", "").strip()
-                for t in telegraphs[:6]
-                if t.get("title", "").strip()
+            safe_titles = self._filter_safe_titles(
+                [t.get("title", "").strip() for t in telegraphs[:6]]
             )
-            if telegraph_titles:
-                lines.append(f"- 财联社电报关键标题: {telegraph_titles}")
+            if safe_titles:
+                lines.append(f"- 财联社电报关键标题: {'；'.join(safe_titles)}")
+            else:
+                lines.append("- 财联社电报关键标题: 事件标题证据不可用，仅使用结构化信号")
 
         if articles:
-            article_titles = "；".join(
-                a.get("title", "").strip()
-                for a in articles[:5]
-                if a.get("title", "").strip()
+            safe_article_titles = self._filter_safe_titles(
+                [a.get("title", "").strip() for a in articles[:5]]
             )
-            if article_titles:
-                lines.append(f"- 文章观点标题: {article_titles}")
+            if safe_article_titles:
+                lines.append(f"- 文章观点标题: {'；'.join(safe_article_titles)}")
+            else:
+                lines.append("- 文章观点标题: 文章标题证据不可用，仅使用结构化信号")
 
         lines.append(f"- 数据缺口与降级约束: {data_gaps}")
         return "\n".join(lines)
@@ -941,6 +1029,26 @@ class AIProcessor:
                 "## 六、后续策略建议与风险提示\n" + normalized.lstrip("#").strip()
             )
         return normalized.strip()
+
+    def _filter_safe_titles(self, titles: list[str]) -> list[str]:
+        """过滤掉命中敏感词的标题，返回安全标题列表。
+
+        Args:
+            titles: 原始标题列表
+
+        Returns:
+            过滤后的安全标题列表
+        """
+        safe: list[str] = []
+        for title in titles:
+            if not title:
+                continue
+            is_sensitive = any(
+                pattern.search(title) for pattern, _ in self._sensitive_patterns
+            )
+            if not is_sensitive:
+                safe.append(title)
+        return safe
 
     def _merge_strategy_section(self, summary: str, strategy_section: str) -> str:
         """将增强后的第六节合并回完整总结。"""

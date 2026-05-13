@@ -258,7 +258,7 @@ class TestGenerateMarketSummaryPromptStructure:
         captured_prompt = ""
         call_count = 0
 
-        async def capture_prompt(prompt: str, max_tokens: int = 1500) -> str:
+        async def capture_prompt(prompt: str, max_tokens: int = 1500, **kwargs) -> str:
             nonlocal captured_prompt, call_count
             call_count += 1
             if call_count == 1:
@@ -297,7 +297,7 @@ class TestGenerateMarketSummaryPromptStructure:
         captured_max_tokens = 0
         call_count = 0
 
-        async def capture_prompt(prompt: str, max_tokens: int = 1500) -> str:
+        async def capture_prompt(prompt: str, max_tokens: int = 1500, **kwargs) -> str:
             nonlocal captured_prompt, captured_max_tokens, call_count
             call_count += 1
             if call_count == 1:
@@ -335,7 +335,7 @@ class TestGenerateMarketSummaryPromptStructure:
         captured_prompt = ""
         call_count = 0
 
-        async def capture_prompt(prompt: str, max_tokens: int = 1500) -> str:
+        async def capture_prompt(prompt: str, max_tokens: int = 1500, **kwargs) -> str:
             nonlocal captured_prompt, call_count
             call_count += 1
             if call_count == 1:
@@ -361,7 +361,7 @@ class TestGenerateMarketSummaryPromptStructure:
         captured_prompt = ""
         call_count = 0
 
-        async def capture_prompt(prompt: str, max_tokens: int = 1500) -> str:
+        async def capture_prompt(prompt: str, max_tokens: int = 1500, **kwargs) -> str:
             nonlocal captured_prompt, call_count
             call_count += 1
             if call_count == 1:
@@ -389,7 +389,7 @@ class TestGenerateMarketSummaryPromptStructure:
         captured_prompt = ""
         call_count = 0
 
-        async def capture_prompt(prompt: str, max_tokens: int = 1500) -> str:
+        async def capture_prompt(prompt: str, max_tokens: int = 1500, **kwargs) -> str:
             nonlocal captured_prompt, call_count
             call_count += 1
             if call_count == 1:
@@ -430,7 +430,7 @@ class TestDataSparseDowngrade:
         captured_prompt = ""
         call_count = 0
 
-        async def capture_prompt(prompt: str, max_tokens: int = 1500) -> str:
+        async def capture_prompt(prompt: str, max_tokens: int = 1500, **kwargs) -> str:
             nonlocal captured_prompt, call_count
             call_count += 1
             if call_count == 1:
@@ -517,7 +517,7 @@ class TestStrategyEnhancement:
   - **应对**: 若次日早盘消息进一步扩散到板块和个股共振，可提升跟踪优先级。
   - **风险**: 若消息无新增增量、相关板块冲高回落，则按日内刺激处理。"""
 
-        async def call_api(prompt: str, max_tokens: int = 1500) -> str:
+        async def call_api(prompt: str, max_tokens: int = 1500, **kwargs) -> str:
             prompts.append((prompt, max_tokens))
             return initial_summary if len(prompts) == 1 else enhanced_strategy
 
@@ -584,7 +584,7 @@ class TestStrategyEnhancement:
   - **应对**: 若次日早盘继续有增量消息，可提升优先级。
   - **风险**: 若无新增增量，则仅按日内刺激处理。"""
 
-        async def call_api(prompt: str, max_tokens: int = 1500) -> str:
+        async def call_api(prompt: str, max_tokens: int = 1500, **kwargs) -> str:
             prompts.append((prompt, max_tokens))
             return complete_summary
 
