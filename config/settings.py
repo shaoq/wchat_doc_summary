@@ -69,6 +69,10 @@ class Settings(BaseSettings):
         default="skip",
         description="未知公众号处理策略: skip(跳过文章)/create_placeholder(创建占位订阅)",
     )
+    rss_identity_resolver_provider: Literal["weread", "wechat2rss"] = Field(
+        default="weread",
+        description="RSS 归属解析使用的身份提供者（用于从文章 URL 解析公众号身份，不能是 rss）",
+    )
 
     # 数据库配置
     database_url: str = Field(

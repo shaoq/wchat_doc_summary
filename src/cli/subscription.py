@@ -91,7 +91,7 @@ def subscribe(url: str) -> None:
             return
 
         # 添加订阅
-        feed = await subscription_service.add_subscription(
+        feed, _ = await subscription_service.add_subscription(
             mp_id=mp_id,
             name=name,
             intro=intro,
@@ -267,9 +267,9 @@ def info(mp_id: str) -> None:
 def fetch(fetch_all: bool, days: int | None, full: bool, force: bool, mp_id: str | None) -> None:
     """拉取文章。
 
-    MP_ID: 公众号 ID（可选，不指定时需使用 --all）
+    MP_ID: 公众号 ID（可选）
 
-    默认抓取最新 10 条文章。
+    有 RSS 源时默认从 RSS 源抓取；无 RSS 源时需指定公众号或使用 --all。
     """
     # full 参数优先级高于 days
     if full:
@@ -281,8 +281,59 @@ def fetch(fetch_all: bool, days: int | None, full: bool, force: bool, mp_id: str
         auth_service = AuthService(client, db)
         subscription_service = SubscriptionService(db)
         fetcher_service = FetcherService(client, db, subscription_service)
+        rss_service = RSSSourceService(db)
         provider_name = get_settings().article_list_provider
 
+        # 检查是否有活跃 RSS 源
+        active_sources = await rss_service.list_sources(active_only=True)
+        has_rss_sources = len(active_sources) > 0
+
+        # ── RSS 模式：mp_id 被拒绝 ──
+        if mp_id and has_rss_sources:
+            console.print("[yellow]RSS 模式下不支持按公众号抓取。[/yellow]")
+            console.print("[dim]请使用 wchat fetch 进行统一 RSS 抓取[/dim]")
+            return
+
+        # ── RSS 模式：wchat fetch 或 wchat fetch --all ──
+        if has_rss_sources and not mp_id:
+            # RSS 归属服务可能使用 weread 解析公众号身份，需要加载 token
+            if _provider_requires_weread_auth(get_settings().rss_identity_resolver_provider):
+                token = await auth_service.get_current_token()
+                if not token:
+                    console.print("[red]请先登录: wchat login[/red]")
+                    return
+
+            console.print(f"[cyan]RSS 模式: 从 {len(active_sources)} 个活跃源抓取[/cyan]")
+
+            def on_rss_progress(event: FetchProgressEvent) -> None:
+                if event.type == "subscription_start":
+                    console.print(f"\n[bold cyan]{event.detail}[/bold cyan] {event.feed_name}")
+                elif event.type == "page_fetch":
+                    console.print(f"  [dim]├─ {event.detail}[/dim]")
+                elif event.type == "article_fetch":
+                    console.print(f"  [dim]├─ {event.detail}[/dim]")
+                elif event.type == "article_skip":
+                    console.print(f"  [dim]├─ {event.detail}[/dim]")
+                elif event.type == "waiting":
+                    console.print(f"  {event.detail}")
+                elif event.type == "rate_limited":
+                    console.print(f"  [yellow]{event.detail}[/yellow]")
+                elif event.type == "subscription_done":
+                    console.print(f"  [green]└─ {event.detail}[/green]")
+
+            results = await fetcher_service.fetch_from_rss_sources(
+                on_progress=on_rss_progress,
+            )
+
+            if not results:
+                console.print("[dim]无抓取结果[/dim]")
+            else:
+                for source_name, summary in results.items():
+                    _print_fetch_summary(source_name, summary)
+
+            return
+
+        # ── 传统模式（无 RSS 源）──
         requires_auth = False
         if fetch_all:
             feeds = await subscription_service.list_subscriptions(active_only=True)
@@ -301,8 +352,6 @@ def fetch(fetch_all: bool, days: int | None, full: bool, force: bool, mp_id: str
                     provider_name,
                 )
             )
-        else:
-            requires_auth = _provider_requires_weread_auth(provider_name)
 
         if requires_auth:
             token = await auth_service.get_current_token()
@@ -399,8 +448,9 @@ def fetch(fetch_all: bool, days: int | None, full: bool, force: bool, mp_id: str
         else:
             console.print("[red]请指定公众号 ID 或使用 --all 参数[/red]")
             console.print("用法:")
-            console.print("  wchat fetch MP_WXS_xxx    # 抓取指定公众号")
+            console.print("  wchat fetch               # RSS 模式下从 RSS 源抓取")
             console.print("  wchat fetch --all         # 抓取所有订阅")
+            console.print("  wchat fetch MP_WXS_xxx    # 抓取指定公众号")
 
     run_async(_fetch())
 

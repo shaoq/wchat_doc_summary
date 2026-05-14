@@ -34,7 +34,7 @@ class SubscriptionService:
         provider: str | None = None,
         provider_feed_id: str | None = None,
         provider_meta: str | None = None,
-    ) -> Feed:
+    ) -> tuple[Feed, bool]:
         """添加订阅。
 
         如果订阅已存在（通过名称判断），则激活该订阅。
@@ -49,7 +49,7 @@ class SubscriptionService:
             provider_meta: Provider 元数据
 
         Returns:
-            创建或更新的 Feed 对象
+            (Feed, is_newly_created) 元组
 
         Raises:
             ValueError: 参数无效
@@ -76,7 +76,7 @@ class SubscriptionService:
                 await session.flush()
                 await session.refresh(existing)
                 logger.info(f"订阅已存在，已更新: {name}")
-                return existing
+                return existing, False
 
             # 创建新订阅
             feed = Feed(
@@ -93,7 +93,7 @@ class SubscriptionService:
             await session.flush()
             await session.refresh(feed)
             logger.info(f"添加订阅成功: {name}")
-            return feed
+            return feed, True
 
     async def remove_subscription(self, mp_id: str) -> bool:
         """取消订阅（软删除，将 status 设为 0）。

@@ -7,16 +7,18 @@ import random
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable
+from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import and_, case, delete, or_, select, update
 
 from src.api.article import fetch_article_content, parse_article_html
-from src.api.providers import ArticleListProvider, create_article_list_provider
+from src.api.providers import ArticleListProvider, ProviderArticle, create_article_list_provider
 from src.api.providers.rss_provider import RSSProviderError, redact_url
 from src.api.weread import AuthExpiredError, RateLimitError, WeReadAPIError, WeReadClient
 from src.models.schema import Article, Feed, FetchBatch
 from src.services.feed_discovery import DiscoveryReport, FeedDiscoveryService
+from src.services.rss_attribution import AttributionDiagnostics, RSSAttributionService
 from src.services.rss_source import RSSSourceService
 from src.services.subscription import SubscriptionService
 from src.services.trade_calendar import get_effective_fetch_trade_date
@@ -157,6 +159,7 @@ def _parse_publish_time(time_str: str | int | datetime | None) -> datetime | Non
 
     # 尝试其他常见格式
     formats = [
+        "%a, %d %b %Y %H:%M:%S %z",  # RFC 2822 (RSS feed)
         "%Y-%m-%d %H:%M:%S",
         "%Y-%m-%d %H:%M",
         "%Y-%m-%d",
@@ -1235,7 +1238,7 @@ class FetcherService:
         对每个 RSS 源：
         1. 通过 RSS Provider 抓取 feed
         2. 按内容模式处理每篇文章
-        3. 推断公众号身份并自动创建订阅
+        3. 通过 URL 归属服务解析公众号身份
         4. 更新健康状态
         5. 挂载成员关系
 
@@ -1245,7 +1248,6 @@ class FetcherService:
         from src.api.providers.rss_provider import RSSProvider
 
         rss_service = RSSSourceService(self.db)
-        discovery_service = FeedDiscoveryService(self.db, self.subscription_service)
         settings = get_settings()
         content_mode = settings.rss_content_mode
 
@@ -1265,15 +1267,24 @@ class FetcherService:
         provider = self._get_provider("rss")
         assert isinstance(provider, RSSProvider)
 
+        # 创建归属服务（URL-based attribution）
+        attribution_service = RSSAttributionService(
+            db=self.db,
+            subscription_service=self.subscription_service,
+            weread_client=self.weread_client,
+        )
+
         # 全局发现报告
         global_report = DiscoveryReport()
+        global_diagnostics = AttributionDiagnostics()
 
         results: dict[str, FetchSummary] = {}
 
-        for source in sources:
+        total_sources = len(sources)
+        for idx, source in enumerate(sources, 1):
             source_name = source.source_name
             self._emit(on_progress, FetchProgressEvent.subscription_start(
-                source_name, source_name, 0, 0,
+                source_name, source_name, idx, total_sources,
             ))
 
             try:
@@ -1281,9 +1292,10 @@ class FetcherService:
                     source=source,
                     provider=provider,
                     rss_service=rss_service,
-                    discovery_service=discovery_service,
+                    attribution_service=attribution_service,
                     content_mode=content_mode,
                     report=global_report,
+                    diagnostics=global_diagnostics,
                     on_progress=on_progress,
                 )
                 results[source_name] = summary
@@ -1305,6 +1317,13 @@ class FetcherService:
                     detail=f"[cyan]{line}[/cyan]",
                 ))
 
+        # 报告归属诊断信息
+        for line in global_diagnostics.summary_lines():
+            self._emit(on_progress, FetchProgressEvent(
+                type="article_fetch", mp_id="rss",
+                detail=f"[dim]{line}[/dim]",
+            ))
+
         return results
 
     async def _fetch_rss_source(
@@ -1313,8 +1332,9 @@ class FetcherService:
         provider: Any,
         rss_service: RSSSourceService,
         content_mode: str,
-        discovery_service: FeedDiscoveryService | None = None,
+        attribution_service: RSSAttributionService | None = None,
         report: DiscoveryReport | None = None,
+        diagnostics: AttributionDiagnostics | None = None,
         on_progress: OnProgressCallback = None,
     ) -> FetchSummary:
         """抓取单个 RSS 源的所有文章。"""
@@ -1348,9 +1368,34 @@ class FetcherService:
             await rss_service.record_success(source.id, latest_item_time=latest_time)
 
             summary.list_returned_count = len(articles)
+            caught_up_biz_ids: set[str] = set()
 
             for art in articles:
                 article_info = art.to_article_info()
+
+                # 按公众号独立增量追踪
+                biz_id = self._extract_biz_from_article(article_info)
+                if biz_id and biz_id in caught_up_biz_ids:
+                    # 该公众号已追上，直接跳过（无需 DB 查询）
+                    self._emit(on_progress, FetchProgressEvent.article_skipped(
+                        source.source_name, art.title,
+                    ))
+                    self._update_summary_counts(summary, "existing")
+                    continue
+
+                # 增量检查：提前判断文章是否已存在，避免无谓的 API 调用
+                article_id = self._get_article_storage_id(article_info)
+                if article_id and await self._rss_article_exists(article_id, article_info):
+                    # 已存在：挂载成员关系，标记该公众号已追上
+                    await self._ensure_rss_membership(article_id, source.id)
+                    if biz_id:
+                        caught_up_biz_ids.add(biz_id)
+                    self._emit(on_progress, FetchProgressEvent.article_skipped(
+                        source.source_name, art.title,
+                    ))
+                    self._update_summary_counts(summary, "existing")
+                    continue
+
                 await self._throttle_before_request(source.source_name, on_progress)
 
                 status, article = await self._fetch_and_save_rss_article(
@@ -1358,8 +1403,9 @@ class FetcherService:
                     article_info=article_info,
                     content_mode=content_mode,
                     rss_service=rss_service,
-                    discovery_service=discovery_service,
+                    attribution_service=attribution_service,
                     report=report,
+                    diagnostics=diagnostics,
                 )
 
                 if status == "inserted":
@@ -1368,7 +1414,9 @@ class FetcherService:
                         source.source_name, art.title, is_new=True,
                     ))
                 elif status == "existing":
-                    # 即使已存在，也要挂载成员关系
+                    # 归属解析后发现已存在，标记该公众号已追上
+                    if biz_id:
+                        caught_up_biz_ids.add(biz_id)
                     if article:
                         await rss_service.add_article_membership(article.id, source.id)
                     self._emit(on_progress, FetchProgressEvent.article_skipped(
@@ -1379,6 +1427,19 @@ class FetcherService:
                         source.source_name, art.title, is_new=False,
                     ))
                 self._update_summary_counts(summary, status)
+
+            # 回填因时间解析 bug 缺失的 publish_time
+            await self._backfill_rss_publish_times(articles)
+
+            # 更新本次涉及的所有 Feed 的 sync_time
+            feed_ids_to_update: set[int] = {a.feed_id for a in inserted if a and a.feed_id}
+            if feed_ids_to_update:
+                now = datetime.now()
+                async with self.db.get_session() as session:
+                    from sqlalchemy import update as sa_update
+                    await session.execute(
+                        sa_update(Feed).where(Feed.id.in_(feed_ids_to_update)).values(sync_time=now)
+                    )
 
             summary.final_state = self._determine_state(summary)
             self._emit(on_progress, FetchProgressEvent.subscription_done(
@@ -1394,14 +1455,113 @@ class FetcherService:
         summary.articles = inserted
         return summary
 
+    async def _backfill_rss_publish_times(self, feed_articles: list[ProviderArticle]) -> int:
+        """回填 RSS 文章缺失的 publish_time（由时间解析 bug 导致）。
+
+        从当前 feed 条目中提取正确时间，更新 DB 中 publish_time 为 NULL 的对应文章。
+        仅补一次：已有 publish_time 的不受影响。
+
+        Args:
+            feed_articles: RSS feed 返回的文章列表
+
+        Returns:
+            更新的文章数量
+        """
+        # 构建 article_id -> publish_time 映射
+        time_map: dict[str, datetime] = {}
+        for art in feed_articles:
+            info = art.to_article_info()
+            article_id = self._get_article_storage_id(info)
+            if not article_id:
+                continue
+            pt = _get_publish_time_from_info(info)
+            if pt:
+                time_map[article_id] = pt
+
+        if not time_map:
+            return 0
+
+        # 在同一个 session 中查询并更新
+        async with self.db.get_session() as session:
+            result = await session.execute(
+                select(Article).where(
+                    Article.article_id.in_(list(time_map.keys())),
+                    Article.publish_time.is_(None),
+                )
+            )
+            articles = list(result.scalars().all())
+
+            if not articles:
+                return 0
+
+            for article in articles:
+                new_time = time_map.get(article.article_id)
+                if new_time:
+                    article.publish_time = new_time
+            await session.flush()
+
+        logger.info("RSS publish_time 回填完成: %d 篇", len(articles))
+        return len(articles)
+
+    def _extract_biz_from_article(self, article_info: dict[str, Any]) -> str | None:
+        """从文章 URL 中提取 __biz 参数作为公众号唯一标识。"""
+        original_url = article_info.get("original_url") or article_info.get("url") or ""
+        if not original_url or "__biz" not in original_url:
+            return None
+        try:
+            parsed = urlparse(original_url)
+            params = parse_qs(parsed.query)
+            biz_values = params.get("__biz", [])
+            return f"biz:{biz_values[0]}" if biz_values and biz_values[0] else None
+        except Exception:
+            return None
+
+    async def _rss_article_exists(
+        self,
+        article_id: str,
+        article_info: dict[str, Any],
+    ) -> bool:
+        """快速检查 RSS 文章是否已存在（避免进入完整处理流程）。"""
+        original_url = article_info.get("original_url") or article_info.get("url")
+        provider = article_info.get("provider", "rss")
+        provider_item_id = article_info.get("provider_item_id") or article_info.get("external_id")
+
+        async with self.db.get_session() as session:
+            filters = [Article.article_id == article_id]
+            if original_url:
+                filters.append(Article.original_url == original_url)
+            if provider and provider_item_id:
+                filters.append(
+                    and_(
+                        Article.provider == provider,
+                        Article.provider_item_id == str(provider_item_id),
+                    )
+                )
+            result = await session.execute(select(Article.id).where(or_(*filters)).limit(1))
+            return result.scalar_one_or_none() is not None
+
+    async def _ensure_rss_membership(self, article_id: str, source_id: int) -> None:
+        """确保文章与 RSS 源的成员关系存在。"""
+        from src.services.rss_source import RSSSourceService
+        rss_service = RSSSourceService(self.db)
+        async with self.db.get_session() as session:
+            result = await session.execute(
+                select(Article).where(Article.article_id == article_id).limit(1),
+            )
+            article = result.scalar_one_or_none()
+            if article:
+                await rss_service.add_article_membership(article.id, source_id)
+
     async def _fetch_and_save_rss_article(
         self,
         source: Any,
         article_info: dict[str, Any],
         content_mode: str,
         rss_service: RSSSourceService,
-        discovery_service: FeedDiscoveryService | None = None,
+        attribution_service: RSSAttributionService | None = None,
         report: DiscoveryReport | None = None,
+        diagnostics: AttributionDiagnostics | None = None,
+        discovery_service: FeedDiscoveryService | None = None,
     ) -> tuple[str, Article | None]:
         """抓取并保存 RSS 文章，按内容模式处理。
 
@@ -1410,6 +1570,10 @@ class FetcherService:
             article_info: 文章信息
             content_mode: feed_only / prefer_feed / fetch_missing
             rss_service: RSS 源服务
+            attribution_service: URL 归属服务（优先使用）
+            report: 发现报告
+            diagnostics: 归属诊断信息
+            discovery_service: 旧版发现服务（回退使用）
 
         Returns:
             (status, article)
@@ -1446,14 +1610,23 @@ class FetcherService:
                     await rss_service.add_article_membership(existing.id, source.id)
                     return "existing", existing
 
-            # 推断或创建 Feed（通过发现服务）
+            # 解析 Feed 归属（通过 URL 归属服务或旧版发现服务）
             feed: Feed | None = None
-            if discovery_service:
-                result = await discovery_service.resolve_feed(article_info, report)
-                if result:
-                    feed = result.feed
+            if attribution_service:
+                attr_result = await attribution_service.attribute(
+                    article_info, report=report, diagnostics=diagnostics,
+                )
+                if attr_result:
+                    feed = attr_result.feed
                 else:
-                    # 无法发现且策略为 skip
+                    # 无法归属且策略为 skip
+                    logger.debug("RSS 文章跳过（无法归属公众号）: %s", title)
+                    return "failed", None
+            elif discovery_service:
+                disc_result = await discovery_service.resolve_feed(article_info, report)
+                if disc_result:
+                    feed = disc_result.feed
+                else:
                     logger.debug("RSS 文章跳过（无法解析公众号）: %s", title)
                     return "failed", None
             else:
@@ -1533,7 +1706,7 @@ class FetcherService:
                         return feed
 
         # 创建新 Feed
-        return await self.subscription_service.add_subscription(
+        feed, _ = await self.subscription_service.add_subscription(
             mp_id=mp_id,
             name=name,
             provider="rss",

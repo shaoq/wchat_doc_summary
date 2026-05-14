@@ -36,7 +36,10 @@ class DiscoveryReport:
 
     def add(self, result: DiscoveredFeed) -> None:
         if result.is_newly_discovered:
-            self.discovered.append(result)
+            # 按 feed.id 或 feed.mp_id 去重，避免同一公众号重复报告
+            key = result.feed.id or result.feed.mp_id
+            if not any((d.feed.id or d.feed.mp_id) == key for d in self.discovered):
+                self.discovered.append(result)
 
     @property
     def count(self) -> int:
@@ -139,6 +142,26 @@ class FeedDiscoveryService:
     def __init__(self, db: Database, subscription_service: SubscriptionService) -> None:
         self.db = db
         self.subscription_service = subscription_service
+        self._name_cache: dict[str, Feed] | None = None
+
+    async def _get_name_cache(self) -> dict[str, Feed]:
+        """获取归一化名称到 Feed 的缓存（首次使用时加载）。"""
+        if self._name_cache is None:
+            from sqlalchemy import select
+            self._name_cache = {}
+            async with self.db.get_session() as session:
+                result = await session.execute(
+                    select(Feed).where(Feed.provider == "rss")
+                )
+                for feed in result.scalars().all():
+                    key = _normalize_name(feed.name)
+                    if key not in self._name_cache:
+                        self._name_cache[key] = feed
+        return self._name_cache
+
+    def invalidate_name_cache(self) -> None:
+        """使名称缓存失效（新增 Feed 后调用）。"""
+        self._name_cache = None
 
     async def resolve_feed(
         self,
@@ -214,19 +237,9 @@ class FeedDiscoveryService:
             return result.scalar_one_or_none()
 
     async def _match_by_name(self, name: str) -> Feed | None:
-        """通过归一化名称匹配已有 Feed。"""
-        from sqlalchemy import select
-
-        normalized = _normalize_name(name)
-        async with self.db.get_session() as session:
-            result = await session.execute(
-                select(Feed).where(Feed.provider == "rss")
-            )
-            feeds = list(result.scalars().all())
-            for feed in feeds:
-                if _normalize_name(feed.name) == normalized:
-                    return feed
-        return None
+        """通过归一化名称匹配已有 Feed（使用缓存）。"""
+        cache = await self._get_name_cache()
+        return cache.get(_normalize_name(name))
 
     async def _update_feed_stable_id(
         self, feed: Feed, stable_id: str, raw_metadata: dict[str, Any]
@@ -291,7 +304,7 @@ class FeedDiscoveryService:
             "raw_metadata": raw_metadata,
         }
 
-        feed = await self.subscription_service.add_subscription(
+        feed, is_new = await self.subscription_service.add_subscription(
             mp_id=stable_id,
             name=name,
             provider="rss",
@@ -299,21 +312,26 @@ class FeedDiscoveryService:
             provider_meta=json.dumps(discovery_meta, ensure_ascii=False),
         )
 
-        # 如果应该停用，覆盖 add_subscription 默认的 status=1
-        if status == 0 and feed.status == 1:
-            from sqlalchemy import update
+        # 如果应该停用且确实是新建的，在同一次事务中设置 status
+        if status == 0 and is_new and feed.status == 1:
+            from sqlalchemy import update as sa_update
             async with self.db.get_session() as session:
                 await session.execute(
-                    update(Feed).where(Feed.id == feed.id).values(status=0)
+                    sa_update(Feed).where(Feed.id == feed.id).values(status=0)
                 )
+                feed.status = 0
 
         result = DiscoveredFeed(
             feed=feed,
-            is_newly_discovered=True,
+            is_newly_discovered=is_new,
             match_method="placeholder" if not display_name else "author",
         )
         if report:
             report.add(result)
+
+        # 新增 Feed 后刷新名称缓存
+        if is_new:
+            self.invalidate_name_cache()
 
         logger.info("自动发现并创建公众号订阅: %s (状态: %s)", name, default_status)
         return result
