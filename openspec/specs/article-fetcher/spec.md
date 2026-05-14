@@ -56,6 +56,50 @@ The system SHALL ensure downstream comparisons that rely on `Article.publish_tim
 - **WHEN** the system compares a provider article publish time against the latest stored article time during incremental fetch
 - **THEN** both sides of the comparison SHALL use the same Shanghai-local time semantics
 - **AND** the comparison SHALL NOT stop early because one side still reflects UTC clock time
+
+### Requirement: RSS-backed article import is cache-first
+The article fetch pipeline SHALL prefer feed-provided content for RSS-backed articles and avoid direct WeChat article-page fetching when the configured RSS content mode does not allow it.
+
+#### Scenario: Feed item includes HTML content
+- **WHEN** an RSS-backed provider article includes HTML content
+- **THEN** the system SHALL import that content without requesting the original article page
+- **AND** the article SHALL still be deduplicated and persisted through the normal article storage path
+
+#### Scenario: Feed-only mode with missing content
+- **WHEN** `rss_content_mode` is `feed_only` and an RSS-backed provider article lacks full content
+- **THEN** the system SHALL NOT request the original article page
+- **AND** it SHALL persist the available feed summary or mark the article content as unavailable without failing the whole subscription fetch
+
+#### Scenario: Prefer-feed mode with missing content
+- **WHEN** `rss_content_mode` is `prefer_feed` and an RSS-backed provider article lacks usable content
+- **THEN** the system MAY request the original article page to fill missing content
+- **AND** that direct request SHALL remain subject to existing fetch throttling and error handling
+
+### Requirement: RSS-backed articles deduplicate by provider item and original URL
+The article fetch pipeline SHALL deduplicate RSS-backed articles using provider item identity and original URL before inserting new article records.
+
+#### Scenario: Same RSS item fetched twice
+- **WHEN** the same RSS item appears in multiple fetch runs with the same provider item identity
+- **THEN** the system SHALL detect the existing article
+- **AND** it SHALL NOT insert a duplicate article
+
+#### Scenario: RSS item identity changes but URL remains stable
+- **WHEN** an RSS item has a changed GUID but the original article URL matches an existing article
+- **THEN** the system SHALL detect the existing article by original URL
+- **AND** it SHALL NOT insert a duplicate article
+
+### Requirement: RSS-backed fetches report upstream source state
+The article fetch pipeline SHALL update RSS source health state when feed requests succeed, fail, return empty results, or appear stale.
+
+#### Scenario: RSS source fetch succeeds
+- **WHEN** an RSS source fetch successfully reads and parses the feed
+- **THEN** the system SHALL record the source's last successful fetch time
+- **AND** it SHALL reset consecutive failure state for that feed
+
+#### Scenario: RSS source fetch fails
+- **WHEN** an RSS source fetch cannot request or parse the feed
+- **THEN** the system SHALL record the failure for source health diagnostics
+- **AND** it SHALL surface the source fetch as failed without marking unrelated RSS sources as failed
 ## Requirements
 ### Requirement: 抓取流程中的等待调用使用抖动间隔
 
@@ -133,3 +177,94 @@ The system SHALL continue using the existing `fetch_batches.batch_date` column a
 - **WHEN** old `fetch_batches` rows exist from calendar-day behavior
 - **THEN** the system SHALL NOT require a database migration before running `fetch_all()`
 - **AND** normal retention cleanup SHALL eventually remove stale rows
+
+<!-- delta from integrate-wechat-rss-saas-provider -->
+## ADDED Requirements
+
+### Requirement: RSS-backed article import is cache-first
+The article fetch pipeline SHALL prefer feed-provided content for RSS-backed articles and avoid direct WeChat article-page fetching when the configured RSS content mode does not allow it.
+
+#### Scenario: Feed item includes HTML content
+- **WHEN** an RSS-backed provider article includes HTML content
+- **THEN** the system SHALL import that content without requesting the original article page
+- **AND** the article SHALL still be deduplicated and persisted through the normal article storage path
+
+#### Scenario: Feed-only mode with missing content
+- **WHEN** `rss_content_mode` is `feed_only` and an RSS-backed provider article lacks full content
+- **THEN** the system SHALL NOT request the original article page
+- **AND** it SHALL persist the available feed summary or mark the article content as unavailable without failing the whole subscription fetch
+
+#### Scenario: Prefer-feed mode with missing content
+- **WHEN** `rss_content_mode` is `prefer_feed` and an RSS-backed provider article lacks usable content
+- **THEN** the system MAY request the original article page to fill missing content
+- **AND** that direct request SHALL remain subject to existing fetch throttling and error handling
+
+### Requirement: RSS-backed articles deduplicate by provider item and original URL
+The article fetch pipeline SHALL deduplicate RSS-backed articles using provider item identity and original URL before inserting new article records.
+
+#### Scenario: Same RSS item fetched twice
+- **WHEN** the same RSS item appears in multiple fetch runs with the same provider item identity
+- **THEN** the system SHALL detect the existing article
+- **AND** it SHALL NOT insert a duplicate article
+
+#### Scenario: RSS item identity changes but URL remains stable
+- **WHEN** an RSS item has a changed GUID but the original article URL matches an existing article
+- **THEN** the system SHALL detect the existing article by original URL
+- **AND** it SHALL NOT insert a duplicate article
+
+### Requirement: RSS-backed fetches report upstream source state
+The article fetch pipeline SHALL update RSS source health state when feed requests succeed, fail, return empty results, or appear stale.
+
+#### Scenario: RSS source fetch succeeds
+- **WHEN** an RSS source fetch successfully reads and parses the feed
+- **THEN** the system SHALL record the source's last successful fetch time
+- **AND** it SHALL reset consecutive failure state for that feed
+
+#### Scenario: RSS source fetch fails
+- **WHEN** an RSS source fetch cannot request or parse the feed
+- **THEN** the system SHALL record the failure for source health diagnostics
+- **AND** it SHALL surface the source fetch as failed without marking unrelated RSS sources as failed
+
+<!-- delta from add-rss-auto-subscribe-and-docs -->
+## ADDED Requirements
+
+### Requirement: RSS imports resolve local Feed before article persistence
+The article fetch pipeline SHALL resolve or create the owning local `Feed` for each RSS-imported article before inserting the article.
+
+#### Scenario: RSS article belongs to existing feed
+- **WHEN** an RSS item identifies a public account that already exists locally
+- **THEN** the imported article SHALL use that existing feed as its owner
+- **AND** no duplicate feed SHALL be created
+
+#### Scenario: RSS article belongs to discovered feed
+- **WHEN** an RSS item identifies a public account that does not exist locally
+- **AND** auto-subscribe policy creates a local subscription
+- **THEN** the imported article SHALL reference the newly created feed
+
+### Requirement: RSS import handles unknown public-account identity according to policy
+The article fetch pipeline SHALL handle RSS items whose public-account identity cannot be resolved without corrupting article ownership.
+
+#### Scenario: Unknown identity with auto-subscribe disabled
+- **WHEN** RSS import encounters an item with no matching local feed
+- **AND** auto-subscribe is disabled
+- **THEN** the system SHALL skip, fail, or stage the item according to the configured unknown-feed policy
+- **AND** it SHALL NOT insert the article under an unrelated feed
+
+#### Scenario: Unknown identity with placeholder creation allowed
+- **WHEN** RSS import encounters an item with insufficient public-account identity
+- **AND** placeholder creation is allowed by policy
+- **THEN** the system SHALL create a traceable placeholder feed
+- **AND** it SHALL preserve raw RSS metadata for later correction
+
+### Requirement: RSS article source membership remains separate from canonical Feed ownership
+The article fetch pipeline SHALL preserve RSS source/category membership independently from the canonical public-account feed owner.
+
+#### Scenario: Same account appears in multiple RSS sources
+- **WHEN** RSS import processes articles from the same public account across multiple RSS sources
+- **THEN** the articles SHALL share the same canonical feed owner when matched
+- **AND** source/category memberships SHALL be preserved separately
+
+#### Scenario: Same article appears in multiple RSS sources
+- **WHEN** the same article URL appears in multiple RSS sources
+- **THEN** the system SHALL keep one canonical article record
+- **AND** it SHALL record each source membership without duplicating the article
