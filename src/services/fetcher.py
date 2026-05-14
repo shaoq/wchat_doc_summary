@@ -16,6 +16,7 @@ from src.api.providers import ArticleListProvider, create_article_list_provider
 from src.api.providers.rss_provider import RSSProviderError, redact_url
 from src.api.weread import AuthExpiredError, RateLimitError, WeReadAPIError, WeReadClient
 from src.models.schema import Article, Feed, FetchBatch
+from src.services.feed_discovery import DiscoveryReport, FeedDiscoveryService
 from src.services.rss_source import RSSSourceService
 from src.services.subscription import SubscriptionService
 from src.services.trade_calendar import get_effective_fetch_trade_date
@@ -1234,7 +1235,7 @@ class FetcherService:
         对每个 RSS 源：
         1. 通过 RSS Provider 抓取 feed
         2. 按内容模式处理每篇文章
-        3. 推断公众号身份并关联
+        3. 推断公众号身份并自动创建订阅
         4. 更新健康状态
         5. 挂载成员关系
 
@@ -1244,6 +1245,7 @@ class FetcherService:
         from src.api.providers.rss_provider import RSSProvider
 
         rss_service = RSSSourceService(self.db)
+        discovery_service = FeedDiscoveryService(self.db, self.subscription_service)
         settings = get_settings()
         content_mode = settings.rss_content_mode
 
@@ -1263,6 +1265,9 @@ class FetcherService:
         provider = self._get_provider("rss")
         assert isinstance(provider, RSSProvider)
 
+        # 全局发现报告
+        global_report = DiscoveryReport()
+
         results: dict[str, FetchSummary] = {}
 
         for source in sources:
@@ -1276,7 +1281,9 @@ class FetcherService:
                     source=source,
                     provider=provider,
                     rss_service=rss_service,
+                    discovery_service=discovery_service,
                     content_mode=content_mode,
+                    report=global_report,
                     on_progress=on_progress,
                 )
                 results[source_name] = summary
@@ -1289,6 +1296,15 @@ class FetcherService:
 
         total = sum(s.inserted_count for s in results.values())
         logger.info("RSS 源抓取完成: %d 篇新文章", total)
+
+        # 报告发现的订阅
+        if global_report.count > 0:
+            for line in global_report.summary_lines():
+                self._emit(on_progress, FetchProgressEvent(
+                    type="article_fetch", mp_id="rss",
+                    detail=f"[cyan]{line}[/cyan]",
+                ))
+
         return results
 
     async def _fetch_rss_source(
@@ -1297,6 +1313,8 @@ class FetcherService:
         provider: Any,
         rss_service: RSSSourceService,
         content_mode: str,
+        discovery_service: FeedDiscoveryService | None = None,
+        report: DiscoveryReport | None = None,
         on_progress: OnProgressCallback = None,
     ) -> FetchSummary:
         """抓取单个 RSS 源的所有文章。"""
@@ -1340,6 +1358,8 @@ class FetcherService:
                     article_info=article_info,
                     content_mode=content_mode,
                     rss_service=rss_service,
+                    discovery_service=discovery_service,
+                    report=report,
                 )
 
                 if status == "inserted":
@@ -1380,6 +1400,8 @@ class FetcherService:
         article_info: dict[str, Any],
         content_mode: str,
         rss_service: RSSSourceService,
+        discovery_service: FeedDiscoveryService | None = None,
+        report: DiscoveryReport | None = None,
     ) -> tuple[str, Article | None]:
         """抓取并保存 RSS 文章，按内容模式处理。
 
@@ -1424,8 +1446,21 @@ class FetcherService:
                     await rss_service.add_article_membership(existing.id, source.id)
                     return "existing", existing
 
-            # 推断或创建 Feed
-            feed = await self._resolve_or_create_rss_feed(article_info)
+            # 推断或创建 Feed（通过发现服务）
+            feed: Feed | None = None
+            if discovery_service:
+                result = await discovery_service.resolve_feed(article_info, report)
+                if result:
+                    feed = result.feed
+                else:
+                    # 无法发现且策略为 skip
+                    logger.debug("RSS 文章跳过（无法解析公众号）: %s", title)
+                    return "failed", None
+            else:
+                feed = await self._resolve_or_create_rss_feed(article_info)
+
+            if not feed:
+                return "failed", None
 
             # 内容模式处理
             html = await self._resolve_rss_content(

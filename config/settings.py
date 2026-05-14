@@ -57,6 +57,18 @@ class Settings(BaseSettings):
         default=None,
         description="微信 RSS SaaS 付费计划源数量上限（仅告警）",
     )
+    rss_auto_subscribe_discovered_feeds: bool = Field(
+        default=False,
+        description="是否自动订阅 RSS 中发现的未知公众号",
+    )
+    rss_discovered_feed_default_status: Literal["active", "inactive"] = Field(
+        default="inactive",
+        description="自动发现的公众号默认状态: active/inactive",
+    )
+    rss_unknown_feed_policy: Literal["skip", "create_placeholder"] = Field(
+        default="skip",
+        description="未知公众号处理策略: skip(跳过文章)/create_placeholder(创建占位订阅)",
+    )
 
     # 数据库配置
     database_url: str = Field(

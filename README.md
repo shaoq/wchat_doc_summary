@@ -11,7 +11,8 @@
 
 ## 功能概览
 
-- 微信读书登录
+- 微信 RSS SaaS 文章同步（推荐路径）
+- 微信读书登录（兼容路径）
 - 公众号订阅管理
 - 文章抓取、查看、导出
 - AI 摘要、关键词、分类、情感分析
@@ -53,24 +54,37 @@ python -m src.cli --help
 项目通过 `.env` 读取配置。最小可用配置示例：
 
 ```bash
-WEREAD_API_BASE=https://weread.111965.xyz
-ARTICLE_LIST_PROVIDER=weread
-WECHAT2RSS_BASE_URL=https://wechat2rss.xlab.app
-WECHAT2RSS_TOKEN=
+# RSS SaaS 配置（推荐路径）
+ARTICLE_LIST_PROVIDER=rss
+WECHAT_RSS_API_KEY=你的RSS服务API密钥
+
+# 数据库
 DATABASE_URL=sqlite+aiosqlite:///./data/wchat.db
 
+# AI 处理（wchat ai ... 命令需要）
 LLM_BASE_URL=https://api.anthropic.com
 LLM_API_KEY=你的密钥
 LLM_MODEL=claude-3-5-haiku-latest
 ```
 
+### 配置说明
+
+| 配置项 | 说明 |
+|--------|------|
+| `ARTICLE_LIST_PROVIDER` | 文章列表 Provider，推荐 `rss`；兼容 `weread` / `wechat2rss` |
+| `WECHAT_RSS_API_KEY` | 微信 RSS SaaS 全局 API Key（放在 `.env` 中） |
+| `RSS_CONTENT_MODE` | 内容模式: `feed_only` / `prefer_feed`（默认）/ `fetch_missing` |
+| `RSS_AUTO_SUBSCRIBE_DISCOVERED_FEEDS` | 是否自动订阅 RSS 中发现的未知公众号（默认 `false`） |
+| `RSS_DISCOVERED_FEED_DEFAULT_STATUS` | 自动发现的公众号默认状态: `active` / `inactive`（默认） |
+| `RSS_UNKNOWN_FEED_POLICY` | 未知公众号处理策略: `skip`（默认）/ `create_placeholder` |
+
 说明：
 
 - `DATABASE_URL` 默认就是 `sqlite+aiosqlite:///./data/wchat.db`
-- `ARTICLE_LIST_PROVIDER` 默认为 `weread`，可切换为 `wechat2rss`
-- 使用 `wechat2rss` 时，`subscribe` / `fetch` 不再依赖 `wchat login`
+- 使用 RSS 路径时，`subscribe` / `fetch` 不需要 `wchat login`
+- RSS Feed URL 通过 `wchat source add` 管理为本地源，不写在 `.env` 里
 - 只有 `wchat ai ...` 相关命令需要 `LLM_API_KEY`
-- `wchat login` 以及 `ARTICLE_LIST_PROVIDER=weread` 时的 `subscribe` / `fetch` 依赖微信读书代理接口可用
+- WeRead 路径仍然需要 `wchat login`
 
 ## 初始化
 
@@ -86,45 +100,99 @@ wchat init
 wchat --help
 wchat ai --help
 wchat cls --help
+wchat source --help
 ```
 
 ## 最常用的使用流程
 
-### 1. 登录
+### 1. 配置 RSS 源（推荐）
+
+RSS SaaS 路径不需要微信读书登录。
+
+#### 单个聚合源模式
+
+如果你有一个包含所有公众号的 RSS Feed：
 
 ```bash
+wchat source add 全部 https://your-rss-service.com/feed/all
+```
+
+#### 多个分类源模式
+
+如果按分类有多个 RSS Feed：
+
+```bash
+wchat source add 财经 https://your-rss-service.com/feed/finance
+wchat source add 科技 https://your-rss-service.com/feed/tech
+wchat source add 投资 https://your-rss-service.com/feed/invest
+```
+
+查看已配置的源：
+
+```bash
+wchat source list
+```
+
+查看源健康状态：
+
+```bash
+wchat source health
+```
+
+#### 自动发现公众号
+
+当 RSS Feed 包含尚未手动订阅的公众号文章时，系统可以自动创建本地订阅：
+
+```bash
+# 在 .env 中启用自动发现
+RSS_AUTO_SUBSCRIBE_DISCOVERED_FEEDS=true
+RSS_DISCOVERED_FEED_DEFAULT_STATUS=inactive   # 发现后先不激活
+```
+
+启用后，`wchat source fetch` 会：
+1. 从 RSS Feed 提取公众号身份（优先使用 `__biz` ID，回退到作者名称）
+2. 匹配已有的本地订阅（避免重复）
+3. 创建新订阅并记录发现来源
+4. 在输出中报告新发现的公众号
+
+发现的公众号会出现在 `wchat ls` 列表中。如果默认状态是 `inactive`，需要手动启用：
+
+```bash
+# 目前通过重新订阅来激活（保留元数据）
+# 或者在 .env 中设置 RSS_DISCOVERED_FEED_DEFAULT_STATUS=active
+```
+
+### 2. 从 RSS 源抓取文章
+
+```bash
+# 从所有活跃 RSS 源抓取
+wchat source fetch
+```
+
+### 3. WeRead 路径（兼容）
+
+如果你仍然使用微信读书代理：
+
+```bash
+# 登录
 wchat login
-```
 
-登录成功后可用：
-
-```bash
-wchat logout
-```
-
-### 2. 订阅公众号
-
-通过一篇公众号文章 URL 反查并订阅：
-
-```bash
+# 订阅公众号（通过文章 URL）
 wchat subscribe "https://mp.weixin.qq.com/s/xxxx"
+
+# 抓取
+wchat fetch MP_WXS_xxx
 ```
 
-如果你想避开 WeRead 列表接口，可以在 `.env` 中配置：
+### 4. 查看订阅和文章
 
-```bash
-ARTICLE_LIST_PROVIDER=wechat2rss
-WECHAT2RSS_BASE_URL=https://wechat2rss.xlab.app
-WECHAT2RSS_TOKEN=你的 token
-```
-
-此时 `subscribe` / `fetch` 会优先走 `Wechat2RSS` Provider。
-
-查看订阅列表：
+查看订阅列表（包含 RSS 源关联）：
 
 ```bash
 wchat ls
 ```
+
+`wchat ls` 显示每个订阅关联的 RSS 源名称。如果公众号出现在多个分类源中，会列出所有关联源。
 
 查看某个订阅详情：
 
@@ -132,56 +200,10 @@ wchat ls
 wchat info MP_WXS_xxx
 ```
 
-取消订阅：
-
-```bash
-wchat unsubscribe MP_WXS_xxx
-```
-
-### 3. 抓取文章
-
-默认抓取单个公众号最新 10 条文章：
-
-```bash
-wchat fetch MP_WXS_xxx
-```
-
-抓取单个公众号最近 30 天文章：
-
-```bash
-wchat fetch MP_WXS_xxx --days 30
-```
-
-抓取单个公众号全部历史文章：
-
-```bash
-wchat fetch MP_WXS_xxx --full
-```
-
-抓取所有订阅最近 5 天文章：
-
-```bash
-wchat fetch --all
-```
-
-### 4. 查看和导出文章
-
 查看某个公众号已抓取文章：
 
 ```bash
 wchat show MP_WXS_xxx
-```
-
-查看更多文章：
-
-```bash
-wchat show MP_WXS_xxx --limit 50 --offset 50
-```
-
-查看单篇文章详情：
-
-```bash
-wchat article 123
 ```
 
 导出文章：
@@ -189,7 +211,16 @@ wchat article 123
 ```bash
 wchat export --format json --output articles.json
 wchat export --format markdown --output articles.md
-wchat export --mp-id MP_WXS_xxx --format markdown --output mp_articles.md
+```
+
+### 5. 抓取所有订阅
+
+```bash
+# 抓取所有订阅最近 5 天文章
+wchat fetch --all
+
+# 抓取所有订阅全部历史
+wchat fetch --all --full
 ```
 
 ## AI 使用
@@ -252,18 +283,6 @@ wchat ai extract-stocks MP_WXS_xxx
 wchat ai extract-stocks MP_WXS_xxx --force
 ```
 
-同时输出简化股票列表：
-
-```bash
-wchat ai extract-stocks MP_WXS_xxx --simple-info
-```
-
-指定输出文件：
-
-```bash
-wchat ai extract-stocks MP_WXS_xxx --output output/extract_stocks/custom.txt
-```
-
 ### 4. 股票查询
 
 列出已提取股票：
@@ -277,13 +296,6 @@ wchat ai stocks list --mp-id MP_WXS_xxx --limit 100
 
 ```bash
 wchat ai stocks search 机器人
-```
-
-查看某只股票出现在哪些文章里：
-
-```bash
-wchat ai stocks show 优博讯
-wchat ai stocks show 优博讯 --limit 50
 ```
 
 ## 市场总结
@@ -320,25 +332,6 @@ wchat ai market-summary --force
 wchat ai market-summary --offline
 ```
 
-查看历史总结：
-
-```bash
-wchat ai market-summary --list
-```
-
-输出文件默认保存在：
-
-```bash
-output/market_summaries/<trade_date>.md
-```
-
-适合的使用方式：
-
-1. 日常盘后直接执行 `wchat ai market-summary`
-2. 想跳过旧缓存时执行 `wchat ai market-summary --force`
-3. 想验证历史交易日结果时执行 `wchat ai market-summary --date YYYY-MM-DD`
-4. 只想看历史记录时执行 `wchat ai market-summary --list`
-
 ## 财联社数据命令
 
 抓取电报：
@@ -355,47 +348,53 @@ wchat cls fetch-watch
 wchat cls fetch-watch --date 2026-03-27 --hours 12
 ```
 
-查看本地电报：
-
-```bash
-wchat cls list-telegraphs
-wchat cls list-telegraphs --limit 50 --min-level A
-```
-
-查看本地看盘数据：
-
-```bash
-wchat cls list-watch
-wchat cls list-watch --limit 50
-```
-
 ## 常见问题
 
-### 1. 执行 `wchat ai ...` 报 `LLM API Key 未配置`
+### 1. RSS 路径需要登录吗？
 
-说明没有配置：
+不需要。使用 `ARTICLE_LIST_PROVIDER=rss` 时，`wchat source fetch` 和自动发现都不依赖 `wchat login`。只有 WeRead 路径需要登录。
+
+### 2. API Key 放在哪里？
+
+`WECHAT_RSS_API_KEY` 放在 `.env` 文件中，全局生效。RSS Feed URL 通过 `wchat source add` 管理，不要写在 `.env` 里。
+
+### 3. RSS Feed URL 怎么管理？
+
+使用 `wchat source` 命令：
+
+```bash
+wchat source add 全部 https://...    # 添加源
+wchat source list                     # 列出所有源
+wchat source remove 全部              # 删除源
+wchat source health                   # 查看源健康状态
+```
+
+### 4. 自动发现功能安全吗？
+
+自动发现默认关闭（`RSS_AUTO_SUBSCRIBE_DISCOVERED_FEEDS=false`）。开启后，发现的公众号默认状态为 `inactive`（`RSS_DISCOVERED_FEED_DEFAULT_STATUS=inactive`），不会自动进入抓取队列，可以在 `wchat ls` 中审核后手动启用。
+
+### 5. 同一篇文章出现在多个 RSS 源中会重复吗？
+
+不会。系统通过文章 ID 和原始 URL 去重，同一篇文章只保留一份，但会记录它在每个 RSS 源中的成员关系。
+
+### 6. RSS 源健康状态怎么看？
+
+```bash
+wchat source health          # 查看所有源
+wchat source health 全部     # 查看指定源
+```
+
+输出包含最近成功时间、连续失败次数、过期状态等信息。
+
+### 7. 执行 `wchat ai ...` 报 `LLM API Key 未配置`
+
+在 `.env` 中配置：
 
 ```bash
 LLM_API_KEY=你的密钥
 ```
 
-### 2. 执行 `subscribe` 或 `fetch` 提示先登录
-
-先执行：
-
-```bash
-wchat login
-```
-
-### 3. `market-summary` 没有生成新结果
-
-先检查：
-
-- 是否已经存在同交易日总结
-- 是否需要加 `--force`
-- 是否在 `--offline` 模式下缺少本地缓存
-
-### 4. 数据文件和输出文件在哪里
+### 8. 数据文件和输出文件在哪里
 
 默认路径：
 
@@ -409,6 +408,14 @@ wchat login
 
 ```bash
 pytest
+```
+
+只跑 RSS 相关测试：
+
+```bash
+pytest tests/test_rss_provider.py -q
+pytest tests/test_rss_source_service.py -q
+pytest tests/test_feed_discovery.py -q
 ```
 
 只跑市场总结相关测试：
