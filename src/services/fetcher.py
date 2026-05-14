@@ -13,8 +13,10 @@ from sqlalchemy import and_, case, delete, or_, select, update
 
 from src.api.article import fetch_article_content, parse_article_html
 from src.api.providers import ArticleListProvider, create_article_list_provider
+from src.api.providers.rss_provider import RSSProviderError, redact_url
 from src.api.weread import AuthExpiredError, RateLimitError, WeReadAPIError, WeReadClient
 from src.models.schema import Article, Feed, FetchBatch
+from src.services.rss_source import RSSSourceService
 from src.services.subscription import SubscriptionService
 from src.services.trade_calendar import get_effective_fetch_trade_date
 from src.storage.database import Database
@@ -1220,3 +1222,329 @@ class FetcherService:
         except Exception as e:
             logger.error(f"获取公众号信息失败: {e}")
             raise
+
+    # ── RSS 源抓取 ──────────────────────────────────────────────
+
+    async def fetch_from_rss_sources(
+        self,
+        on_progress: OnProgressCallback = None,
+    ) -> dict[str, FetchSummary]:
+        """从所有活跃 RSS 源抓取文章。
+
+        对每个 RSS 源：
+        1. 通过 RSS Provider 抓取 feed
+        2. 按内容模式处理每篇文章
+        3. 推断公众号身份并关联
+        4. 更新健康状态
+        5. 挂载成员关系
+
+        Returns:
+            字典: {source_name: FetchSummary}
+        """
+        from src.api.providers.rss_provider import RSSProvider
+
+        rss_service = RSSSourceService(self.db)
+        settings = get_settings()
+        content_mode = settings.rss_content_mode
+
+        sources = await rss_service.list_sources(active_only=True)
+        if not sources:
+            logger.info("无活跃 RSS 源")
+            return {}
+
+        # 检查配额
+        is_warning, active_count, plan_limit = await rss_service.check_quota_warning()
+        if is_warning and plan_limit is not None:
+            self._emit(on_progress, FetchProgressEvent(
+                type="waiting", mp_id="rss",
+                detail=f"[yellow]配额警告: 活跃源 {active_count} 超过计划限制 {plan_limit}[/yellow]",
+            ))
+
+        provider = self._get_provider("rss")
+        assert isinstance(provider, RSSProvider)
+
+        results: dict[str, FetchSummary] = {}
+
+        for source in sources:
+            source_name = source.source_name
+            self._emit(on_progress, FetchProgressEvent.subscription_start(
+                source_name, source_name, 0, 0,
+            ))
+
+            try:
+                summary = await self._fetch_rss_source(
+                    source=source,
+                    provider=provider,
+                    rss_service=rss_service,
+                    content_mode=content_mode,
+                    on_progress=on_progress,
+                )
+                results[source_name] = summary
+            except Exception as e:
+                logger.error("RSS 源抓取失败: %s - %s", source_name, e)
+                await rss_service.record_failure(source.id, str(e))
+                results[source_name] = FetchSummary(
+                    mp_id=source_name, final_state=FetchFinalState.ERROR,
+                )
+
+        total = sum(s.inserted_count for s in results.values())
+        logger.info("RSS 源抓取完成: %d 篇新文章", total)
+        return results
+
+    async def _fetch_rss_source(
+        self,
+        source: Any,
+        provider: Any,
+        rss_service: RSSSourceService,
+        content_mode: str,
+        on_progress: OnProgressCallback = None,
+    ) -> FetchSummary:
+        """抓取单个 RSS 源的所有文章。"""
+        from src.models.schema import RSSSource
+
+        assert isinstance(source, RSSSource)
+
+        summary = FetchSummary(mp_id=source.source_name)
+        inserted: list[Article] = []
+
+        try:
+            page = await provider.get_articles(source.feed_url, page=1, page_size=100)
+            articles = page.articles
+
+            if not articles:
+                await rss_service.record_empty(source.id)
+                summary.final_state = FetchFinalState.EMPTY_RESULT
+                self._emit(on_progress, FetchProgressEvent.subscription_done(
+                    source.source_name, source.source_name, 0, 0,
+                ))
+                return summary
+
+            # 记录最新条目时间
+            latest_time: datetime | None = None
+            for art in articles:
+                pt = art.publish_time
+                if isinstance(pt, datetime):
+                    if latest_time is None or pt > latest_time:
+                        latest_time = pt
+
+            await rss_service.record_success(source.id, latest_item_time=latest_time)
+
+            summary.list_returned_count = len(articles)
+
+            for art in articles:
+                article_info = art.to_article_info()
+                await self._throttle_before_request(source.source_name, on_progress)
+
+                status, article = await self._fetch_and_save_rss_article(
+                    source=source,
+                    article_info=article_info,
+                    content_mode=content_mode,
+                    rss_service=rss_service,
+                )
+
+                if status == "inserted":
+                    inserted.append(article)  # type: ignore[arg-type]
+                    self._emit(on_progress, FetchProgressEvent.article_fetched(
+                        source.source_name, art.title, is_new=True,
+                    ))
+                elif status == "existing":
+                    # 即使已存在，也要挂载成员关系
+                    if article:
+                        await rss_service.add_article_membership(article.id, source.id)
+                    self._emit(on_progress, FetchProgressEvent.article_skipped(
+                        source.source_name, art.title,
+                    ))
+                else:
+                    self._emit(on_progress, FetchProgressEvent.article_fetched(
+                        source.source_name, art.title, is_new=False,
+                    ))
+                self._update_summary_counts(summary, status)
+
+            summary.final_state = self._determine_state(summary)
+            self._emit(on_progress, FetchProgressEvent.subscription_done(
+                source.source_name, source.source_name,
+                summary.inserted_count, summary.existing_count,
+            ))
+
+        except RSSProviderError as e:
+            await rss_service.record_failure(source.id, str(e))
+            summary.final_state = FetchFinalState.ERROR
+            raise
+
+        summary.articles = inserted
+        return summary
+
+    async def _fetch_and_save_rss_article(
+        self,
+        source: Any,
+        article_info: dict[str, Any],
+        content_mode: str,
+        rss_service: RSSSourceService,
+    ) -> tuple[str, Article | None]:
+        """抓取并保存 RSS 文章，按内容模式处理。
+
+        Args:
+            source: RSSSource 实例
+            article_info: 文章信息
+            content_mode: feed_only / prefer_feed / fetch_missing
+            rss_service: RSS 源服务
+
+        Returns:
+            (status, article)
+        """
+        article_id = self._get_article_storage_id(article_info)
+        title = article_info.get("title", "无标题")
+        original_url = article_info.get("original_url") or article_info.get("url")
+        provider = article_info.get("provider", "rss")
+        provider_item_id = article_info.get("provider_item_id") or article_info.get("external_id")
+        feed_content_html = article_info.get("content_html")
+
+        if not article_id:
+            logger.warning("RSS 文章缺少 ID: %s", title)
+            return "failed", None
+
+        try:
+            # 去重检查
+            async with self.db.get_session() as session:
+                filters = [Article.article_id == article_id]
+                if original_url:
+                    filters.append(Article.original_url == original_url)
+                if provider and provider_item_id:
+                    filters.append(
+                        and_(
+                            Article.provider == provider,
+                            Article.provider_item_id == str(provider_item_id),
+                        )
+                    )
+                result = await session.execute(select(Article).where(or_(*filters)))
+                existing = result.scalar_one_or_none()
+                if existing:
+                    logger.debug("RSS 文章已存在: %s", title)
+                    # 即使已存在，也要挂载到当前 RSS 源的成员关系
+                    await rss_service.add_article_membership(existing.id, source.id)
+                    return "existing", existing
+
+            # 推断或创建 Feed
+            feed = await self._resolve_or_create_rss_feed(article_info)
+
+            # 内容模式处理
+            html = await self._resolve_rss_content(
+                feed_content_html=feed_content_html,
+                original_url=original_url,
+                content_mode=content_mode,
+            )
+
+            if html:
+                parsed = parse_article_html(html)
+                content = parsed.get("content")
+                parsed_title = parsed.get("title")
+                parsed_cover = parsed.get("cover")
+            else:
+                content = feed_content_html or ""
+                parsed_title = None
+                parsed_cover = None
+
+            # 保存文章
+            async with self.db.get_session() as session:
+                article = Article(
+                    feed_id=feed.id,
+                    article_id=article_id,
+                    title=parsed_title or title,
+                    content=content,
+                    summary=article_info.get("summary"),
+                    pic_url=parsed_cover or article_info.get("cover"),
+                    provider=provider,
+                    provider_item_id=str(provider_item_id) if provider_item_id else None,
+                    publish_time=_get_publish_time_from_info(article_info),
+                    original_url=original_url,
+                )
+                session.add(article)
+                await session.flush()
+                await session.refresh(article)
+
+            # 挂载 RSS 源成员关系
+            await rss_service.add_article_membership(article.id, source.id)
+
+            logger.info("RSS 文章保存成功: %s", article.title[:30])
+            return "inserted", article
+
+        except Exception as e:
+            logger.error("RSS 文章保存失败: %s - %s", title, e)
+            return "failed", None
+
+    async def _resolve_or_create_rss_feed(self, article_info: dict[str, Any]) -> Feed:
+        """从 RSS 文章推断公众号身份，查找或创建对应 Feed。"""
+        from src.models.schema import RSSSource
+
+        original_url = article_info.get("original_url") or article_info.get("url") or ""
+        title = article_info.get("title", "未知")
+
+        # 尝试从 URL 提取 mp_id（微信文章 URL 格式）
+        # 或使用标题的哈希作为 fallback
+        import hashlib
+        mp_id = f"rss:{hashlib.sha256(original_url.encode()).hexdigest()[:16]}"
+        name = article_info.get("author") or title[:20]
+
+        # 尝试查找已有 Feed（通过 original_url 匹配文章的 feed_id）
+        async with self.db.get_session() as session:
+            if original_url:
+                result = await session.execute(
+                    select(Article.feed_id).where(Article.original_url == original_url).limit(1)
+                )
+                existing_feed_id = result.scalar_one_or_none()
+                if existing_feed_id:
+                    feed = await session.get(Feed, existing_feed_id)
+                    if feed:
+                        return feed
+
+        # 创建新 Feed
+        return await self.subscription_service.add_subscription(
+            mp_id=mp_id,
+            name=name,
+            provider="rss",
+        )
+
+    async def _resolve_rss_content(
+        self,
+        feed_content_html: str | None,
+        original_url: str | None,
+        content_mode: str,
+    ) -> str | None:
+        """按内容模式决定是否抓取原文页面。
+
+        Args:
+            feed_content_html: Feed 提供的 HTML
+            original_url: 原文 URL
+            content_mode: feed_only / prefer_feed / fetch_missing
+
+        Returns:
+            用于 parse_article_html 的 HTML 内容，或 None
+        """
+        settings = get_settings()
+
+        if content_mode == "feed_only":
+            # 永远不抓取原文，只用 Feed 内容
+            return feed_content_html
+
+        if content_mode == "prefer_feed":
+            # 优先用 Feed 内容，缺失时回退
+            if feed_content_html:
+                return feed_content_html
+            # 内容缺失，尝试抓取原文
+            if original_url:
+                try:
+                    return await fetch_article_content(original_url)
+                except Exception as e:
+                    logger.warning("RSS prefer_feed 回退抓取失败: %s", e)
+                    return feed_content_html
+            return feed_content_html
+
+        # fetch_missing: 总是尝试补全
+        if original_url:
+            try:
+                original_html = await fetch_article_content(original_url)
+                if original_html:
+                    return original_html
+            except Exception as e:
+                logger.warning("RSS fetch_missing 抓取失败: %s", e)
+        return feed_content_html

@@ -7,9 +7,10 @@ from rich.table import Table
 from config.settings import get_settings
 from src.api.weread import AuthExpiredError, RateLimitError, WeReadClient
 from src.cli.utils import console, run_async
-from src.models.schema import Feed
+from src.models.schema import Article, Feed
 from src.services.auth import AuthService
 from src.services.fetcher import DEFAULT_LATEST_COUNT, FetchFinalState, FetchProgressEvent, FetchSummary, FetcherService
+from src.services.rss_source import RSSSourceService
 from src.services.subscription import SubscriptionService
 from src.services.trade_calendar import get_effective_fetch_trade_date
 from src.storage.database import get_db
@@ -139,6 +140,7 @@ def ls(active_only: bool) -> None:
     async def _ls() -> None:
         db = await get_db()
         subscription_service = SubscriptionService(db)
+        rss_service = RSSSourceService(db)
 
         # 使用新方法获取订阅及统计数据
         feeds_with_stats = await subscription_service.list_subscriptions_with_stats(active_only=active_only)
@@ -154,6 +156,7 @@ def ls(active_only: bool) -> None:
         table.add_column("权重", style="magenta", justify="center")
         table.add_column("文章数", style="magenta", justify="right")
         table.add_column("最近文章", style="yellow")
+        table.add_column("RSS 源", style="dim")
         table.add_column("状态", style="dim")
         table.add_column("最后同步", style="dim")
 
@@ -163,6 +166,23 @@ def ls(active_only: bool) -> None:
             latest_time = latest_article_time.strftime("%Y-%m-%d") if latest_article_time else "-"
             weight_labels = {0: "[dim]低[/dim]", 5: "[yellow]中[/yellow]", 10: "[bold red]高[/bold red]"}
             weight_display = weight_labels.get(feed.weight, str(feed.weight))
+
+            # 查找关联的 RSS 源
+            from sqlalchemy import select, func
+            from src.models.schema import RSSArticleMembership, RSSSource
+            rss_sources: list[str] = []
+            async with db.get_session() as session:
+                result = await session.execute(
+                    select(RSSSource.source_name)
+                    .join(RSSArticleMembership, RSSArticleMembership.source_id == RSSSource.id)
+                    .join(Article, Article.id == RSSArticleMembership.article_id)
+                    .where(Article.feed_id == feed.id)
+                    .group_by(RSSSource.source_name)
+                    .limit(3)
+                )
+                rss_sources = [row[0] for row in result.all()]
+            rss_label = ", ".join(rss_sources) if rss_sources else "-"
+
             table.add_row(
                 str(feed.id),
                 feed.name[:20] + "..." if len(feed.name) > 20 else feed.name,
@@ -170,6 +190,7 @@ def ls(active_only: bool) -> None:
                 weight_display,
                 str(article_count),
                 latest_time,
+                rss_label,
                 status,
                 sync_time,
             )

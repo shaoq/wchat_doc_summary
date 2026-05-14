@@ -26,7 +26,7 @@ class Settings(BaseSettings):
         default="https://weread.111965.xyz",
         description="微信读书 API 基础 URL",
     )
-    article_list_provider: Literal["weread", "wechat2rss"] = Field(
+    article_list_provider: Literal["weread", "wechat2rss", "rss"] = Field(
         default="weread",
         description="文章列表 Provider",
     )
@@ -37,6 +37,25 @@ class Settings(BaseSettings):
     wechat2rss_token: str | None = Field(
         default=None,
         description="Wechat2RSS API token",
+    )
+
+    # RSS Provider 配置
+    wechat_rss_api_key: str | None = Field(
+        default=None,
+        description="微信 RSS SaaS 全局 API Key",
+    )
+    rss_content_mode: Literal["feed_only", "prefer_feed", "fetch_missing"] = Field(
+        default="prefer_feed",
+        description="RSS 内容模式: feed_only/prefer_feed/fetch_missing",
+    )
+    rss_stale_threshold_hours: int = Field(
+        default=48,
+        ge=1,
+        description="RSS 源过期阈值（小时）",
+    )
+    wechat_rss_plan_limit: int | None = Field(
+        default=None,
+        description="微信 RSS SaaS 付费计划源数量上限（仅告警）",
     )
 
     # 数据库配置

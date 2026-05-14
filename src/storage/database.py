@@ -137,6 +137,60 @@ class Database:
                 text("CREATE INDEX ix_global_market_contexts_target_a_trade_date ON global_market_contexts (target_a_trade_date)")
             )
 
+        # RSS 源相关表
+        if "rss_sources" not in existing_tables:
+            sync_conn.execute(text("""
+                CREATE TABLE rss_sources (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_name VARCHAR(128) NOT NULL UNIQUE,
+                    source_type VARCHAR(32) NOT NULL DEFAULT 'aggregate',
+                    feed_url VARCHAR(1024) NOT NULL,
+                    provider VARCHAR(64) NOT NULL DEFAULT 'rss',
+                    provider_source_id VARCHAR(255),
+                    provider_metadata TEXT,
+                    status INTEGER DEFAULT 1,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+
+        if "rss_source_health" not in existing_tables:
+            sync_conn.execute(text("""
+                CREATE TABLE rss_source_health (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_id INTEGER NOT NULL UNIQUE,
+                    last_success_at DATETIME,
+                    latest_item_time DATETIME,
+                    consecutive_failures INTEGER DEFAULT 0,
+                    empty_response_count INTEGER DEFAULT 0,
+                    last_error_summary VARCHAR(512),
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (source_id) REFERENCES rss_sources(id) ON DELETE CASCADE
+                )
+            """))
+            sync_conn.execute(
+                text("CREATE INDEX ix_rss_source_health_source_id ON rss_source_health (source_id)")
+            )
+
+        if "rss_article_membership" not in existing_tables:
+            sync_conn.execute(text("""
+                CREATE TABLE rss_article_membership (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    article_id INTEGER NOT NULL,
+                    source_id INTEGER NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT uq_rss_article_membership UNIQUE (article_id, source_id),
+                    FOREIGN KEY (article_id) REFERENCES articles(id) ON DELETE CASCADE,
+                    FOREIGN KEY (source_id) REFERENCES rss_sources(id) ON DELETE CASCADE
+                )
+            """))
+            sync_conn.execute(
+                text("CREATE INDEX ix_rss_article_membership_article_id ON rss_article_membership (article_id)")
+            )
+            sync_conn.execute(
+                text("CREATE INDEX ix_rss_article_membership_source_id ON rss_article_membership (source_id)")
+            )
+
     async def close(self) -> None:
         """关闭数据库连接。"""
         if self._engine:

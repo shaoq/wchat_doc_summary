@@ -8,6 +8,7 @@ from src.cli.subscription import fetch, info, ls, set_weight, subscribe, unsubsc
 from src.cli.system import init, version
 from src.cli.ai import ai
 from src.cli.cls_data import cls_data
+from src.cli.rss_source import rss_source
 
 
 @click.group()
@@ -32,6 +33,9 @@ main.add_command(ls)
 main.add_command(info)
 main.add_command(fetch)
 main.add_command(set_weight)
+
+# 注册 RSS 源命令组
+main.add_command(rss_source)
 
 # 注册文章命令
 main.add_command(show)

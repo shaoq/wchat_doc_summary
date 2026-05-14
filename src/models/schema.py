@@ -119,6 +119,96 @@ class Article(Base):
         return f"<Article(id={self.id}, title='{self.title[:30]}...')>"
 
 
+class RSSSource(Base):
+    """RSS 源模型 - 管理付费 WeChat RSS SaaS 的 RSS 源配置。"""
+
+    __tablename__ = "rss_sources"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source_name: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, comment="源名称")
+    source_type: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="aggregate", comment="源类型: aggregate/category",
+    )
+    feed_url: Mapped[str] = mapped_column(String(1024), nullable=False, comment="RSS Feed URL")
+    provider: Mapped[str] = mapped_column(String(64), nullable=False, default="rss", comment="Provider 标识")
+    provider_source_id: Mapped[Optional[str]] = mapped_column(
+        String(255), nullable=True, comment="Provider 侧源标识",
+    )
+    provider_metadata: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True, comment="Provider 元数据(JSON)",
+    )
+    status: Mapped[int] = mapped_column(
+        Integer, default=1, comment="状态: 0-停用, 1-启用",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), comment="创建时间",
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now(), comment="更新时间",
+    )
+
+    def __repr__(self) -> str:
+        return f"<RSSSource(id={self.id}, name='{self.source_name}', type='{self.source_type}')>"
+
+
+class RSSSourceHealth(Base):
+    """RSS 源健康状态模型。"""
+
+    __tablename__ = "rss_source_health"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("rss_sources.id", ondelete="CASCADE"),
+        nullable=False, unique=True, index=True, comment="RSS 源 ID",
+    )
+    last_success_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True, comment="最近成功抓取时间",
+    )
+    latest_item_time: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True, comment="Feed 中最新条目时间",
+    )
+    consecutive_failures: Mapped[int] = mapped_column(
+        Integer, default=0, comment="连续失败次数",
+    )
+    empty_response_count: Mapped[int] = mapped_column(
+        Integer, default=0, comment="空响应累计次数",
+    )
+    last_error_summary: Mapped[Optional[str]] = mapped_column(
+        String(512), nullable=True, comment="最近错误摘要",
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now(), comment="更新时间",
+    )
+
+    def __repr__(self) -> str:
+        return f"<RSSSourceHealth(source_id={self.source_id}, failures={self.consecutive_failures})>"
+
+
+class RSSArticleMembership(Base):
+    """RSS 文章-源成员关系模型 - 文章可属于多个 RSS 源。"""
+
+    __tablename__ = "rss_article_membership"
+    __table_args__ = (
+        UniqueConstraint("article_id", "source_id", name="uq_rss_article_membership"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    article_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("articles.id", ondelete="CASCADE"),
+        nullable=False, index=True, comment="文章 ID",
+    )
+    source_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("rss_sources.id", ondelete="CASCADE"),
+        nullable=False, index=True, comment="RSS 源 ID",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), comment="创建时间",
+    )
+
+    def __repr__(self) -> str:
+        return f"<RSSArticleMembership(article_id={self.article_id}, source_id={self.source_id})>"
+
+
 class Auth(Base):
     """认证令牌模型。"""
 
