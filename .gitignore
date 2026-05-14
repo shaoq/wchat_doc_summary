@@ -47,9 +47,10 @@ Thumbs.db
 data/*.db
 data/*.sqlite
 output/
+logs/
 
-# Claude local files
-.claude/ralph-loop.local.md
+# Claude
+.claude/
 
 # Codex
 .codex
