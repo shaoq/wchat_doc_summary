@@ -3,10 +3,11 @@
 import json
 import logging
 import re
+import time as _time
 import unicodedata
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from sqlalchemy import func as sql_func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -799,6 +800,7 @@ class SectorTrendAnalyzer:
         *,
         ai_processor: Any = None,
         force: bool = False,
+        progress_callback: Callable[[str, str], None] | None = None,
     ) -> dict[str, Any]:
         """更新单个板块趋势。
 
@@ -815,11 +817,16 @@ class SectorTrendAnalyzer:
             days: 回看窗口天数
             ai_processor: AI 处理器实例
             force: 是否强制重新生成
+            progress_callback: 进度回调 (stage_name, detail)
 
         Returns:
             更新结果
         """
         from src.services.trade_calendar import get_previous_trade_date, is_trade_day
+
+        def _emit(stage: str, detail: str = "") -> None:
+            if progress_callback is not None:
+                progress_callback(stage, detail)
 
         # 1. 确保板块为 tracked
         sector = await self._ensure_tracked(sector_name)
@@ -831,6 +838,7 @@ class SectorTrendAnalyzer:
         if not force:
             existing = await self.get_previous_summary(sector.id)
             if existing and existing.end_date == end_date:
+                _emit("skipped", "今日已更新")
                 return {
                     "action": "skipped",
                     "sector_name": sector.canonical_name,
@@ -838,6 +846,7 @@ class SectorTrendAnalyzer:
                 }
 
         # 4. 收集证据
+        _emit("evidence", "收集板块证据...")
         evidence = await self.collect_sector_evidence(
             sector.canonical_name, end_date, days,
         )
@@ -863,6 +872,7 @@ class SectorTrendAnalyzer:
                 "evidence": evidence,
             }
 
+        _emit("ai", "AI 生成板块趋势...")
         content, labels = await ai_processor.generate_sector_trend_summary(
             sector_name=sector.canonical_name,
             evidence=evidence,
@@ -872,6 +882,7 @@ class SectorTrendAnalyzer:
         )
 
         # 7. 保存
+        _emit("save", "保存板块报告...")
         summary = await self.save_trend_summary(
             sector=sector,
             end_date=end_date,

@@ -1391,6 +1391,7 @@ class AIProcessor:
         previous_summary: dict | None = None,
         end_date: str = "",
         window_days: int = 10,
+        retry_callback: Any | None = None,
     ) -> tuple[str, dict[str, str]]:
         """生成板块趋势跟踪总结。
 
@@ -1464,7 +1465,8 @@ class AIProcessor:
         # 调用 API
         logger.info("开始生成板块趋势总结: %s (%s)", sector_name, end_date)
         content = await self._call_api(
-            prompt, max_tokens=SECTOR_TREND_MAX_TOKENS, stage="sector-trend"
+            prompt, max_tokens=SECTOR_TREND_MAX_TOKENS, stage="sector-trend",
+            retry_callback=retry_callback,
         )
 
         # 提取结构化标签
@@ -1591,6 +1593,7 @@ class AIProcessor:
         member_freshness: list[dict],
         end_date: str = "",
         window_days: int = 10,
+        retry_callback: Any | None = None,
     ) -> tuple[str, dict[str, str]]:
         """生成分组趋势跟踪总结。
 
@@ -1629,7 +1632,8 @@ class AIProcessor:
 
         logger.info("开始生成分组趋势总结: %s (%s)", group_name, end_date)
         content = await self._call_api(
-            prompt, max_tokens=SECTOR_GROUP_TREND_MAX_TOKENS, stage="sector-group-trend"
+            prompt, max_tokens=SECTOR_GROUP_TREND_MAX_TOKENS, stage="sector-group-trend",
+            retry_callback=retry_callback,
         )
 
         labels = self._extract_sector_group_trend_labels(content)

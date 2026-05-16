@@ -801,11 +801,17 @@ class SectorGroupService:
 
                 _emit("member_refresh_start", member_name=member_name, stage="member_refresh")
                 try:
+                    # 桥接成员板块内部阶段事件到 GroupUpdateProgressEvent
+                    def _member_stage_cb(stage: str, detail: str) -> None:
+                        _emit("member_stage", member_name=member_name,
+                              stage=stage, action=detail)
+
                     update_result = await analyzer.update_sector_trend(
                         member_name,
                         days=days,
                         ai_processor=ai_processor,
                         force=force_refresh_members,
+                        progress_callback=_member_stage_cb,
                     )
                     refresh_results.append(update_result)
                     _emit("member_refresh_done", member_name=member_name,
@@ -847,12 +853,24 @@ class SectorGroupService:
         _emit("group_ai_start", stage="ai_summary")
         ai_start = _time.perf_counter()
         try:
+            # 桥接 AI retry 诊断事件
+            def _ai_retry_cb(diag: dict) -> None:
+                _emit("api_retry", stage="ai_summary", error=diag.get("error", ""),
+                      attempt=diag.get("attempt", 0),
+                      max_attempts=diag.get("max_attempts", 0),
+                      retry_delay=diag.get("retry_delay", 0.0),
+                      provider=diag.get("provider", ""),
+                      model=diag.get("model", ""),
+                      base_url_host=diag.get("base_url_host", ""),
+                      exception_type=diag.get("exception_type", ""))
+
             content, labels = await ai_processor.generate_sector_group_trend_summary(
                 group_name=group_canonical,
                 evidence=evidence,
                 member_freshness=member_freshness,
                 end_date=end_date.isoformat(),
                 window_days=days,
+                retry_callback=_ai_retry_cb,
             )
             _emit("group_ai_done", stage="ai_summary", elapsed=_time.perf_counter() - ai_start)
         except Exception as e:
