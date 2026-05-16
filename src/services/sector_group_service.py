@@ -2,10 +2,11 @@
 
 import json
 import logging
+import time as _time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from sqlalchemy import and_, func as sql_func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,6 +27,53 @@ from src.storage.database import Database
 logger = logging.getLogger(__name__)
 
 GROUP_OUTPUT_DIR = Path("output/sector_groups")
+
+
+# ------------------------------------------------------------------
+# 进度事件
+# ------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class GroupUpdateProgressEvent:
+    """分组更新进度事件。"""
+
+    type: str                                    # batch_start, group_start, member_refresh_start, ...
+    group_name: str = ""
+    group_index: int = 0
+    group_total: int = 0
+    stage: str = ""                              # member_refresh, evidence, ai_summary, save
+    member_name: str = ""
+    action: str = ""                             # updated, skipped, failed, ...
+    attempt: int = 0
+    max_attempts: int = 0
+    retry_delay: float = 0.0
+    error: str = ""
+    elapsed: float = 0.0
+    output_path: str = ""
+    labels: dict[str, str] = field(default_factory=dict)
+    # 安全诊断元数据（仅 verbose）
+    provider: str = ""
+    model: str = ""
+    base_url_host: str = ""
+    exception_type: str = ""
+
+    # 批量上下文（batch_start / batch_done）
+    trade_date: str = ""
+    target_count: int = 0
+    lookback_window: int = 0
+    force_mode: bool = False
+    refresh_members_mode: str = ""               # default / skip / force
+    continue_on_error: bool = True
+    # 批量汇总（batch_done）
+    success_count: int = 0
+    skipped_count: int = 0
+    failed_count: int = 0
+    member_refresh_success: int = 0
+    member_refresh_failed: int = 0
+
+
+# 进度回调类型
+ProgressCallback = Callable[[GroupUpdateProgressEvent], None]
 
 RELATION_TYPES = (
     "core", "upstream", "downstream", "material",
@@ -652,6 +700,9 @@ class SectorGroupService:
         force_refresh_members: bool = False,
         days: int = 10,
         continue_on_error: bool = True,
+        progress_callback: ProgressCallback | None = None,
+        group_index: int = 0,
+        group_total: int = 0,
     ) -> dict[str, Any]:
         """更新分组趋势。
 
@@ -663,12 +714,25 @@ class SectorGroupService:
             force_refresh_members: 强制刷新所有成员
             days: 回看窗口天数
             continue_on_error: 成员刷新失败后继续
+            progress_callback: 进度回调
+            group_index: 当前分组序号（批量时）
+            group_total: 总分组数（批量时）
 
         Returns:
             更新结果
         """
         from src.services.sector_trend_service import SectorTrendAnalyzer
         from src.services.trade_calendar import get_previous_trade_date, is_trade_day
+
+        def _emit(event_type: str, **kwargs: Any) -> None:
+            if progress_callback is not None:
+                progress_callback(GroupUpdateProgressEvent(
+                    type=event_type,
+                    group_name=group_name,
+                    group_index=group_index,
+                    group_total=group_total,
+                    **kwargs,
+                ))
 
         end_date = self._get_latest_trade_date()
 
@@ -684,6 +748,7 @@ class SectorGroupService:
         if not force:
             existing_summary = await self._get_latest_group_summary(group_id)
             if existing_summary and existing_summary.end_date == end_date:
+                _emit("group_skipped", output_path=existing_summary.output_path or "")
                 return {
                     "action": "skipped",
                     "group_name": group_canonical,
@@ -701,18 +766,25 @@ class SectorGroupService:
             analyzer = SectorTrendAnalyzer(self.db)
             for member in members:
                 sector_status = member.get("sector_status")
+                member_name = member["sector_name"]
+                refresh_start = _time.perf_counter()
+
                 if sector_status == "candidate":
                     refresh_results.append({
-                        "sector_name": member["sector_name"],
+                        "sector_name": member_name,
                         "action": "skipped_candidate",
                     })
+                    _emit("member_refresh_skip", member_name=member_name,
+                          action="skipped_candidate", elapsed=_time.perf_counter() - refresh_start)
                     continue
 
                 if sector_status not in ("tracked",):
                     refresh_results.append({
-                        "sector_name": member["sector_name"],
+                        "sector_name": member_name,
                         "action": "skipped_status",
                     })
+                    _emit("member_refresh_skip", member_name=member_name,
+                          action="skipped_status", elapsed=_time.perf_counter() - refresh_start)
                     continue
 
                 # 检查是否已有当日报告
@@ -720,31 +792,43 @@ class SectorGroupService:
                     has_today = await self._sector_has_report(member["sector_id"], end_date)
                     if has_today:
                         refresh_results.append({
-                            "sector_name": member["sector_name"],
+                            "sector_name": member_name,
                             "action": "skipped_has_report",
                         })
+                        _emit("member_refresh_skip", member_name=member_name,
+                              action="skipped_has_report", elapsed=_time.perf_counter() - refresh_start)
                         continue
 
+                _emit("member_refresh_start", member_name=member_name, stage="member_refresh")
                 try:
                     update_result = await analyzer.update_sector_trend(
-                        member["sector_name"],
+                        member_name,
                         days=days,
                         ai_processor=ai_processor,
                         force=force_refresh_members,
                     )
                     refresh_results.append(update_result)
+                    _emit("member_refresh_done", member_name=member_name,
+                          action=update_result.get("action", "updated"),
+                          elapsed=_time.perf_counter() - refresh_start)
                 except Exception as e:
-                    logger.error("刷新成员 %s 失败: %s", member["sector_name"], e)
+                    elapsed = _time.perf_counter() - refresh_start
+                    logger.error("刷新成员 %s 失败: %s", member_name, e)
                     refresh_results.append({
                         "action": "failed",
-                        "sector_name": member["sector_name"],
+                        "sector_name": member_name,
                         "error": str(e),
                     })
+                    _emit("member_refresh_failed", member_name=member_name,
+                          error=str(e), elapsed=elapsed, stage="member_refresh")
                     if not continue_on_error:
                         break
 
         # 收集组级证据
+        _emit("group_evidence_start", stage="evidence")
+        evidence_start = _time.perf_counter()
         evidence = await self._collect_group_evidence(group_id, end_date, days)
+        _emit("group_evidence_done", stage="evidence", elapsed=_time.perf_counter() - evidence_start)
 
         # 成员新鲜度
         member_freshness = await self._calculate_member_freshness(
@@ -760,13 +844,27 @@ class SectorGroupService:
                 "member_refresh_results": refresh_results,
             }
 
-        content, labels = await ai_processor.generate_sector_group_trend_summary(
-            group_name=group_canonical,
-            evidence=evidence,
-            member_freshness=member_freshness,
-            end_date=end_date.isoformat(),
-            window_days=days,
-        )
+        _emit("group_ai_start", stage="ai_summary")
+        ai_start = _time.perf_counter()
+        try:
+            content, labels = await ai_processor.generate_sector_group_trend_summary(
+                group_name=group_canonical,
+                evidence=evidence,
+                member_freshness=member_freshness,
+                end_date=end_date.isoformat(),
+                window_days=days,
+            )
+            _emit("group_ai_done", stage="ai_summary", elapsed=_time.perf_counter() - ai_start)
+        except Exception as e:
+            _emit("group_failed", stage="ai_summary", error=str(e),
+                  elapsed=_time.perf_counter() - ai_start)
+            return {
+                "action": "failed",
+                "group_name": group_canonical,
+                "stage": "ai_summary",
+                "error": str(e),
+                "member_refresh_results": refresh_results,
+            }
 
         # 保存报告
         summary = await self._save_group_trend_summary(
@@ -782,6 +880,9 @@ class SectorGroupService:
             evidence_json=json.dumps(evidence, ensure_ascii=False),
             member_freshness_json=json.dumps(member_freshness, ensure_ascii=False),
         )
+
+        _emit("group_saved", stage="save", output_path=summary.output_path or "",
+              labels={k: v for k, v in labels.items() if isinstance(v, str)})
 
         return {
             "action": "updated",
@@ -804,6 +905,7 @@ class SectorGroupService:
         days: int = 10,
         continue_on_error: bool = True,
         limit: int | None = None,
+        progress_callback: ProgressCallback | None = None,
     ) -> dict[str, Any]:
         """批量更新所有活跃分组趋势。
 
@@ -815,10 +917,13 @@ class SectorGroupService:
             days: 回看窗口天数
             continue_on_error: 错误时继续
             limit: 最大更新数量
+            progress_callback: 进度回调
 
         Returns:
             批量更新结果
         """
+        end_date = self._get_latest_trade_date()
+
         async with self.db.get_session() as session:
             query = select(SectorGroup).where(
                 SectorGroup.status == "active"
@@ -828,6 +933,29 @@ class SectorGroupService:
             result = await session.execute(query)
             groups = list(result.scalars().all())
 
+        total = len(groups)
+
+        # 确定成员刷新模式描述
+        if no_refresh_members:
+            refresh_mode = "skip"
+        elif force_refresh_members:
+            refresh_mode = "force"
+        else:
+            refresh_mode = "default"
+
+        # 发射 batch_start
+        if progress_callback is not None:
+            progress_callback(GroupUpdateProgressEvent(
+                type="batch_start",
+                trade_date=end_date.isoformat(),
+                target_count=total,
+                lookback_window=days,
+                force_mode=force,
+                refresh_members_mode=refresh_mode,
+                continue_on_error=continue_on_error,
+            ))
+
+        batch_start = _time.perf_counter()
         results: list[dict[str, Any]] = []
         success = 0
         skipped = 0
@@ -835,7 +963,17 @@ class SectorGroupService:
         member_refresh_success = 0
         member_refresh_failed = 0
 
-        for group in groups:
+        for i, group in enumerate(groups, 1):
+            # 发射 group_start
+            if progress_callback is not None:
+                progress_callback(GroupUpdateProgressEvent(
+                    type="group_start",
+                    group_name=group.canonical_name,
+                    group_index=i,
+                    group_total=total,
+                ))
+
+            group_start = _time.perf_counter()
             try:
                 update_result = await self.update_group_trend(
                     group.canonical_name,
@@ -845,6 +983,9 @@ class SectorGroupService:
                     force_refresh_members=force_refresh_members,
                     days=days,
                     continue_on_error=continue_on_error,
+                    progress_callback=progress_callback,
+                    group_index=i,
+                    group_total=total,
                 )
                 results.append(update_result)
 
@@ -863,6 +1004,24 @@ class SectorGroupService:
                     elif mr.get("action") == "failed":
                         member_refresh_failed += 1
 
+                # 发射 group 完成事件
+                if progress_callback is not None:
+                    progress_callback(GroupUpdateProgressEvent(
+                        type="group_done" if action != "failed" else "group_failed",
+                        group_name=group.canonical_name,
+                        group_index=i,
+                        group_total=total,
+                        action=action or "",
+                        elapsed=_time.perf_counter() - group_start,
+                        output_path=update_result.get("output_path", "") or "",
+                        labels={
+                            k: str(v)
+                            for k, v in update_result.items()
+                            if k in ("trend_status", "strength_level", "action_bias") and v
+                        },
+                        error=update_result.get("error", "") or "",
+                    ))
+
             except Exception as e:
                 logger.error("更新分组 %s 失败: %s", group.canonical_name, e)
                 failed += 1
@@ -871,11 +1030,36 @@ class SectorGroupService:
                     "group_name": group.canonical_name,
                     "error": str(e),
                 })
+                if progress_callback is not None:
+                    progress_callback(GroupUpdateProgressEvent(
+                        type="group_failed",
+                        group_name=group.canonical_name,
+                        group_index=i,
+                        group_total=total,
+                        action="failed",
+                        error=str(e),
+                        elapsed=_time.perf_counter() - group_start,
+                    ))
                 if not continue_on_error:
                     break
 
+        batch_elapsed = _time.perf_counter() - batch_start
+
+        # 发射 batch_done
+        if progress_callback is not None:
+            progress_callback(GroupUpdateProgressEvent(
+                type="batch_done",
+                success_count=success,
+                skipped_count=skipped,
+                failed_count=failed,
+                member_refresh_success=member_refresh_success,
+                member_refresh_failed=member_refresh_failed,
+                elapsed=batch_elapsed,
+                target_count=total,
+            ))
+
         return {
-            "total": len(groups),
+            "total": total,
             "success": success,
             "skipped": skipped,
             "failed": failed,

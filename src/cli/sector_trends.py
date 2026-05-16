@@ -1019,6 +1019,8 @@ def groups_ignore(suggestion_id: int) -> None:
 @click.option("--refresh-members", "force_refresh_members", is_flag=True, help="强制刷新所有成员")
 @click.option("--limit", type=int, default=None, help="批量更新数量限制（--all 模式）")
 @click.option("--continue-on-error", is_flag=True, default=True, help="遇到错误继续")
+@click.option("--verbose", is_flag=True, help="显示详细诊断信息")
+@click.option("--quiet", is_flag=True, help="静默模式，只显示最终汇总")
 def groups_update(
     group_name: str | None,
     update_all: bool,
@@ -1028,6 +1030,8 @@ def groups_update(
     force_refresh_members: bool,
     limit: int | None,
     continue_on_error: bool,
+    verbose: bool,
+    quiet: bool,
 ) -> None:
     """更新分组趋势。"""
     if not group_name and not update_all:
@@ -1048,10 +1052,209 @@ def groups_update(
             return
 
         if update_all:
-            console.print("[bold]批量更新分组趋势[/bold]")
-            console.print(f"  目标: tracked 分组")
-            console.print(f"  成员刷新: {'跳过' if no_refresh_members else '默认刷新缺失 tracked 成员'}")
-            console.print()
+            from src.services.sector_group_service import GroupUpdateProgressEvent
+
+            # 收集渲染所需的中间状态
+            _group_results: list[dict[str, Any]] = []
+            _failed_groups: list[dict[str, Any]] = []
+            _member_refresh_success = 0
+            _member_refresh_failed = 0
+
+            def _render_event(event: GroupUpdateProgressEvent) -> None:
+                nonlocal _member_refresh_success, _member_refresh_failed
+
+                if event.type == "batch_start":
+                    if not quiet:
+                        console.print("[bold]批量更新分组趋势[/bold]")
+                        console.print(f"  交易日: {event.trade_date}")
+                        console.print(f"  目标: {event.target_count} 个 active 分组")
+                        console.print(f"  回看窗口: {event.lookback_window} 天")
+                        if event.force_mode:
+                            console.print(f"  强制模式: 是")
+                        refresh_label = {
+                            "skip": "跳过成员刷新",
+                            "force": "强制刷新所有成员",
+                            "default": "默认刷新缺失 tracked 成员",
+                        }.get(event.refresh_members_mode, event.refresh_members_mode)
+                        console.print(f"  成员刷新: {refresh_label}")
+                        console.print()
+                    return
+
+                if event.type == "group_start":
+                    if not quiet:
+                        console.print(
+                            f"[bold cyan][{event.group_index}/{event.group_total}] "
+                            f"{event.group_name}[/bold cyan]"
+                        )
+                    return
+
+                if event.type == "member_refresh_start":
+                    if verbose and not quiet:
+                        console.print(f"  刷新成员: {event.member_name}...")
+                    return
+
+                if event.type == "member_refresh_skip":
+                    if verbose and not quiet:
+                        skip_reasons = {
+                            "skipped_candidate": "candidate 跳过",
+                            "skipped_status": "非 tracked 跳过",
+                            "skipped_has_report": "今日已更新",
+                        }
+                        reason = skip_reasons.get(event.action, event.action)
+                        console.print(f"  [dim]~ {event.member_name}: {reason}[/dim]")
+                    return
+
+                if event.type == "member_refresh_done":
+                    if event.action == "updated":
+                        _member_refresh_success += 1
+                    if verbose and not quiet:
+                        console.print(
+                            f"  [green]v[/green] {event.member_name}: 已更新"
+                            f" [dim]({format_elapsed_time(event.elapsed)})[/dim]"
+                        )
+                    return
+
+                if event.type == "member_refresh_failed":
+                    _member_refresh_failed += 1
+                    if not quiet:
+                        console.print(
+                            f"  [red]x[/red] {event.member_name}: {event.error[:80]}"
+                            f" [dim]({format_elapsed_time(event.elapsed)})[/dim]"
+                        )
+                    return
+
+                if event.type == "group_ai_start":
+                    if not quiet:
+                        console.print(f"  生成组级总结: AI 生成中...")
+                    return
+
+                if event.type == "group_evidence_start":
+                    if verbose and not quiet:
+                        console.print(f"  收集分组证据...")
+                    return
+
+                if event.type == "group_saved" or event.type == "group_done":
+                    _group_results.append({
+                        "action": event.action,
+                        "group_name": event.group_name,
+                        "output_path": event.output_path,
+                        "labels": event.labels,
+                        "elapsed": event.elapsed,
+                    })
+                    if not quiet:
+                        action_map = {
+                            "updated": ("[green]v 已更新[/green]", "已更新"),
+                            "skipped": ("[yellow]~ 已跳过[/yellow]", "已跳过"),
+                        }
+                        styled, plain = action_map.get(event.action, (event.action, event.action))
+                        label_str = ""
+                        if event.labels.get("trend_status"):
+                            label_str = f" | 状态: {event.labels['trend_status']}"
+                        output_str = ""
+                        if event.output_path:
+                            output_str = f" | 报告: {event.output_path}"
+                        console.print(
+                            f"  {styled}{label_str}{output_str}"
+                            f" [dim]({format_elapsed_time(event.elapsed)})[/dim]"
+                        )
+                    return
+
+                if event.type == "group_skipped":
+                    _group_results.append({
+                        "action": "skipped",
+                        "group_name": event.group_name,
+                        "output_path": event.output_path,
+                        "elapsed": 0.0,
+                        "labels": {},
+                    })
+                    if not quiet:
+                        console.print(
+                            f"  [yellow]~ 已跳过[/yellow] - 今日已更新"
+                            + (f" | 报告: {event.output_path}" if event.output_path else "")
+                        )
+                    return
+
+                if event.type == "group_failed":
+                    _failed_groups.append({
+                        "group_name": event.group_name,
+                        "error": event.error,
+                        "action": event.action,
+                    })
+                    _group_results.append({
+                        "action": "failed",
+                        "group_name": event.group_name,
+                        "error": event.error,
+                        "elapsed": event.elapsed,
+                        "labels": {},
+                    })
+                    if not quiet:
+                        console.print(
+                            f"  [red]x 失败[/red]: {event.error[:80]}"
+                            f" [dim]({format_elapsed_time(event.elapsed)})[/dim]"
+                        )
+                    return
+
+                if event.type == "batch_done":
+                    if not quiet:
+                        console.print()
+                        console.print("[bold]批量更新完成[/bold]")
+                        console.print(f"  成功: [green]{event.success_count}[/green]")
+                        console.print(f"  跳过: [yellow]{event.skipped_count}[/yellow]")
+                        console.print(f"  失败: [red]{event.failed_count}[/red]")
+                    else:
+                        # quiet 模式：只输出一行汇总
+                        parts = [
+                            f"success={event.success_count}",
+                            f"skipped={event.skipped_count}",
+                            f"failed={event.failed_count}",
+                        ]
+                        if not no_refresh_members:
+                            parts.append(f"member_refresh_failed={event.member_refresh_failed}")
+                        console.print(" ".join(parts))
+
+                    if not no_refresh_members and not quiet:
+                        console.print(
+                            f"  成员刷新成功: [green]{event.member_refresh_success}[/green]"
+                        )
+                        if event.member_refresh_failed > 0:
+                            console.print(
+                                f"  成员刷新失败: [red]{event.member_refresh_failed}[/red]"
+                            )
+
+                    # 失败详情和重试建议
+                    if _failed_groups:
+                        if not quiet:
+                            console.print()
+                            console.print("[bold red]失败详情:[/bold red]")
+                        for fg in _failed_groups:
+                            error_summary = fg.get("error", "未知错误")[:60]
+                            if quiet:
+                                console.print(f"failed: {fg['group_name']} / {error_summary}")
+                            else:
+                                console.print(f"  {fg['group_name']}: {error_summary}")
+
+                        # 重试建议
+                        if not quiet:
+                            console.print()
+                            console.print("[bold]可重试:[/bold]")
+                            for fg in _failed_groups:
+                                gname = fg["group_name"]
+                                stage = fg.get("action", "")
+                                if stage == "failed" and "member_refresh" in fg.get("error", "").lower():
+                                    console.print(
+                                        f"  wchat ai sector-trends groups update "
+                                        f"--group {gname} --no-refresh-members --force"
+                                    )
+                                else:
+                                    console.print(
+                                        f"  wchat ai sector-trends groups update "
+                                        f"--group {gname} --force"
+                                    )
+
+                    if not quiet:
+                        console.print()
+                        console.print(f"[dim]总耗时: {format_elapsed_time(event.elapsed)}[/dim]")
+                    return
 
             result = await service.update_all_group_trends(
                 ai_processor=ai_processor,
@@ -1061,47 +1264,8 @@ def groups_update(
                 days=days,
                 continue_on_error=continue_on_error,
                 limit=limit,
+                progress_callback=_render_event,
             )
-
-            console.print(f"\n[bold]批量更新完成[/bold]")
-            console.print(f"  成功: [green]{result['success']}[/green]")
-            console.print(f"  跳过: [yellow]{result['skipped']}[/yellow]")
-            console.print(f"  失败: [red]{result['failed']}[/red]")
-            if not no_refresh_members:
-                console.print(f"  成员刷新成功: [green]{result['member_refresh_success']}[/green]")
-                console.print(f"  成员刷新失败: [red]{result['member_refresh_failed']}[/red]")
-
-            if result.get("results"):
-                table = Table(title="更新详情")
-                table.add_column("分组", style="cyan")
-                table.add_column("状态", style="green")
-                table.add_column("成员刷新", style="blue")
-                table.add_column("报告", style="dim")
-
-                for r in result["results"]:
-                    action = r.get("action", "unknown")
-                    if action == "updated":
-                        status_text = "[green]已更新[/green]"
-                    elif action == "skipped":
-                        status_text = "[yellow]已跳过[/yellow]"
-                    elif action == "failed":
-                        status_text = f"[red]失败[/red]"
-                    else:
-                        status_text = action
-
-                    refresh_results = r.get("member_refresh_results", [])
-                    refreshed = sum(1 for mr in refresh_results if mr.get("action") == "updated")
-                    total_mr = len(refresh_results)
-                    refresh_text = f"{refreshed}/{total_mr}" if total_mr > 0 else "-"
-
-                    table.add_row(
-                        r.get("group_name", "-"),
-                        status_text,
-                        refresh_text,
-                        r.get("output_path") or "-",
-                    )
-
-                console.print(table)
             return
 
         # 单分组更新 - 阶段式输出

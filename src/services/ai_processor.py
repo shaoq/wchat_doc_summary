@@ -5,6 +5,7 @@ import logging
 import re
 from collections import Counter
 from collections.abc import Callable
+from typing import Any
 from pathlib import Path
 
 from anthropic import AsyncAnthropic
@@ -565,7 +566,8 @@ class AIProcessor:
         return "'1301'" in error_str or "敏感内容" in error_str or "不安全" in error_str
 
     async def _call_api(
-        self, prompt: str, max_tokens: int = 500, *, stage: str = ""
+        self, prompt: str, max_tokens: int = 500, *, stage: str = "",
+        retry_callback: Any | None = None,
     ) -> str:
         """调用 LLM API。
 
@@ -576,10 +578,23 @@ class AIProcessor:
             max_tokens: 最大 token 数
             stage: 调用阶段标识（如 "initial-summary"、"strategy-enhancement"），
                    用于日志中区分失败来源
+            retry_callback: 重试事件回调（接收 dict）
 
         Returns:
             LLM 响应文本
         """
+        def _safe_base_url_host() -> str:
+            """提取 base_url 的 host 部分（不暴露完整 URL）。"""
+            base_url = self.settings.llm_base_url or ""
+            if not base_url:
+                return ""
+            try:
+                from urllib.parse import urlparse
+                parsed = urlparse(base_url)
+                return parsed.hostname or ""
+            except Exception:
+                return ""
+
         async with self._request_semaphore:
             await asyncio.sleep(self._request_interval)
 
@@ -629,6 +644,20 @@ class AIProcessor:
                             wait_time,
                             e,
                         )
+                        # 发送安全重试诊断
+                        if retry_callback is not None:
+                            retry_callback({
+                                "type": "api_retry",
+                                "stage": stage,
+                                "attempt": attempt + 1,
+                                "max_attempts": self.settings.max_retries + 1,
+                                "retry_delay": wait_time,
+                                "error": str(e)[:200],
+                                "provider": "anthropic",
+                                "model": self.model,
+                                "base_url_host": _safe_base_url_host(),
+                                "exception_type": type(e).__name__,
+                            })
                         await asyncio.sleep(wait_time)
                     else:
                         logger.error("API 调用最终失败%s: %s", stage_label, e)
