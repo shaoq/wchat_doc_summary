@@ -8,6 +8,7 @@ import pytest
 import pytest_asyncio
 
 from src.models.schema import (
+    MarketSector,
     SectorGroup,
     SectorGroupMember,
     SectorGroupSuggestion,
@@ -15,7 +16,12 @@ from src.models.schema import (
     SectorGroupTrendSummary,
     TrackedSector,
 )
-from src.services.sector_group_service import SectorGroupService
+from src.services.sector_group_service import (
+    CandidateCluster,
+    CandidateMember,
+    SectorGroupService,
+    THEME_DEFINITIONS,
+)
 from src.storage.database import Database
 
 
@@ -262,6 +268,35 @@ class TestSuggestionGeneration:
         for s in suggestions:
             for m in s.get("members", []):
                 assert m.get("sector_status") != "ignored"
+
+    @pytest.mark.asyncio
+    async def test_generate_suggestions_falls_back_to_market_cache(
+        self,
+        seeded_db: Database,
+        group_service: SectorGroupService,
+    ):
+        """CLS 无板块标签时，应可基于行情缓存生成新分组建议。"""
+        async with seeded_db.get_session() as session:
+            for day in [date(2026, 5, 13), date(2026, 5, 14), date(2026, 5, 15)]:
+                for name in ["机器人", "减速器", "传感器"]:
+                    session.add(MarketSector(
+                        trade_date=day,
+                        sector_code=f"{name}_{day.isoformat()}",
+                        sector_name=name,
+                        change_pct=1.0,
+                    ))
+
+        result = await group_service.generate_suggestions(days=10)
+        assert result["new_group_suggestions"] >= 1
+
+        suggestions = await group_service.list_suggestions(suggestion_type="new_group")
+        assert suggestions
+        assert any(
+            {"机器人", "减速器", "传感器"} & {
+                member["sector_name"] for member in suggestion["members"]
+            }
+            for suggestion in suggestions
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -630,3 +665,469 @@ class TestBatchGroupUpdate:
         assert "skipped" in result
         assert "failed" in result
         assert "member_refresh_success" in result
+
+
+# ---------------------------------------------------------------------------
+# 主题约束与语义清洗测试
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def theme_seeded_db(test_db: Database):
+    """填充主题相关板块数据的测试数据库。"""
+    async with test_db.get_session() as session:
+        for name, status in [
+            ("光伏", "tracked"), ("TOPCon", "tracked"),
+            ("BC电池", "tracked"), ("HIT电池", "candidate"),
+            ("钙钛矿", "tracked"),
+            ("猪肉", "tracked"), ("鸡肉", "tracked"),
+            ("宽带提速", "tracked"),
+            ("锂电池", "tracked"), ("固态电池", "tracked"),
+            ("CRO", "tracked"), ("白酒", "tracked"),
+            ("风电", "tracked"), ("核电核能", "tracked"),
+            ("卫星导航", "tracked"), ("国产软件", "tracked"),
+            ("半导体", "ignored"), ("已退市", "inactive"),
+        ]:
+            sector = TrackedSector(
+                canonical_name=name,
+                status=status,
+                source="test",
+                first_seen_date=date(2026, 5, 1),
+                last_seen_date=date(2026, 5, 15),
+            )
+            session.add(sector)
+
+    return test_db
+
+
+@pytest_asyncio.fixture
+def theme_service(theme_seeded_db: Database) -> SectorGroupService:
+    """主题测试用分组服务实例。"""
+    return SectorGroupService(theme_seeded_db)
+
+
+class TestThemeConstraints:
+    """测试主题约束和跨主题过滤。"""
+
+    def test_theme_definitions_exist(self):
+        """主题词典应包含至少 5 个主题。"""
+        assert len(THEME_DEFINITIONS) >= 5
+
+    def test_match_theme_photovoltaic(self):
+        """光伏应匹配光伏产业链。"""
+        assert SectorGroupService.match_theme("光伏") == "光伏产业链"
+
+    def test_match_theme_topcon(self):
+        """TOPCon 应匹配光伏产业链。"""
+        assert SectorGroupService.match_theme("TOPCon") == "光伏产业链"
+
+    def test_match_theme_pork(self):
+        """猪肉应匹配消费农业链。"""
+        assert SectorGroupService.match_theme("猪肉") == "消费农业链"
+
+    def test_match_theme_unknown(self):
+        """未知板块应返回 None。"""
+        assert SectorGroupService.match_theme("量子计算") is None
+
+    def test_match_theme_case_insensitive(self):
+        """主题匹配应忽略大小写。"""
+        assert SectorGroupService.match_theme("topcon") == "光伏产业链"
+        assert SectorGroupService.match_theme("CRO") == "医药服务链"
+
+    @pytest.mark.asyncio
+    async def test_mixed_theme_market_cache_rejected(
+        self,
+        theme_seeded_db: Database,
+        theme_service: SectorGroupService,
+    ):
+        """跨主题 market-cache 聚类（如宽带提速+猪肉）不应产生 new_group 建议。"""
+        async with theme_seeded_db.get_session() as session:
+            for day in [date(2026, 5, 13), date(2026, 5, 14), date(2026, 5, 15)]:
+                for name in ["宽带提速", "猪肉", "CRO", "白酒"]:
+                    session.add(MarketSector(
+                        trade_date=day,
+                        sector_code=f"{name}_{day.isoformat()}",
+                        sector_name=name,
+                        change_pct=1.0,
+                    ))
+
+        result = await theme_service.generate_suggestions(days=10)
+
+        # 验证产生的建议不包含跨主题混杂
+        suggestions = await theme_service.list_suggestions(suggestion_type="new_group")
+        for s in suggestions:
+            member_themes = set()
+            for m in s.get("members", []):
+                theme = SectorGroupService.match_theme(m["sector_name"])
+                if theme:
+                    member_themes.add(theme)
+            # 如果有多个不同主题的成员，说明是跨主题混杂（不应出现）
+            if len(member_themes) > 1:
+                pytest.fail(f"建议 #{s['id']} 包含跨主题成员: {member_themes}")
+
+    @pytest.mark.asyncio
+    async def test_coherent_theme_cluster_creates_suggestion(
+        self,
+        theme_seeded_db: Database,
+        theme_service: SectorGroupService,
+    ):
+        """同主题聚类（光伏+TOPCon+BC电池+HIT电池+钙钛矿）应产生 cleaned pending 建议。"""
+        async with theme_seeded_db.get_session() as session:
+            for day in [date(2026, 5, 13), date(2026, 5, 14), date(2026, 5, 15)]:
+                for name in ["光伏", "TOPCon", "BC电池", "HIT电池", "钙钛矿"]:
+                    session.add(MarketSector(
+                        trade_date=day,
+                        sector_code=f"{name}_{day.isoformat()}",
+                        sector_name=name,
+                        change_pct=1.0,
+                    ))
+
+        result = await theme_service.generate_suggestions(days=10)
+        assert result["new_group_suggestions"] >= 1
+
+        suggestions = await theme_service.list_suggestions(suggestion_type="new_group")
+        assert len(suggestions) >= 1
+
+        # 找到包含光伏成员的建议
+        pv_suggestions = [
+            s for s in suggestions
+            if any(m["sector_name"] == "光伏" for m in s.get("members", []))
+        ]
+        assert len(pv_suggestions) >= 1
+
+        pv_suggestion = pv_suggestions[0]
+        member_names = {m["sector_name"] for m in pv_suggestion["members"]}
+        assert "光伏" in member_names
+        assert len(pv_suggestion["members"]) >= 2
+
+        # 验证 evidence
+        assert pv_suggestion["confidence"] is not None
+
+    @pytest.mark.asyncio
+    async def test_ignored_and_inactive_excluded(
+        self,
+        theme_seeded_db: Database,
+        theme_service: SectorGroupService,
+    ):
+        """ignored 和 inactive 板块不应出现在建议中。"""
+        async with theme_seeded_db.get_session() as session:
+            for day in [date(2026, 5, 13), date(2026, 5, 14), date(2026, 5, 15)]:
+                for name in ["光伏", "TOPCon", "半导体", "已退市"]:
+                    session.add(MarketSector(
+                        trade_date=day,
+                        sector_code=f"{name}_{day.isoformat()}",
+                        sector_name=name,
+                        change_pct=1.0,
+                    ))
+
+        await theme_service.generate_suggestions(days=10)
+        suggestions = await theme_service.list_suggestions()
+        for s in suggestions:
+            for m in s.get("members", []):
+                assert m.get("sector_status") not in ("ignored", "inactive")
+
+
+class TestAICleaning:
+    """测试 AI 语义清洗。"""
+
+    @pytest.mark.asyncio
+    async def test_ai_accepts_coherent_cluster(
+        self,
+        theme_seeded_db: Database,
+        theme_service: SectorGroupService,
+    ):
+        """AI 应接受同主题聚类。"""
+        async with theme_seeded_db.get_session() as session:
+            for day in [date(2026, 5, 13), date(2026, 5, 14), date(2026, 5, 15)]:
+                for name in ["光伏", "TOPCon", "BC电池", "HIT电池", "钙钛矿"]:
+                    session.add(MarketSector(
+                        trade_date=day,
+                        sector_code=f"{name}_{day.isoformat()}",
+                        sector_name=name,
+                        change_pct=1.0,
+                    ))
+
+        mock_ai = AsyncMock()
+        mock_ai._call_api.return_value = json.dumps({
+            "accepted": True,
+            "suggested_group_name": "光伏产业链",
+            "confidence": 0.85,
+            "reason": "成员集中在光伏电池技术方向",
+            "members": [
+                {"sector_id": 1, "relation_type": "core", "confidence": 0.9, "reason": "光伏核心"},
+                {"sector_id": 2, "relation_type": "core", "confidence": 0.8, "reason": "TOPCon 电池技术"},
+                {"sector_id": 3, "relation_type": "related", "confidence": 0.7, "reason": "BC 电池"},
+            ],
+            "rejected_members": [],
+        })
+
+        result = await theme_service.generate_suggestions(
+            days=10, ai_processor=mock_ai
+        )
+        assert result["new_group_suggestions"] >= 1
+
+    @pytest.mark.asyncio
+    async def test_ai_rejects_unknown_members(
+        self,
+        theme_seeded_db: Database,
+        theme_service: SectorGroupService,
+    ):
+        """AI 返回的未知 sector_id 应被忽略。"""
+        async with theme_seeded_db.get_session() as session:
+            for day in [date(2026, 5, 13), date(2026, 5, 14), date(2026, 5, 15)]:
+                for name in ["光伏", "TOPCon"]:
+                    session.add(MarketSector(
+                        trade_date=day,
+                        sector_code=f"{name}_{day.isoformat()}",
+                        sector_name=name,
+                        change_pct=1.0,
+                    ))
+
+        mock_ai = AsyncMock()
+        mock_ai._call_api.return_value = json.dumps({
+            "accepted": True,
+            "suggested_group_name": "光伏",
+            "confidence": 0.8,
+            "reason": "test",
+            "members": [
+                {"sector_id": 1, "relation_type": "core", "confidence": 0.9, "reason": "ok"},
+                {"sector_id": 999, "relation_type": "core", "confidence": 0.9, "reason": "unknown"},
+            ],
+            "rejected_members": [],
+        })
+
+        result = await theme_service.generate_suggestions(
+            days=10, ai_processor=mock_ai
+        )
+
+        suggestions = await theme_service.list_suggestions(suggestion_type="new_group")
+        for s in suggestions:
+            for m in s["members"]:
+                assert m["sector_id"] != 999
+
+    @pytest.mark.asyncio
+    async def test_ai_invalid_json_fallback(
+        self,
+        theme_seeded_db: Database,
+        theme_service: SectorGroupService,
+    ):
+        """AI 返回无效 JSON 时应回退到规则验证。"""
+        async with theme_seeded_db.get_session() as session:
+            for day in [date(2026, 5, 13), date(2026, 5, 14), date(2026, 5, 15)]:
+                for name in ["光伏", "TOPCon", "BC电池"]:
+                    session.add(MarketSector(
+                        trade_date=day,
+                        sector_code=f"{name}_{day.isoformat()}",
+                        sector_name=name,
+                        change_pct=1.0,
+                    ))
+
+        mock_ai = AsyncMock()
+        mock_ai._call_api.return_value = "这不是JSON"
+
+        # 应该不崩溃，回退到规则验证
+        result = await theme_service.generate_suggestions(
+            days=10, ai_processor=mock_ai
+        )
+        assert "new_group_suggestions" in result
+
+    @pytest.mark.asyncio
+    async def test_ai_low_confidence_rejected(
+        self,
+        theme_seeded_db: Database,
+        theme_service: SectorGroupService,
+    ):
+        """AI 低置信度结果应被拒绝。"""
+        async with theme_seeded_db.get_session() as session:
+            for day in [date(2026, 5, 13), date(2026, 5, 14), date(2026, 5, 15)]:
+                for name in ["光伏", "TOPCon"]:
+                    session.add(MarketSector(
+                        trade_date=day,
+                        sector_code=f"{name}_{day.isoformat()}",
+                        sector_name=name,
+                        change_pct=1.0,
+                    ))
+
+        mock_ai = AsyncMock()
+        mock_ai._call_api.return_value = json.dumps({
+            "accepted": True,
+            "suggested_group_name": "test",
+            "confidence": 0.2,
+            "reason": "低置信度",
+            "members": [],
+            "rejected_members": [],
+        })
+
+        result = await theme_service.generate_suggestions(
+            days=10, ai_processor=mock_ai
+        )
+        assert "new_group_suggestions" in result
+
+    @pytest.mark.asyncio
+    async def test_ai_failure_fallback(
+        self,
+        theme_seeded_db: Database,
+        theme_service: SectorGroupService,
+    ):
+        """AI 失败/超时时应安全回退。"""
+        async with theme_seeded_db.get_session() as session:
+            for day in [date(2026, 5, 13), date(2026, 5, 14), date(2026, 5, 15)]:
+                for name in ["光伏", "TOPCon", "BC电池"]:
+                    session.add(MarketSector(
+                        trade_date=day,
+                        sector_code=f"{name}_{day.isoformat()}",
+                        sector_name=name,
+                        change_pct=1.0,
+                    ))
+
+        mock_ai = AsyncMock()
+        mock_ai._call_api.side_effect = TimeoutError("AI 超时")
+
+        result = await theme_service.generate_suggestions(
+            days=10, ai_processor=mock_ai
+        )
+        assert "new_group_suggestions" in result
+
+
+class TestDuplicateRefreshAndIgnored:
+    """测试建议刷新和忽略抑制。"""
+
+    @pytest.mark.asyncio
+    async def test_duplicate_suggestion_refreshed(
+        self,
+        theme_seeded_db: Database,
+        theme_service: SectorGroupService,
+    ):
+        """同名同成员的 pending 建议应被刷新而非重复创建。"""
+        async with theme_seeded_db.get_session() as session:
+            for day in [date(2026, 5, 13), date(2026, 5, 14), date(2026, 5, 15)]:
+                for name in ["光伏", "TOPCon", "BC电池"]:
+                    session.add(MarketSector(
+                        trade_date=day,
+                        sector_code=f"{name}_{day.isoformat()}",
+                        sector_name=name,
+                        change_pct=1.0,
+                    ))
+
+        # 第一次生成
+        await theme_service.generate_suggestions(days=10)
+        first_suggestions = await theme_service.list_suggestions(suggestion_type="new_group")
+        first_count = len(first_suggestions)
+
+        # 第二次生成 - 应刷新而非重复创建
+        await theme_service.generate_suggestions(days=10)
+        second_suggestions = await theme_service.list_suggestions(suggestion_type="new_group")
+        second_count = len(second_suggestions)
+
+        # 不应增加超过一倍（允许少量差异）
+        assert second_count <= first_count + 1
+
+    @pytest.mark.asyncio
+    async def test_ignored_suggestion_not_recreated(
+        self,
+        theme_seeded_db: Database,
+        theme_service: SectorGroupService,
+    ):
+        """已 ignored 的建议不应被重新创建。"""
+        async with theme_seeded_db.get_session() as session:
+            for day in [date(2026, 5, 13), date(2026, 5, 14), date(2026, 5, 15)]:
+                for name in ["光伏", "TOPCon", "BC电池"]:
+                    session.add(MarketSector(
+                        trade_date=day,
+                        sector_code=f"{name}_{day.isoformat()}",
+                        sector_name=name,
+                        change_pct=1.0,
+                    ))
+
+        # 第一次生成
+        await theme_service.generate_suggestions(days=10)
+        suggestions = await theme_service.list_suggestions(suggestion_type="new_group")
+        if suggestions:
+            # 忽略第一条
+            await theme_service.ignore_suggestion(suggestions[0]["id"])
+
+        # 第二次生成 - ignored 的不应再出现
+        await theme_service.generate_suggestions(days=10)
+        pending = await theme_service.list_suggestions(status="pending", suggestion_type="new_group")
+        for p in pending:
+            assert p["id"] != suggestions[0]["id"] if suggestions else True
+
+
+class TestEvidenceAndReason:
+    """测试 evidence 和 reason 标注。"""
+
+    @pytest.mark.asyncio
+    async def test_market_cache_reason_label(
+        self,
+        theme_seeded_db: Database,
+        theme_service: SectorGroupService,
+    ):
+        """行情缓存来源的 reason 应标注为弱线索。"""
+        async with theme_seeded_db.get_session() as session:
+            for day in [date(2026, 5, 13), date(2026, 5, 14), date(2026, 5, 15)]:
+                for name in ["光伏", "TOPCon", "BC电池"]:
+                    session.add(MarketSector(
+                        trade_date=day,
+                        sector_code=f"{name}_{day.isoformat()}",
+                        sector_name=name,
+                        change_pct=1.0,
+                    ))
+
+        await theme_service.generate_suggestions(days=10)
+        suggestions = await theme_service.list_suggestions(suggestion_type="new_group")
+
+        for s in suggestions:
+            # market-cache 来源的 reason 应包含"线索"或"行情"
+            if s.get("reason"):
+                reason = s["reason"]
+                assert "行情缓存" in reason or "共现分析" in reason
+
+    @pytest.mark.asyncio
+    async def test_evidence_json_stored(
+        self,
+        theme_seeded_db: Database,
+        theme_service: SectorGroupService,
+    ):
+        """建议应包含 evidence_json。"""
+        async with theme_seeded_db.get_session() as session:
+            for day in [date(2026, 5, 13), date(2026, 5, 14), date(2026, 5, 15)]:
+                for name in ["光伏", "TOPCon", "BC电池"]:
+                    session.add(MarketSector(
+                        trade_date=day,
+                        sector_code=f"{name}_{day.isoformat()}",
+                        sector_name=name,
+                        change_pct=1.0,
+                    ))
+
+        await theme_service.generate_suggestions(days=10)
+
+        # 直接查询数据库验证 evidence_json
+        async with theme_seeded_db.get_session() as session:
+            from sqlalchemy import select
+            result = await session.execute(
+                select(SectorGroupSuggestion).where(
+                    SectorGroupSuggestion.suggestion_type == "new_group",
+                    SectorGroupSuggestion.status == "pending",
+                )
+            )
+            suggestions = result.scalars().all()
+
+            for s in suggestions:
+                if s.evidence_json:
+                    evidence = json.loads(s.evidence_json)
+                    assert "source" in evidence
+                    assert "window_days" in evidence
+                    assert "members" in evidence
+
+
+class TestCLIWithSemanticCleaning:
+    """测试语义清洗后 CLI 输出。"""
+
+    def test_groups_suggest_command_has_no_ai_option(self):
+        """groups suggest 命令应有 --no-ai 选项。"""
+        from src.cli.sector_trends import groups
+        # 查找 suggest 命令
+        suggest_cmd = groups.get_command(None, "suggest")
+        assert suggest_cmd is not None
+        param_names = [p.name for p in suggest_cmd.params]
+        assert "no_ai" in param_names

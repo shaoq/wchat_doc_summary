@@ -1,5 +1,6 @@
 """板块趋势 CLI 命令模块 - sector-trends 子命令组。"""
 
+import json
 import time
 
 import click
@@ -565,7 +566,8 @@ def groups_add(group_name: str, sector_name: str, relation_type: str) -> None:
 
 @groups.command("suggest")
 @click.option("--days", type=int, default=10, help="回看天数（默认 10）")
-def groups_suggest(days: int) -> None:
+@click.option("--no-ai", is_flag=True, default=False, help="禁用 AI 语义清洗")
+def groups_suggest(days: int, no_ai: bool) -> None:
     """生成分组建议。"""
     async def _suggest() -> None:
         from src.services.sector_group_service import SectorGroupService
@@ -573,8 +575,16 @@ def groups_suggest(days: int) -> None:
         db = await get_db()
         service = SectorGroupService(db)
 
+        ai_processor = None
+        if not no_ai:
+            try:
+                from src.services.ai_processor import AIProcessor
+                ai_processor = AIProcessor(db)
+            except Exception:
+                pass
+
         with console.status("[bold blue]生成分组建议中...[/bold blue]"):
-            result = await service.generate_suggestions(days=days)
+            result = await service.generate_suggestions(days=days, ai_processor=ai_processor)
 
         console.print(f"[green]建议生成完成[/green]")
         console.print(f"  新建分组建议: {result['new_group_suggestions']} 个")
@@ -649,7 +659,47 @@ def groups_suggestions(status: str, suggestion_type: str | None, group_name: str
                         "candidate": "[yellow]candidate[/yellow]",
                         "inactive": "[dim]inactive[/dim]",
                     }.get(m.get("sector_status", ""), m.get("sector_status", ""))
-                    console.print(f"  {m['sector_name']} ({status_label}) -> {m.get('suggested_relation_type', 'related')}")
+                    confidence_str = f" ({m.get('confidence', 0):.2f})" if m.get("confidence") else ""
+                    console.print(f"  {m['sector_name']} ({status_label}) -> {m.get('suggested_relation_type', 'related')}{confidence_str}")
+
+            # 显示证据摘要
+            evidence_raw = None
+            async def _load_evidence(suggestion_id: int) -> str | None:
+                from src.services.sector_group_service import SectorGroupService
+                db = await get_db()
+                service = SectorGroupService(db)
+                async with service.db.get_session() as session:
+                    from sqlalchemy import select
+                    from src.models.schema import SectorGroupSuggestion
+                    result = await session.execute(
+                        select(SectorGroupSuggestion.evidence_json).where(
+                            SectorGroupSuggestion.id == suggestion_id
+                        )
+                    )
+                    return result.scalar_one_or_none()
+
+            evidence_raw = await _load_evidence(s["id"])
+            if evidence_raw:
+                try:
+                    evidence = json.loads(evidence_raw)
+                    source = evidence.get("source", "")
+                    theme = evidence.get("theme_name")
+                    ai_cleaned = evidence.get("ai_cleaned", False)
+                    parts = []
+                    if source:
+                        source_label = "行情缓存线索" if source == "market_cache" else "CLS 看盘"
+                        parts.append(f"来源: {source_label}")
+                    if theme:
+                        parts.append(f"主题: {theme}")
+                    if ai_cleaned:
+                        parts.append("已 AI 清洗")
+                    rejected = evidence.get("rejected_members", [])
+                    if rejected:
+                        parts.append(f"被剔除: {len(rejected)} 个")
+                    if parts:
+                        console.print(f"  [dim]{' | '.join(parts)}[/dim]")
+                except (json.JSONDecodeError, TypeError):
+                    pass
 
     run_async(_suggestions())
 

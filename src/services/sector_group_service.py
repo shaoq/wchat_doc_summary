@@ -2,6 +2,7 @@
 
 import json
 import logging
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
@@ -10,6 +11,7 @@ from sqlalchemy import and_, func as sql_func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models.schema import (
+    MarketSector,
     SectorGroup,
     SectorGroupMember,
     SectorGroupSuggestion,
@@ -32,6 +34,56 @@ RELATION_TYPES = (
 
 SUGGESTION_TYPES = ("new_group", "add_members", "update_members")
 SUGGESTION_STATUSES = ("pending", "accepted", "ignored", "expired")
+
+# ------------------------------------------------------------------
+# 建议生成流水线数据类型
+# ------------------------------------------------------------------
+
+THEME_DEFINITIONS: dict[str, list[str]] = {
+    "光伏产业链": ["光伏", "TOPCon", "BC电池", "HIT电池", "钙钛矿", "HJT电池"],
+    "锂电储能链": ["锂电池", "固态电池", "钠电池", "电解液", "盐湖提锂", "锂矿", "充电桩"],
+    "军工信息链": ["卫星导航", "军工航天", "海工装备", "大飞机", "军民融合", "国产软件", "信息安全"],
+    "医药服务链": ["CRO", "CXO", "仿制药", "生物疫苗", "甲型流感", "基因测序"],
+    "消费农业链": ["猪肉", "鸡肉", "白酒", "水产品"],
+    "新能源电力链": ["风电", "风能", "核电核能", "地热能", "钒电池", "碳交易"],
+}
+
+# 构建 comparison_key → theme_name 索引
+_THEME_KEY_INDEX: dict[str, str] = {}
+for _theme_name, _members in THEME_DEFINITIONS.items():
+    for _member in _members:
+        _THEME_KEY_INDEX[SectorIdentity.comparison_key(_member)] = _theme_name
+
+
+@dataclass(frozen=True)
+class CandidateMember:
+    """候选成员信息。"""
+    sector_id: int
+    canonical_name: str
+    sector_status: str
+    co_occurrence_count: int
+    source: str  # "cls_watch" | "market_cache"
+    theme_name: str | None = None
+
+
+@dataclass(frozen=True)
+class CandidateCluster:
+    """候选聚类。"""
+    members: tuple[CandidateMember, ...]
+    theme_name: str | None
+    source: str  # "cls_watch" | "market_cache"
+    is_mixed_theme: bool
+
+
+@dataclass
+class AICleaningResult:
+    """AI 语义清洗结果。"""
+    accepted: bool
+    suggested_group_name: str | None = None
+    confidence: float = 0.0
+    reason: str | None = None
+    accepted_members: list[dict[str, Any]] = field(default_factory=list)
+    rejected_members: list[dict[str, Any]] = field(default_factory=list)
 
 
 class SectorGroupService:
@@ -294,13 +346,16 @@ class SectorGroupService:
     async def generate_suggestions(
         self,
         days: int = 10,
+        *,
+        ai_processor: Any = None,
     ) -> dict[str, Any]:
         """生成分组建议。
 
-        基于近期板块共现和已有分组成员重疊分析。
+        四段流水线：收集输入 → 规则候选 → 主题约束 + AI 清洗 → 建议落库。
 
         Args:
             days: 回看天数
+            ai_processor: 可选 AI 处理器，用于语义清洗
 
         Returns:
             生成结果统计
@@ -308,7 +363,7 @@ class SectorGroupService:
         cutoff_date = date.today() - timedelta(days=days)
 
         async with self.db.get_session() as session:
-            # 获取 tracked 和 candidate 板块
+            # 获取 tracked 和 candidate 板块（排除 ignored 和 inactive）
             result = await session.execute(
                 select(TrackedSector).where(
                     TrackedSector.status.in_(["tracked", "candidate"])
@@ -334,8 +389,8 @@ class SectorGroupService:
             )
             pending_suggestions = list(result.scalars().all())
 
-        # 构建共现图（从 CLS 看盘板块标签）
-        co_occurrence = await self._build_co_occurrence(cutoff_date)
+        # 构建共现图（优先 CLS 看盘板块标签，回退到行情缓存）
+        co_occurrence, co_source = await self._build_co_occurrence(cutoff_date)
 
         # 生成建议
         new_count = 0
@@ -348,6 +403,7 @@ class SectorGroupService:
                 eligible_sectors=eligible_sectors,
                 existing_members=existing_members,
                 co_occurrence=co_occurrence,
+                co_source=co_source,
                 pending_suggestions=pending_suggestions,
                 days=days,
             )
@@ -360,8 +416,10 @@ class SectorGroupService:
             existing_groups=existing_groups,
             existing_members=existing_members,
             co_occurrence=co_occurrence,
+            co_source=co_source,
             pending_suggestions=pending_suggestions,
             days=days,
+            ai_processor=ai_processor,
         )
         new_count = new_group_suggestions["new_groups"]
 
@@ -1060,8 +1118,13 @@ class SectorGroupService:
     async def _build_co_occurrence(
         self,
         cutoff_date: date,
-    ) -> dict[str, dict[str, int]]:
-        """构建板块共现矩阵（基于 CLS 看盘数据）。"""
+    ) -> tuple[dict[str, dict[str, int]], str]:
+        """构建板块共现矩阵（优先基于 CLS 看盘数据，缺失时回退到行情缓存）。
+
+        Returns:
+            (co_occurrence_map, source_type) 其中 source_type 为
+            "cls_watch" 或 "market_cache"
+        """
         from src.models.schema import CLSWatchData
 
         cutoff_ts = int(datetime.combine(cutoff_date, datetime.min.time()).timestamp())
@@ -1096,7 +1159,41 @@ class SectorGroupService:
                         co_occurrence[key2] = {}
                     co_occurrence[key2][key1] = co_occurrence[key2].get(key1, 0) + 1
 
-        return co_occurrence
+        if co_occurrence:
+            return co_occurrence, "cls_watch"
+
+        async with self.db.get_session() as session:
+            result = await session.execute(
+                select(MarketSector.trade_date, MarketSector.sector_name)
+                .where(MarketSector.trade_date >= cutoff_date)
+                .order_by(MarketSector.trade_date.asc())
+            )
+            market_rows = result.all()
+
+        sectors_by_date: dict[date, list[str]] = {}
+        for trade_date, sector_name in market_rows:
+            if not sector_name:
+                continue
+            sectors_by_date.setdefault(trade_date, []).append(sector_name)
+
+        for sectors in sectors_by_date.values():
+            unique_keys = list({
+                SectorIdentity.comparison_key(s.strip())
+                for s in sectors
+                if isinstance(s, str) and s.strip()
+            })
+            for i, key1 in enumerate(unique_keys):
+                for key2 in unique_keys[i + 1:]:
+                    if key1 == key2:
+                        continue
+                    if key1 not in co_occurrence:
+                        co_occurrence[key1] = {}
+                    co_occurrence[key1][key2] = co_occurrence[key1].get(key2, 0) + 1
+                    if key2 not in co_occurrence:
+                        co_occurrence[key2] = {}
+                    co_occurrence[key2][key1] = co_occurrence[key2].get(key1, 0) + 1
+
+        return co_occurrence, "market_cache"
 
     async def _suggest_for_existing_group(
         self,
@@ -1104,6 +1201,7 @@ class SectorGroupService:
         eligible_sectors: list[TrackedSector],
         existing_members: list[SectorGroupMember],
         co_occurrence: dict[str, dict[str, int]],
+        co_source: str,
         pending_suggestions: list[SectorGroupSuggestion],
         days: int,
     ) -> dict[str, int]:
@@ -1189,7 +1287,10 @@ class SectorGroupService:
                 "sector_id": sector.id,
                 "relation_type": "related",
                 "confidence": min(co_count / 10.0, 1.0),
-                "reason": f"与分组 '{group.canonical_name}' 近{days}日共现{co_count}次",
+                "reason": (
+                    f"与分组 '{group.canonical_name}' 近{days}日"
+                    f"{'行情缓存同日共现线索' if co_source == 'market_cache' else '共现'}{co_count}次"
+                ),
             })
 
         if suggestion_members:
@@ -1225,10 +1326,19 @@ class SectorGroupService:
         existing_groups: list[SectorGroup],
         existing_members: list[SectorGroupMember],
         co_occurrence: dict[str, dict[str, int]],
+        co_source: str,
         pending_suggestions: list[SectorGroupSuggestion],
         days: int,
+        ai_processor: Any = None,
     ) -> dict[str, int]:
-        """检测新分组机会。"""
+        """检测新分组机会。
+
+        四段流水线：
+        1. 规则候选 - 从共现图构建聚类
+        2. 主题约束 - 拆分/拒绝跨主题聚类
+        3. AI 语义清洗 - 清洗候选成员
+        4. 建议落库 - 持久化 pending 建议
+        """
         # 获取已有 pending new_group 建议的名称
         pending_names = {
             SectorIdentity.comparison_key(s.suggested_group_name or "")
@@ -1239,7 +1349,7 @@ class SectorGroupService:
         # 获取已在任何分组中的 sector_id
         all_member_ids = {m.sector_id for m in existing_members}
 
-        # 寻找高频共现但未归组的板块对
+        # 阶段 1：构建候选聚类
         pair_count: dict[frozenset[str], int] = {}
         for key1, partners in co_occurrence.items():
             for key2, count in partners.items():
@@ -1250,9 +1360,9 @@ class SectorGroupService:
         if not pair_count:
             return {"new_groups": 0}
 
-        # 聚类：简单贪心聚类
+        # 贪心聚类
         used_keys: set[str] = set()
-        clusters: list[set[str]] = []
+        raw_clusters: list[set[str]] = []
 
         for pair, count in sorted(pair_count.items(), key=lambda x: -x[1]):
             keys = list(pair)
@@ -1268,63 +1378,553 @@ class SectorGroupService:
                 overlap = cluster & used_keys
                 if not overlap:
                     used_keys.update(cluster)
-                    clusters.append(cluster)
+                    raw_clusters.append(cluster)
 
+        # 阶段 2：主题约束 - 为每个聚类匹配主题，拆分跨主题聚类
+        candidate_clusters = self._apply_theme_constraints(
+            raw_clusters=raw_clusters,
+            eligible_sectors=eligible_sectors,
+            co_occurrence=co_occurrence,
+            co_source=co_source,
+        )
+
+        # 阶段 3+4：AI 清洗 + 持久化
         new_count = 0
-        for cluster in clusters[:5]:
-            # 查找对应的板块记录
-            cluster_sectors: list[TrackedSector] = []
-            for sector in eligible_sectors:
-                if sector.status == "ignored":
-                    continue
-                sector_key = SectorIdentity.comparison_key(sector.canonical_name)
-                if sector_key in cluster:
-                    cluster_sectors.append(sector)
-
-            if len(cluster_sectors) < 2:
+        for cluster in candidate_clusters[:5]:
+            if len(cluster.members) < 2:
                 continue
 
             # 检查是否已有匹配的分组
             matched_existing = False
             for group in existing_groups:
                 group_key = SectorIdentity.comparison_key(group.canonical_name)
-                if group_key in cluster:
-                    matched_existing = True
+                for m in cluster.members:
+                    if SectorIdentity.comparison_key(m.canonical_name) == group_key:
+                        matched_existing = True
+                        break
+                if matched_existing:
                     break
             if matched_existing:
                 continue
 
-            # 使用第一个板块名作为分组名候选
-            suggested_name = cluster_sectors[0].canonical_name + "链"
+            # 确定建议名称
+            suggested_name = cluster.theme_name or cluster.members[0].canonical_name + "链"
             name_key = SectorIdentity.comparison_key(suggested_name)
-            if name_key in pending_names:
+
+            # 检查同名 pending 建议 - 刷新而非重复创建
+            existing_pending = None
+            for s in pending_suggestions:
+                if (s.suggestion_type == "new_group"
+                        and s.status == "pending"
+                        and SectorIdentity.comparison_key(s.suggested_group_name or "") == name_key):
+                    existing_pending = s
+                    break
+
+            # AI 清洗
+            cleaned = cluster
+            if ai_processor:
+                cleaned = await self._clean_cluster_with_ai(
+                    cluster=cluster,
+                    ai_processor=ai_processor,
+                    existing_groups=existing_groups,
+                    existing_members=existing_members,
+                )
+
+            if len(cleaned.members) < 2:
                 continue
 
-            async with self.db.get_session() as session:
-                suggestion = SectorGroupSuggestion(
-                    suggestion_type="new_group",
-                    suggested_group_name=suggested_name,
-                    status="pending",
-                    confidence=0.6,
-                    reason=f"近{days}日共现分析发现{len(cluster_sectors)}个板块高频关联，建议创建新分组",
+            # 确定置信度和原因
+            confidence = self._calculate_cluster_confidence(cleaned)
+            reason = self._build_cluster_reason(cleaned, days)
+
+            # 构建 evidence
+            evidence = self._build_cluster_evidence(cleaned, co_source, days)
+
+            # 持久化
+            if existing_pending:
+                await self._refresh_pending_suggestion(
+                    existing_pending=existing_pending,
+                    suggested_name=suggested_name,
+                    confidence=confidence,
+                    reason=reason,
+                    evidence=evidence,
+                    members=cleaned.members,
                 )
-                session.add(suggestion)
-                await session.flush()
-                await session.refresh(suggestion)
+            else:
+                await self._persist_new_group_suggestion(
+                    suggested_name=suggested_name,
+                    confidence=confidence,
+                    reason=reason,
+                    evidence=evidence,
+                    members=cleaned.members,
+                )
 
-                for sector in cluster_sectors[:10]:
-                    member = SectorGroupSuggestionMember(
-                        suggestion_id=suggestion.id,
-                        sector_id=sector.id,
-                        suggested_relation_type="related",
-                        confidence=0.5,
-                        reason=f"共现聚类成员",
-                    )
-                    session.add(member)
-
-                new_count += 1
+            new_count += 1
 
         return {"new_groups": new_count}
+
+    # ------------------------------------------------------------------
+    # 主题约束与匹配
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def match_theme(name: str) -> str | None:
+        """匹配板块名称到内置主题。"""
+        key = SectorIdentity.comparison_key(name)
+        return _THEME_KEY_INDEX.get(key)
+
+    def _apply_theme_constraints(
+        self,
+        raw_clusters: list[set[str]],
+        eligible_sectors: list[TrackedSector],
+        co_occurrence: dict[str, dict[str, int]],
+        co_source: str,
+    ) -> list[CandidateCluster]:
+        """对原始聚类应用主题约束，拆分跨主题聚类。"""
+        # 建立 comparison_key → TrackedSector 映射
+        sector_by_key: dict[str, TrackedSector] = {}
+        for s in eligible_sectors:
+            key = SectorIdentity.comparison_key(s.canonical_name)
+            sector_by_key[key] = s
+
+        result: list[CandidateCluster] = []
+
+        for raw in raw_clusters:
+            # 为每个 key 匹配主题
+            key_themes: dict[str, str | None] = {}
+            for k in raw:
+                if k in sector_by_key:
+                    key_themes[k] = self.match_theme(sector_by_key[k].canonical_name)
+                else:
+                    key_themes[k] = None
+
+            # 按主题分组
+            theme_groups: dict[str | None, list[str]] = {}
+            for k, theme in key_themes.items():
+                theme_groups.setdefault(theme, []).append(k)
+
+            # 生成候选聚类
+            for theme, keys in theme_groups.items():
+                if len(keys) < 2:
+                    continue
+
+                members: list[CandidateMember] = []
+                for k in keys:
+                    sector = sector_by_key.get(k)
+                    if not sector:
+                        continue
+                    # 获取共现计数
+                    max_co = 0
+                    for other_k in keys:
+                        if other_k != k:
+                            max_co = max(max_co, co_occurrence.get(k, {}).get(other_k, 0))
+
+                    members.append(CandidateMember(
+                        sector_id=sector.id,
+                        canonical_name=sector.canonical_name,
+                        sector_status=sector.status,
+                        co_occurrence_count=max_co,
+                        source=co_source,
+                        theme_name=theme,
+                    ))
+
+                if len(members) < 2:
+                    continue
+
+                is_mixed = theme is None and len(theme_groups) > 1
+
+                result.append(CandidateCluster(
+                    members=tuple(members),
+                    theme_name=theme,
+                    source=co_source,
+                    is_mixed_theme=is_mixed,
+                ))
+
+        # 排序：有主题的优先
+        result.sort(key=lambda c: (c.theme_name is None, -len(c.members)))
+        return result
+
+    # ------------------------------------------------------------------
+    # AI 语义清洗
+    # ------------------------------------------------------------------
+
+    async def _clean_cluster_with_ai(
+        self,
+        cluster: CandidateCluster,
+        ai_processor: Any,
+        existing_groups: list[SectorGroup],
+        existing_members: list[SectorGroupMember],
+    ) -> CandidateCluster:
+        """使用 AI 对候选聚类做语义清洗。"""
+        try:
+            ai_result = await self._call_ai_cleaning(
+                cluster=cluster,
+                ai_processor=ai_processor,
+                existing_groups=existing_groups,
+                existing_members=existing_members,
+            )
+        except Exception as e:
+            logger.warning("AI 清洗失败，回退到规则验证: %s", e)
+            return self._rule_only_fallback(cluster)
+
+        if not ai_result.accepted:
+            logger.info("AI 拒绝聚类 '%s': %s", cluster.theme_name, ai_result.reason)
+            return CandidateCluster(
+                members=(),
+                theme_name=cluster.theme_name,
+                source=cluster.source,
+                is_mixed_theme=cluster.is_mixed_theme,
+            )
+
+        # 验证 AI 输出
+        candidate_ids = {m.sector_id for m in cluster.members}
+        validated_members: list[CandidateMember] = []
+        for ai_member in ai_result.accepted_members:
+            sid = ai_member.get("sector_id")
+            if sid not in candidate_ids:
+                logger.warning("AI 返回未知 sector_id=%s，已忽略", sid)
+                continue
+            # 从原始成员查找信息
+            for cm in cluster.members:
+                if cm.sector_id == sid:
+                    validated_members.append(CandidateMember(
+                        sector_id=cm.sector_id,
+                        canonical_name=cm.canonical_name,
+                        sector_status=cm.sector_status,
+                        co_occurrence_count=cm.co_occurrence_count,
+                        source=cm.source,
+                        theme_name=cm.theme_name,
+                    ))
+                    break
+
+        # 最小成员数检查
+        if len(validated_members) < 2:
+            logger.info("AI 清洗后成员不足 2 个，丢弃")
+            return CandidateCluster(
+                members=(),
+                theme_name=cluster.theme_name,
+                source=cluster.source,
+                is_mixed_theme=cluster.is_mixed_theme,
+            )
+
+        # 更新主题名（AI 可能提供更好的名称）
+        theme_name = cluster.theme_name
+        if ai_result.suggested_group_name:
+            theme_name = ai_result.suggested_group_name
+
+        return CandidateCluster(
+            members=tuple(validated_members),
+            theme_name=theme_name,
+            source=cluster.source,
+            is_mixed_theme=False,
+        )
+
+    async def _call_ai_cleaning(
+        self,
+        cluster: CandidateCluster,
+        ai_processor: Any,
+        existing_groups: list[SectorGroup],
+        existing_members: list[SectorGroupMember],
+    ) -> AICleaningResult:
+        """调用 AI 进行结构化语义清洗。"""
+        # 构建提示
+        candidate_list = []
+        for m in cluster.members:
+            candidate_list.append({
+                "sector_id": m.sector_id,
+                "name": m.canonical_name,
+                "status": m.sector_status,
+                "co_occurrence_count": m.co_occurrence_count,
+                "theme": m.theme_name,
+            })
+
+        existing_group_info = []
+        for g in existing_groups:
+            g_members = [
+                m.sector_id for m in existing_members if m.group_id == g.id
+            ]
+            aliases = []
+            if g.aliases:
+                try:
+                    aliases = json.loads(g.aliases)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            keywords = []
+            if g.keywords:
+                try:
+                    keywords = json.loads(g.keywords)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            existing_group_info.append({
+                "name": g.canonical_name,
+                "aliases": aliases,
+                "keywords": keywords,
+                "member_count": len(g_members),
+            })
+
+        prompt = (
+            "你是一个 A 股行业分析师。请判断以下候选板块是否属于同一产业链/主题。\n\n"
+            "约束：\n"
+            "- 只能保留输入列表中已有的 sector_id\n"
+            "- 不能新增不存在的板块\n"
+            "- 不能接受建议，只能清洗候选\n\n"
+            f"候选分组主题: {cluster.theme_name or '未知'}\n"
+            f"候选成员:\n{json.dumps(candidate_list, ensure_ascii=False, indent=2)}\n\n"
+            f"已有分组:\n{json.dumps(existing_group_info, ensure_ascii=False, indent=2)}\n\n"
+            "请严格按以下 JSON 格式返回（不要添加其他内容）：\n"
+            "{\n"
+            '  "accepted": true/false,\n'
+            '  "suggested_group_name": "建议的分组名",\n'
+            '  "confidence": 0.0-1.0,\n'
+            '  "reason": "判断理由",\n'
+            '  "members": [{"sector_id": 1, "relation_type": "core/related", "confidence": 0.9, "reason": "原因"}],\n'
+            '  "rejected_members": [{"sector_id": 9, "reason": "排除原因"}]\n'
+            "}"
+        )
+
+        # 调用 AI
+        response = await ai_processor._call_api(
+            prompt=prompt,
+            max_tokens=1000,
+        )
+
+        # 解析 JSON
+        result = self._parse_ai_cleaning_response(response, cluster)
+        return result
+
+    @staticmethod
+    def _parse_ai_cleaning_response(
+        response: str,
+        cluster: CandidateCluster,
+    ) -> AICleaningResult:
+        """解析 AI 清洗响应为结构化结果。"""
+        # 尝试提取 JSON
+        json_str = response.strip()
+        # 处理 markdown 代码块
+        if "```" in json_str:
+            start = json_str.find("{")
+            end = json_str.rfind("}") + 1
+            if start >= 0 and end > start:
+                json_str = json_str[start:end]
+        elif "{" in json_str:
+            start = json_str.find("{")
+            end = json_str.rfind("}") + 1
+            if start >= 0 and end > start:
+                json_str = json_str[start:end]
+
+        try:
+            data = json.loads(json_str)
+        except (json.JSONDecodeError, TypeError):
+            return AICleaningResult(accepted=False, reason="AI 返回无效 JSON")
+
+        # 验证基本字段
+        accepted = data.get("accepted", False)
+        confidence = data.get("confidence", 0.0)
+        if not isinstance(confidence, (int, float)):
+            confidence = 0.0
+        confidence = float(confidence)
+
+        # 低置信度拒绝
+        if confidence < 0.5:
+            return AICleaningResult(
+                accepted=False,
+                confidence=confidence,
+                reason=f"AI 置信度过低: {confidence}",
+            )
+
+        # 验证成员
+        candidate_ids = {m.sector_id for m in cluster.members}
+        accepted_members = []
+        for m in data.get("members", []):
+            sid = m.get("sector_id")
+            if sid in candidate_ids:
+                relation_type = m.get("relation_type", "related")
+                if relation_type not in RELATION_TYPES:
+                    relation_type = "related"
+                accepted_members.append({
+                    "sector_id": sid,
+                    "relation_type": relation_type,
+                    "confidence": float(m.get("confidence", 0.5)),
+                    "reason": m.get("reason", ""),
+                })
+
+        rejected_members = []
+        for m in data.get("rejected_members", []):
+            sid = m.get("sector_id")
+            if sid in candidate_ids:
+                rejected_members.append({
+                    "sector_id": sid,
+                    "reason": m.get("reason", ""),
+                })
+
+        return AICleaningResult(
+            accepted=accepted,
+            suggested_group_name=data.get("suggested_group_name"),
+            confidence=confidence,
+            reason=data.get("reason"),
+            accepted_members=accepted_members,
+            rejected_members=rejected_members,
+        )
+
+    @staticmethod
+    def _rule_only_fallback(cluster: CandidateCluster) -> CandidateCluster:
+        """规则兜底：只保留有主题匹配的成员，无主题聚类直接丢弃。"""
+        if cluster.theme_name is None:
+            # 无主题匹配的 market-cache 聚类 → 丢弃
+            return CandidateCluster(
+                members=(),
+                theme_name=None,
+                source=cluster.source,
+                is_mixed_theme=cluster.is_mixed_theme,
+            )
+        # 有主题匹配 → 保留所有成员
+        return cluster
+
+    # ------------------------------------------------------------------
+    # 置信度与原因
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _calculate_cluster_confidence(cluster: CandidateCluster) -> float:
+        """计算聚类置信度。"""
+        if not cluster.members:
+            return 0.0
+
+        # 基础：平均共现计数
+        avg_co = sum(m.co_occurrence_count for m in cluster.members) / len(cluster.members)
+        base = min(avg_co / 10.0, 1.0)
+
+        # 来源调整
+        source_factor = 0.7 if cluster.source == "market_cache" else 1.0
+
+        # 主题匹配加分
+        theme_factor = 1.0 if cluster.theme_name else 0.5
+
+        return round(min(base * source_factor * theme_factor, 1.0), 2)
+
+    @staticmethod
+    def _build_cluster_reason(cluster: CandidateCluster, days: int) -> str:
+        """构建建议原因。"""
+        member_count = len(cluster.members)
+        names = ", ".join(m.canonical_name for m in cluster.members[:5])
+        suffix = "等" if member_count > 5 else ""
+
+        if cluster.source == "market_cache":
+            return (
+                f"近{days}日行情缓存同日共现线索发现{member_count}个板块关联"
+                f"（{names}{suffix}），属于弱行情信号，非确认产业链关联"
+            )
+
+        return (
+            f"近{days}日共现分析发现{member_count}个板块高频关联"
+            f"（{names}{suffix}），建议创建新分组"
+        )
+
+    @staticmethod
+    def _build_cluster_evidence(
+        cluster: CandidateCluster,
+        co_source: str,
+        days: int,
+    ) -> dict[str, Any]:
+        """构建聚类 evidence。"""
+        return {
+            "source": co_source,
+            "window_days": days,
+            "theme_name": cluster.theme_name,
+            "is_mixed_theme": cluster.is_mixed_theme,
+            "members": [
+                {
+                    "sector_id": m.sector_id,
+                    "name": m.canonical_name,
+                    "co_occurrence_count": m.co_occurrence_count,
+                    "theme_match": m.theme_name,
+                }
+                for m in cluster.members
+            ],
+            "ai_cleaned": False,
+        }
+
+    # ------------------------------------------------------------------
+    # 建议持久化
+    # ------------------------------------------------------------------
+
+    async def _persist_new_group_suggestion(
+        self,
+        suggested_name: str,
+        confidence: float,
+        reason: str,
+        evidence: dict[str, Any],
+        members: tuple[CandidateMember, ...],
+    ) -> None:
+        """持久化新的 new_group 建议。"""
+        async with self.db.get_session() as session:
+            suggestion = SectorGroupSuggestion(
+                suggestion_type="new_group",
+                suggested_group_name=suggested_name,
+                status="pending",
+                confidence=confidence,
+                reason=reason,
+                evidence_json=json.dumps(evidence, ensure_ascii=False),
+            )
+            session.add(suggestion)
+            await session.flush()
+            await session.refresh(suggestion)
+
+            for member in members[:10]:
+                sm = SectorGroupSuggestionMember(
+                    suggestion_id=suggestion.id,
+                    sector_id=member.sector_id,
+                    suggested_relation_type="related",
+                    confidence=min(member.co_occurrence_count / 10.0, 1.0),
+                    reason=f"共现聚类成员（来源: {member.source}）",
+                )
+                session.add(sm)
+
+    async def _refresh_pending_suggestion(
+        self,
+        existing_pending: SectorGroupSuggestion,
+        suggested_name: str,
+        confidence: float,
+        reason: str,
+        evidence: dict[str, Any],
+        members: tuple[CandidateMember, ...],
+    ) -> None:
+        """刷新已有的 pending 建议而非重复创建。"""
+        async with self.db.get_session() as session:
+            result = await session.execute(
+                select(SectorGroupSuggestion).where(
+                    SectorGroupSuggestion.id == existing_pending.id
+                )
+            )
+            suggestion = result.scalar_one_or_none()
+            if not suggestion:
+                return
+
+            suggestion.confidence = confidence
+            suggestion.reason = reason
+            suggestion.evidence_json = json.dumps(evidence, ensure_ascii=False)
+            if suggested_name:
+                suggestion.suggested_group_name = suggested_name
+
+            # 删除旧成员
+            result = await session.execute(
+                select(SectorGroupSuggestionMember).where(
+                    SectorGroupSuggestionMember.suggestion_id == suggestion.id
+                )
+            )
+            for old_member in result.scalars().all():
+                await session.delete(old_member)
+
+            # 添加新成员
+            for member in members[:10]:
+                sm = SectorGroupSuggestionMember(
+                    suggestion_id=suggestion.id,
+                    sector_id=member.sector_id,
+                    suggested_relation_type="related",
+                    confidence=min(member.co_occurrence_count / 10.0, 1.0),
+                    reason=f"共现聚类成员（来源: {member.source}）",
+                )
+                session.add(sm)
 
     async def _collect_group_evidence(
         self,
