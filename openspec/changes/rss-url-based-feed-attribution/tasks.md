@@ -1,8 +1,8 @@
 ## 1. Attribution Design Grounding
 
-- [ ] 1.1 Inspect the current RSS import, feed discovery, subscribe URL resolution, and source membership code paths.
-- [ ] 1.2 Identify the canonical fields produced by the existing `wchat subscribe <article-url>` flow and document which fields RSS discovery must preserve.
-- [ ] 1.3 Run GitNexus impact analysis before editing affected symbols and record risk notes for the implementation.
+- [x] 1.1 Inspect the current RSS import, feed discovery, subscribe URL resolution, and source membership code paths.
+- [x] 1.2 Identify the canonical fields produced by the existing `wchat subscribe <article-url>` flow and document which fields RSS discovery must preserve.
+- [x] 1.3 Run GitNexus impact analysis before editing affected symbols and record risk notes for the implementation.
 
 ## 2. URL-Based Identity Resolution
 
