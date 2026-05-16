@@ -814,6 +814,7 @@ class SectorGroupService:
                         ai_processor=ai_processor,
                         force=force_refresh_members,
                         progress_callback=_member_stage_cb,
+                        report_date=end_date,
                     )
                     refresh_results.append(update_result)
                     _emit("member_refresh_done", member_name=member_name,
@@ -2221,6 +2222,47 @@ class SectorGroupService:
         window_days: int,
     ) -> dict[str, Any]:
         """收集组级证据。"""
+        async with self.db.get_session() as session:
+            # 获取已确认成员
+            result = await session.execute(
+                select(SectorGroupMember, TrackedSector)
+                .join(TrackedSector, SectorGroupMember.sector_id == TrackedSector.id)
+                .where(SectorGroupMember.group_id == group_id)
+            )
+            members = result.all()
+
+        evidence: dict[str, Any] = {
+            "group_id": group_id,
+            "end_date": end_date.isoformat(),
+            "window_days": window_days,
+            "member_summaries": [],
+            "raw_evidence_count": 0,
+        }
+
+        for member, sector in members:
+            # 对于历史回放：优先匹配目标日期，否则使用不晚于目标日期的最新报告。
+            summary = await self._get_member_summary_for_date(sector.id, end_date)
+
+            member_data: dict[str, Any] = {
+                "sector_name": sector.canonical_name,
+                "sector_status": sector.status,
+                "relation_type": member.relation_type,
+                "has_summary": summary is not None,
+            }
+
+            if summary:
+                member_data["summary_date"] = summary.end_date.isoformat() if summary.end_date else None
+                member_data["trend_status"] = summary.trend_status
+                member_data["strength_level"] = summary.strength_level
+                member_data["action_bias"] = summary.action_bias
+                member_data["judgement"] = summary.judgement
+                member_data["summary_content"] = summary.content
+
+            evidence["member_summaries"].append(member_data)
+
+        evidence["member_count"] = len(evidence["member_summaries"])
+
+        return evidence
 
     async def _get_member_summary_for_date(
         self,
@@ -2253,48 +2295,6 @@ class SectorGroupService:
                 .limit(1)
             )
             return result.scalar_one_or_none()
-        async with self.db.get_session() as session:
-            # 获取已确认成员
-            result = await session.execute(
-                select(SectorGroupMember, TrackedSector)
-                .join(TrackedSector, SectorGroupMember.sector_id == TrackedSector.id)
-                .where(SectorGroupMember.group_id == group_id)
-            )
-            members = result.all()
-
-        evidence: dict[str, Any] = {
-            "group_id": group_id,
-            "end_date": end_date.isoformat(),
-            "window_days": window_days,
-            "member_summaries": [],
-            "raw_evidence_count": 0,
-        }
-
-        for member, sector in members:
-            # 获取成员的趋势报告
-            # 对于历史回放：优先匹配目标日期，否则使用不晚于目标日期的最新报告
-            summary = await self._get_member_summary_for_date(sector.id, end_date)
-
-            member_data: dict[str, Any] = {
-                "sector_name": sector.canonical_name,
-                "sector_status": sector.status,
-                "relation_type": member.relation_type,
-                "has_summary": summary is not None,
-            }
-
-            if summary:
-                member_data["summary_date"] = summary.end_date.isoformat() if summary.end_date else None
-                member_data["trend_status"] = summary.trend_status
-                member_data["strength_level"] = summary.strength_level
-                member_data["action_bias"] = summary.action_bias
-                member_data["judgement"] = summary.judgement
-                member_data["summary_content"] = summary.content
-
-            evidence["member_summaries"].append(member_data)
-
-        evidence["member_count"] = len(evidence["member_summaries"])
-
-        return evidence
 
     async def _calculate_member_freshness(
         self,
@@ -2308,23 +2308,24 @@ class SectorGroupService:
             sector_id = member["sector_id"]
             sector_status = member.get("sector_status", "")
 
-            # 获取最新报告日期
+            # 历史回放只能使用目标日期及之前的报告，不能被未来报告误判为新鲜。
             async with self.db.get_session() as session:
                 result = await session.execute(
                     select(sql_func.max(SectorTrendSummary.end_date)).where(
-                        SectorTrendSummary.sector_id == sector_id
+                        SectorTrendSummary.sector_id == sector_id,
+                        SectorTrendSummary.end_date <= target_date,
                     )
                 )
-                latest_date = result.scalar()
+                latest_usable_date = result.scalar()
 
             is_candidate = sector_status == "candidate"
             is_stale = False
             is_missing = False
 
             if not is_candidate:
-                if latest_date is None:
+                if latest_usable_date is None:
                     is_missing = True
-                elif latest_date < target_date:
+                elif latest_usable_date < target_date:
                     is_stale = True
 
             freshness.append({
@@ -2334,7 +2335,7 @@ class SectorGroupService:
                 "is_candidate": is_candidate,
                 "is_stale": is_stale,
                 "is_missing": is_missing,
-                "latest_summary_date": latest_date.isoformat() if latest_date else None,
+                "latest_summary_date": latest_usable_date.isoformat() if latest_usable_date else None,
                 "target_date": target_date.isoformat(),
             })
 

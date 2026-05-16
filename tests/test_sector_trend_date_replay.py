@@ -4,6 +4,7 @@ import pytest
 from datetime import date, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from src.services.ai_processor import AIProcessor
 from src.services.sector_trend_service import SectorTrendAnalyzer
 
 
@@ -229,3 +230,20 @@ class TestTelegraphMentionInclusion:
 
         assert len(result["cls_telegraph_mentions"]) == 1
         assert result["cls_telegraph_mentions"][0]["title"] == "半导体板块大涨"
+
+    def test_ai_processor_formats_telegraph_mentions(self) -> None:
+        """AIProcessor 应能把电报提及格式化为 prompt 证据文本。"""
+        processor = object.__new__(AIProcessor)
+
+        result = processor._format_sector_cls_telegraphs([
+            {
+                "title": "半导体板块大涨",
+                "content": "半导体产业链多股活跃",
+                "publish_time": "2026-05-10 10:00",
+                "level": "A",
+            }
+        ])
+
+        assert "半导体板块大涨" in result
+        assert "A级" in result
+        assert "半导体产业链多股活跃" in result

@@ -17,6 +17,9 @@
 ### 盘中看盘数据提及
 {cls_watch_mentions}
 
+### 财联社电报提及
+{cls_telegraph_mentions}
+
 ### 证据充分性评估
 {evidence_sufficiency}
 

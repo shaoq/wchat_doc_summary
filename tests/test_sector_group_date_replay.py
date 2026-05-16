@@ -63,6 +63,77 @@ class TestReportDatePassedToUpdate:
         call_args = service._collect_group_evidence.call_args
         assert call_args[0][1] == target_date  # end_date arg
 
+    @pytest.mark.asyncio
+    async def test_member_refresh_uses_report_date(self) -> None:
+        """刷新成员板块时应把 report_date 传递给成员趋势更新。"""
+        db = _make_mock_db()
+        service = SectorGroupService(db)
+
+        target_date = date(2026, 5, 10)
+
+        mock_group = MagicMock()
+        mock_group.id = 1
+        mock_group.canonical_name = "AI"
+        service._resolve_group = AsyncMock(return_value=mock_group)
+        service._get_latest_group_summary = AsyncMock(return_value=None)
+        service._load_group_members = AsyncMock(return_value=[
+            {
+                "sector_id": 11,
+                "sector_name": "机器人",
+                "sector_status": "tracked",
+                "relation_type": "related",
+            }
+        ])
+        service._sector_has_report = AsyncMock(return_value=False)
+        service._collect_group_evidence = AsyncMock(return_value={
+            "group_id": 1,
+            "end_date": target_date.isoformat(),
+            "member_summaries": [],
+            "raw_evidence_count": 0,
+            "member_count": 0,
+        })
+        service._calculate_member_freshness = AsyncMock(return_value=[])
+
+        mock_summary = MagicMock()
+        mock_summary.output_path = "output/sector_groups/AI/2026-05-10.md"
+        service._save_group_trend_summary = AsyncMock(return_value=mock_summary)
+
+        mock_ai = MagicMock()
+        mock_ai.generate_sector_group_trend_summary = AsyncMock(return_value=(
+            "content",
+            {
+                "trend_status": "暂无趋势",
+                "strength_level": "弱",
+                "action_bias": "观察",
+                "judgement": "测试",
+            },
+        ))
+
+        mock_analyzer = MagicMock()
+        mock_analyzer.update_sector_trend = AsyncMock(return_value={
+            "action": "updated",
+            "sector_name": "机器人",
+        })
+
+        mock_session = AsyncMock()
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_cm.__aexit__ = AsyncMock(return_value=False)
+        db.get_session.return_value = mock_cm
+
+        with patch(
+            "src.services.sector_trend_service.SectorTrendAnalyzer",
+            return_value=mock_analyzer,
+        ):
+            await service.update_group_trend(
+                "AI",
+                ai_processor=mock_ai,
+                report_date=target_date,
+            )
+
+        mock_analyzer.update_sector_trend.assert_called_once()
+        assert mock_analyzer.update_sector_trend.call_args.kwargs["report_date"] == target_date
+
 
 class TestMemberSummaryForDate:
     """验证 _get_member_summary_for_date 选择目标日期的报告。"""

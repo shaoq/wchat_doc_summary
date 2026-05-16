@@ -1418,6 +1418,11 @@ class AIProcessor:
             evidence.get("cls_watch_mentions", []),
         )
 
+        # 格式化电报提及
+        cls_telegraph_mentions = self._format_sector_cls_telegraphs(
+            evidence.get("cls_telegraph_mentions", []),
+        )
+
         # 证据充分性
         is_sparse = evidence.get("is_sparse", True)
         total_count = evidence.get("total_evidence_count", 0)
@@ -1457,6 +1462,7 @@ class AIProcessor:
             previous_summary_section=previous_summary_section,
             market_appearances=market_appearances,
             cls_watch_mentions=cls_watch_mentions,
+            cls_telegraph_mentions=cls_telegraph_mentions,
             evidence_sufficiency=evidence_sufficiency,
             data_gaps=data_gaps,
             change_section_instruction=change_section_instruction,
@@ -1530,6 +1536,29 @@ class AIProcessor:
 
         return "\n".join(lines)
 
+    def _format_sector_cls_telegraphs(self, mentions: list[dict]) -> str:
+        """格式化板块电报提及。"""
+        if not mentions:
+            return "无电报数据提及"
+
+        lines = []
+        for item in mentions[:20]:
+            time_str = item.get("publish_time", "")
+            level = item.get("level", "")
+            title = item.get("title", "")
+            content = (item.get("content") or "")[:150]
+
+            prefix = f"- [{time_str}]"
+            if level:
+                prefix += f" {level}级"
+
+            line = f"{prefix} {title}"
+            if content:
+                line += f": {content}"
+            lines.append(line)
+
+        return "\n".join(lines)
+
     def _build_sector_data_gaps(self, evidence: dict) -> str:
         """构建板块数据缺口提示。"""
         gaps: list[str] = []
@@ -1538,6 +1567,8 @@ class AIProcessor:
             gaps.append("行情强弱榜记录缺失")
         if not evidence.get("cls_watch_mentions"):
             gaps.append("看盘数据提及缺失")
+        if not evidence.get("cls_telegraph_mentions"):
+            gaps.append("电报数据提及缺失")
 
         if not gaps:
             return "无"
