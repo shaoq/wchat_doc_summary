@@ -191,6 +191,64 @@ class Database:
                 text("CREATE INDEX ix_rss_article_membership_source_id ON rss_article_membership (source_id)")
             )
 
+        # 板块趋势跟踪相关表
+        if "tracked_sectors" not in existing_tables:
+            sync_conn.execute(text("""
+                CREATE TABLE tracked_sectors (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    canonical_name VARCHAR(64) NOT NULL UNIQUE,
+                    sector_code VARCHAR(16) UNIQUE,
+                    aliases TEXT,
+                    source_codes TEXT,
+                    category VARCHAR(32),
+                    status VARCHAR(16) NOT NULL DEFAULT 'candidate',
+                    source VARCHAR(64),
+                    first_seen_date DATE,
+                    last_seen_date DATE,
+                    last_updated_date DATE,
+                    discovery_reason TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT uq_tracked_sectors_code UNIQUE (sector_code),
+                    CONSTRAINT uq_tracked_sectors_canonical_name UNIQUE (canonical_name)
+                )
+            """))
+            sync_conn.execute(
+                text("CREATE INDEX ix_tracked_sectors_status ON tracked_sectors (status)")
+            )
+            sync_conn.execute(
+                text("CREATE INDEX ix_tracked_sectors_last_seen_date ON tracked_sectors (last_seen_date)")
+            )
+
+        if "sector_trend_summaries" not in existing_tables:
+            sync_conn.execute(text("""
+                CREATE TABLE sector_trend_summaries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    sector_id INTEGER NOT NULL,
+                    sector_name VARCHAR(64) NOT NULL,
+                    sector_code VARCHAR(16),
+                    end_date DATE NOT NULL,
+                    window_days INTEGER NOT NULL DEFAULT 10,
+                    trend_status VARCHAR(32),
+                    strength_level VARCHAR(16),
+                    action_bias VARCHAR(16),
+                    judgement TEXT,
+                    content TEXT NOT NULL,
+                    evidence_json TEXT,
+                    output_path VARCHAR(512),
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT uq_sector_trend_summaries_sector_date UNIQUE (sector_id, end_date),
+                    FOREIGN KEY (sector_id) REFERENCES tracked_sectors(id) ON DELETE CASCADE
+                )
+            """))
+            sync_conn.execute(
+                text("CREATE INDEX ix_sector_trend_summaries_sector_id ON sector_trend_summaries (sector_id)")
+            )
+            sync_conn.execute(
+                text("CREATE INDEX ix_sector_trend_summaries_end_date ON sector_trend_summaries (end_date)")
+            )
+
     async def close(self) -> None:
         """关闭数据库连接。"""
         if self._engine:

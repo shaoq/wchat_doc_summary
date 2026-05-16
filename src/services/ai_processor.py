@@ -83,6 +83,10 @@ MARKET_SUMMARY_TEMPLATE_PATH = Path("templates/market_summary.md")
 MARKET_SUMMARY_MAX_TOKENS = 2200
 MARKET_STRATEGY_ENHANCEMENT_MAX_TOKENS = 1200
 
+# 板块趋势模板路径
+SECTOR_TREND_TEMPLATE_PATH = Path("templates/sector_trend_summary.md")
+SECTOR_TREND_MAX_TOKENS = 2500
+
 
 class AIProcessor:
     """AI 处理服务类。
@@ -1342,3 +1346,203 @@ class AIProcessor:
             lines.append("注意：主源失败后通过 fallback 获取数据，时效性可能受影响。")
 
         return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # 板块趋势总结
+    # ------------------------------------------------------------------
+
+    async def generate_sector_trend_summary(
+        self,
+        sector_name: str,
+        evidence: dict,
+        previous_summary: dict | None = None,
+        end_date: str = "",
+        window_days: int = 10,
+    ) -> tuple[str, dict[str, str]]:
+        """生成板块趋势跟踪总结。
+
+        Args:
+            sector_name: 板块名称
+            evidence: 证据数据（来自 SectorTrendAnalyzer.collect_sector_evidence）
+            previous_summary: 上次总结（可选）
+            end_date: 结束日期
+            window_days: 回看窗口天数
+
+        Returns:
+            (报告内容, 结构化标签字典)
+        """
+        # 加载模板
+        template = self._load_sector_trend_template()
+
+        # 格式化行情表现
+        market_appearances = self._format_sector_market_appearances(
+            evidence.get("market_appearances", []),
+        )
+
+        # 格式化看盘提及
+        cls_watch_mentions = self._format_sector_cls_watch(
+            evidence.get("cls_watch_mentions", []),
+        )
+
+        # 证据充分性
+        is_sparse = evidence.get("is_sparse", True)
+        total_count = evidence.get("total_evidence_count", 0)
+        if is_sparse:
+            evidence_sufficiency = f"⚠️ 证据不足（仅 {total_count} 条记录），趋势判断将降级为观察模式"
+        else:
+            evidence_sufficiency = f"✓ 证据充分（共 {total_count} 条记录）"
+
+        # 数据缺口
+        data_gaps = self._build_sector_data_gaps(evidence)
+
+        # 上次总结章节
+        if previous_summary:
+            previous_summary_section = (
+                f"\n- **上次更新日期**: {previous_summary.get('end_date', 'N/A')}"
+                f"\n- **上次趋势状态**: {previous_summary.get('trend_status', 'N/A')}"
+                f"\n- **上次强度**: {previous_summary.get('strength_level', 'N/A')}"
+                f"\n- **上次操作倾向**: {previous_summary.get('action_bias', 'N/A')}"
+                f"\n- **上次研判**: {previous_summary.get('judgement', 'N/A')}"
+            )
+            change_section_instruction = (
+                "对比上次更新的趋势状态，明确描述本次相比上次的变化方向。"
+                "例如：由'低位启动'转为'主线延续'，或由'主线延续'转为'分歧中继'。"
+            )
+        else:
+            previous_summary_section = "\n- **首次跟踪建档**"
+            change_section_instruction = (
+                "这是该板块的首次跟踪建档，不需要描述相比上次的变化。"
+                "改为描述本次建档的背景和初始状态判断。"
+            )
+
+        # 构建提示词
+        prompt = template.format(
+            sector_name=sector_name,
+            end_date=end_date,
+            window_days=window_days,
+            previous_summary_section=previous_summary_section,
+            market_appearances=market_appearances,
+            cls_watch_mentions=cls_watch_mentions,
+            evidence_sufficiency=evidence_sufficiency,
+            data_gaps=data_gaps,
+            change_section_instruction=change_section_instruction,
+        )
+
+        # 调用 API
+        logger.info("开始生成板块趋势总结: %s (%s)", sector_name, end_date)
+        content = await self._call_api(
+            prompt, max_tokens=SECTOR_TREND_MAX_TOKENS, stage="sector-trend"
+        )
+
+        # 提取结构化标签
+        labels = self._extract_sector_trend_labels(content)
+
+        return content, labels
+
+    def _load_sector_trend_template(self) -> str:
+        """加载板块趋势总结模板。"""
+        if not SECTOR_TREND_TEMPLATE_PATH.exists():
+            raise FileNotFoundError(
+                f"板块趋势模板文件不存在: {SECTOR_TREND_TEMPLATE_PATH}"
+            )
+        return SECTOR_TREND_TEMPLATE_PATH.read_text(encoding="utf-8")
+
+    def _format_sector_market_appearances(
+        self, appearances: list[dict],
+    ) -> str:
+        """格式化板块行情表现记录。"""
+        if not appearances:
+            return "无近期行情强弱榜记录"
+
+        lines = []
+        for item in appearances:
+            trade_date = item.get("trade_date", "N/A")
+            change_pct = item.get("change_pct")
+            amount = item.get("amount")
+            main_inflow = item.get("main_inflow")
+
+            parts = [f"日期: {trade_date}"]
+            if change_pct is not None:
+                sign = "+" if change_pct >= 0 else ""
+                parts.append(f"涨跌幅: {sign}{change_pct:.2f}%")
+            if amount is not None:
+                parts.append(f"成交额: {amount:.1f}亿")
+            if main_inflow is not None:
+                parts.append(f"主力净流入: {main_inflow:.1f}亿")
+
+            lines.append("- " + " | ".join(parts))
+
+        return "\n".join(lines)
+
+    def _format_sector_cls_watch(self, mentions: list[dict]) -> str:
+        """格式化板块看盘数据提及。"""
+        if not mentions:
+            return "无看盘数据提及"
+
+        lines = []
+        for item in mentions[:20]:
+            time_str = item.get("publish_time", "")
+            title = item.get("title", "")
+            content = (item.get("content") or "")[:150]
+            stocks = item.get("stocks", [])
+
+            line = f"- [{time_str}] {title}"
+            if content:
+                line += f": {content}"
+            if stocks:
+                line += f" [个股: {', '.join(stocks[:3])}]"
+            lines.append(line)
+
+        return "\n".join(lines)
+
+    def _build_sector_data_gaps(self, evidence: dict) -> str:
+        """构建板块数据缺口提示。"""
+        gaps: list[str] = []
+
+        if not evidence.get("market_appearances"):
+            gaps.append("行情强弱榜记录缺失")
+        if not evidence.get("cls_watch_mentions"):
+            gaps.append("看盘数据提及缺失")
+
+        if not gaps:
+            return "无"
+
+        return "⚠️ 以下证据组数据不足，请在生成时进入观察模式：\n" + "\n".join(
+            f"- {gap}" for gap in gaps
+        )
+
+    def _extract_sector_trend_labels(self, content: str) -> dict[str, str]:
+        """从报告内容中提取结构化标签。"""
+        labels: dict[str, str] = {
+            "trend_status": "暂无趋势",
+            "strength_level": "弱",
+            "action_bias": "观察",
+            "judgement": "",
+        }
+
+        valid_trend_statuses = {
+            "主线加强", "主线延续", "分歧中继", "低位启动",
+            "轮动补涨", "短线脉冲", "高位退潮", "暂无趋势",
+        }
+        valid_strength = {"强", "中", "弱"}
+        valid_actions = {"跟踪", "观察", "回避"}
+
+        for line in content.split("\n"):
+            line_stripped = line.strip().lower()
+
+            if line_stripped.startswith("trend_status:"):
+                value = line.split(":", 1)[1].strip()
+                if value in valid_trend_statuses:
+                    labels["trend_status"] = value
+            elif line_stripped.startswith("strength_level:"):
+                value = line.split(":", 1)[1].strip()
+                if value in valid_strength:
+                    labels["strength_level"] = value
+            elif line_stripped.startswith("action_bias:"):
+                value = line.split(":", 1)[1].strip()
+                if value in valid_actions:
+                    labels["action_bias"] = value
+            elif line_stripped.startswith("judgement:"):
+                labels["judgement"] = line.split(":", 1)[1].strip()
+
+        return labels

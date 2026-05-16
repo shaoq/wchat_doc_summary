@@ -923,3 +923,7 @@ def market_summary(target_date: str | None, offline: bool, list_summaries: bool,
 # 导入并注册 stocks 子命令组
 from src.cli.ai_stocks import stocks
 ai.add_command(stocks)
+
+# 导入并注册 sector-trends 子命令组
+from src.cli.sector_trends import sector_trends
+ai.add_command(sector_trends)

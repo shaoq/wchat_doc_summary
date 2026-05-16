@@ -586,3 +586,115 @@ class GlobalMarketContext(Base):
 
     def __repr__(self) -> str:
         return f"<GlobalMarketContext(target_a_trade_date='{self.target_a_trade_date}', status='{self.status}')>"
+
+
+class TrackedSector(Base):
+    """板块跟踪档案模型 - 记录候选/跟踪板块的长期状态。"""
+
+    __tablename__ = "tracked_sectors"
+    __table_args__ = (
+        UniqueConstraint("sector_code", name="uq_tracked_sectors_code"),
+        UniqueConstraint("canonical_name", name="uq_tracked_sectors_canonical_name"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    canonical_name: Mapped[str] = mapped_column(
+        String(64), nullable=False, unique=True, comment="规范名称",
+    )
+    sector_code: Mapped[Optional[str]] = mapped_column(
+        String(16), nullable=True, unique=True, comment="板块代码（来自行情源）",
+    )
+    aliases: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True, comment="别名列表(JSON数组)",
+    )
+    source_codes: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True, comment="所有已知源代码(JSON数组)",
+    )
+    category: Mapped[Optional[str]] = mapped_column(
+        String(32), nullable=True, comment="板块分类(行业/概念/地区等)",
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="candidate",
+        comment="状态: candidate/tracked/inactive/ignored",
+    )
+    source: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True, comment="发现来源(market_cache/cls_watch/manual等)",
+    )
+    first_seen_date: Mapped[Optional[date]] = mapped_column(
+        Date, nullable=True, comment="首次发现日期",
+    )
+    last_seen_date: Mapped[Optional[date]] = mapped_column(
+        Date, nullable=True, comment="最近出现日期",
+    )
+    last_updated_date: Mapped[Optional[date]] = mapped_column(
+        Date, nullable=True, comment="最近趋势更新日期",
+    )
+    discovery_reason: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True, comment="发现原因描述",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), comment="创建时间",
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now(), comment="更新时间",
+    )
+
+    def __repr__(self) -> str:
+        return f"<TrackedSector(id={self.id}, name='{self.canonical_name}', status='{self.status}')>"
+
+
+class SectorTrendSummary(Base):
+    """板块趋势总结模型 - 每次板块更新的快照。"""
+
+    __tablename__ = "sector_trend_summaries"
+    __table_args__ = (
+        UniqueConstraint("sector_id", "end_date", name="uq_sector_trend_summaries_sector_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    sector_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("tracked_sectors.id", ondelete="CASCADE"),
+        nullable=False, index=True, comment="板块ID",
+    )
+    sector_name: Mapped[str] = mapped_column(
+        String(64), nullable=False, comment="板块名称(快照)",
+    )
+    sector_code: Mapped[Optional[str]] = mapped_column(
+        String(16), nullable=True, comment="板块代码(快照)",
+    )
+    end_date: Mapped[date] = mapped_column(
+        Date, nullable=False, comment="快照结束日期",
+    )
+    window_days: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=10, comment="回看窗口天数",
+    )
+    trend_status: Mapped[Optional[str]] = mapped_column(
+        String(32), nullable=True, comment="趋势状态标签",
+    )
+    strength_level: Mapped[Optional[str]] = mapped_column(
+        String(16), nullable=True, comment="强度等级(强/中/弱)",
+    )
+    action_bias: Mapped[Optional[str]] = mapped_column(
+        String(16), nullable=True, comment="操作倾向(跟踪/观察/回避)",
+    )
+    judgement: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True, comment="趋势研判摘要",
+    )
+    content: Mapped[str] = mapped_column(
+        Text, nullable=False, comment="完整报告内容(Markdown)",
+    )
+    evidence_json: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True, comment="证据数据(JSON)",
+    )
+    output_path: Mapped[Optional[str]] = mapped_column(
+        String(512), nullable=True, comment="报告文件路径",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), comment="创建时间",
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now(), comment="更新时间",
+    )
+
+    def __repr__(self) -> str:
+        return f"<SectorTrendSummary(sector_name='{self.sector_name}', end_date='{self.end_date}')>"
