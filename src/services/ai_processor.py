@@ -1478,6 +1478,19 @@ class AIProcessor:
         # 提取结构化标签
         labels = self._extract_sector_trend_labels(content)
 
+        # 阶段验证降级
+        validated_stage = self._validate_sector_stage_post_extract(
+            labels["trend_status"],
+            evidence=evidence,
+            previous_summary=previous_summary,
+        )
+        if validated_stage != labels["trend_status"]:
+            logger.info(
+                "板块趋势阶段降级: %s → %s (%s)",
+                labels["trend_status"], validated_stage, sector_name,
+            )
+            labels["trend_status"] = validated_stage
+
         return content, labels
 
     def _load_sector_trend_template(self) -> str:
@@ -1669,6 +1682,19 @@ class AIProcessor:
 
         labels = self._extract_sector_group_trend_labels(content)
 
+        # 阶段验证降级
+        validated_stage = self._validate_group_stage_post_extract(
+            labels["trend_status"],
+            evidence=evidence,
+            member_freshness=member_freshness,
+        )
+        if validated_stage != labels["trend_status"]:
+            logger.info(
+                "分组趋势阶段降级: %s → %s (%s)",
+                labels["trend_status"], validated_stage, group_name,
+            )
+            labels["trend_status"] = validated_stage
+
         return content, labels
 
     def _load_sector_group_trend_template(self) -> str:
@@ -1822,3 +1848,67 @@ class AIProcessor:
                 labels["judgement"] = line.split(":", 1)[1].strip()
 
         return labels
+
+    def _validate_sector_stage_post_extract(
+        self,
+        stage: str,
+        *,
+        evidence: dict,
+        previous_summary: dict | None = None,
+    ) -> str:
+        """对板块 AI 输出阶段执行验证降级。"""
+        from src.services.trend_stage_taxonomy import validate_sector_stage
+
+        is_sparse = evidence.get("is_sparse", True)
+        has_market = bool(evidence.get("market_appearances"))
+        has_prior = previous_summary is not None
+        prior_stage = (
+            previous_summary.get("trend_status") if previous_summary else None
+        )
+        is_first_report = not has_prior
+
+        # 多信号新鲜证据：有行情 + 至少一个信息源
+        has_multi_signal = (
+            has_market
+            and bool(evidence.get("cls_watch_mentions") or evidence.get("cls_telegraph_mentions"))
+        )
+
+        return validate_sector_stage(
+            stage,
+            is_sparse=is_sparse,
+            has_market_evidence=has_market,
+            has_prior=has_prior,
+            prior_stage=prior_stage,
+            is_first_report=is_first_report,
+            has_multi_signal_fresh=has_multi_signal,
+        )
+
+    def _validate_group_stage_post_extract(
+        self,
+        stage: str,
+        *,
+        evidence: dict,
+        member_freshness: list[dict],
+    ) -> str:
+        """对分组 AI 输出阶段执行验证降级。"""
+        from src.services.trend_stage_taxonomy import validate_group_stage
+
+        # 构建成员板块状态列表
+        member_summaries = evidence.get("member_summaries", [])
+        member_sectors = []
+        for ms in member_summaries:
+            member_sectors.append({
+                "trend_status": ms.get("trend_status", ""),
+                "sector_status": ms.get("sector_status", ""),
+                "relation_type": ms.get("relation_type", ""),
+                "is_fresh": any(
+                    mf.get("sector_name") == ms.get("sector_name") and mf.get("is_fresh", False)
+                    for mf in member_freshness
+                ),
+            })
+
+        return validate_group_stage(
+            stage,
+            member_freshness=member_freshness,
+            member_sectors=member_sectors,
+        )
