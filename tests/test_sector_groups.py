@@ -686,6 +686,7 @@ async def theme_seeded_db(test_db: Database):
             ("CRO", "tracked"), ("白酒", "tracked"),
             ("风电", "tracked"), ("核电核能", "tracked"),
             ("卫星导航", "tracked"), ("国产软件", "tracked"),
+            ("机器人", "tracked"), ("智能机器", "tracked"),
             ("半导体", "ignored"), ("已退市", "inactive"),
         ]:
             sector = TrackedSector(
@@ -720,6 +721,13 @@ class TestThemeConstraints:
     def test_match_theme_topcon(self):
         """TOPCon 应匹配光伏产业链。"""
         assert SectorGroupService.match_theme("TOPCon") == "光伏产业链"
+
+    def test_match_theme_robotics(self):
+        """机器人相关板块应匹配人形机器人链。"""
+        assert SectorGroupService.match_theme("机器人") == "人形机器人链"
+        assert SectorGroupService.match_theme("机器人概念") == "人形机器人链"
+        assert SectorGroupService.match_theme("智能机器") == "人形机器人链"
+        assert SectorGroupService.match_theme("PEEK材料") == "人形机器人链"
 
     def test_match_theme_pork(self):
         """猪肉应匹配消费农业链。"""
@@ -802,6 +810,66 @@ class TestThemeConstraints:
 
         # 验证 evidence
         assert pv_suggestion["confidence"] is not None
+
+    @pytest.mark.asyncio
+    async def test_single_day_same_theme_market_cache_creates_low_confidence_suggestion(
+        self,
+        theme_seeded_db: Database,
+        theme_service: SectorGroupService,
+    ):
+        """同主题成员即使只有单日行情共现，也应产生低置信主题线索。"""
+        async with theme_seeded_db.get_session() as session:
+            for name in ["机器人", "智能机器"]:
+                session.add(MarketSector(
+                    trade_date=date(2026, 5, 15),
+                    sector_code=f"{name}_2026-05-15",
+                    sector_name=name,
+                    change_pct=1.0,
+                ))
+
+        result = await theme_service.generate_suggestions(days=10)
+        assert result["new_group_suggestions"] >= 1
+
+        suggestions = await theme_service.list_suggestions(suggestion_type="new_group")
+        robot_suggestions = [
+            s for s in suggestions
+            if s["suggested_group_name"] == "人形机器人链"
+        ]
+        assert robot_suggestions
+        member_names = {m["sector_name"] for m in robot_suggestions[0]["members"]}
+        assert {"机器人", "智能机器"} <= member_names
+
+    @pytest.mark.asyncio
+    async def test_single_day_robotics_theme_not_crowded_out_by_other_themes(
+        self,
+        theme_seeded_db: Database,
+        theme_service: SectorGroupService,
+    ):
+        """候选主题较多时，同主题机器人线索也应保留。"""
+        async with theme_seeded_db.get_session() as session:
+            themes = [
+                ["光伏", "TOPCon", "BC电池"],
+                ["锂电池", "固态电池", "电解液"],
+                ["卫星导航", "国产软件", "军工航天"],
+                ["CRO", "CXO", "仿制药"],
+                ["猪肉", "鸡肉", "白酒"],
+                ["风电", "核电核能", "地热能"],
+                ["机器人", "智能机器"],
+            ]
+            for names in themes:
+                for name in names:
+                    session.add(MarketSector(
+                        trade_date=date(2026, 5, 15),
+                        sector_code=f"{name}_2026-05-15",
+                        sector_name=name,
+                        change_pct=1.0,
+                    ))
+
+        await theme_service.generate_suggestions(days=10)
+
+        suggestions = await theme_service.list_suggestions(suggestion_type="new_group")
+        suggestion_names = {s["suggested_group_name"] for s in suggestions}
+        assert "人形机器人链" in suggestion_names
 
     @pytest.mark.asyncio
     async def test_ignored_and_inactive_excluded(

@@ -40,6 +40,7 @@ SUGGESTION_STATUSES = ("pending", "accepted", "ignored", "expired")
 # ------------------------------------------------------------------
 
 THEME_DEFINITIONS: dict[str, list[str]] = {
+    "人形机器人链": ["机器人", "机器人概念", "智能机器", "减速器", "丝杠", "灵巧手", "机器视觉", "传感器", "PEEK材料"],
     "光伏产业链": ["光伏", "TOPCon", "BC电池", "HIT电池", "钙钛矿", "HJT电池"],
     "锂电储能链": ["锂电池", "固态电池", "钠电池", "电解液", "盐湖提锂", "锂矿", "充电桩"],
     "军工信息链": ["卫星导航", "军工航天", "海工装备", "大飞机", "军民融合", "国产软件", "信息安全"],
@@ -89,8 +90,9 @@ class AICleaningResult:
 class SectorGroupService:
     """板块分组服务。"""
 
-    def __init__(self, db: Database) -> None:
+    def __init__(self, db: Database, theme_registry: Any = None) -> None:
         self.db = db
+        self._theme_registry = theme_registry
 
     # ------------------------------------------------------------------
     # 分组 CRUD
@@ -1357,9 +1359,6 @@ class SectorGroupService:
                     pair = frozenset([key1, key2])
                     pair_count[pair] = pair_count.get(pair, 0) + count
 
-        if not pair_count:
-            return {"new_groups": 0}
-
         # 贪心聚类
         used_keys: set[str] = set()
         raw_clusters: list[set[str]] = []
@@ -1380,17 +1379,53 @@ class SectorGroupService:
                     used_keys.update(cluster)
                     raw_clusters.append(cluster)
 
+        # market_cache 是弱信号，但同一内置主题内多个成员单日共现也应形成低置信线索。
+        # 这能捕捉最新刚进榜的主题，例如“机器人概念 + 智能机器”。
+        if co_source == "market_cache":
+            sector_by_key = {
+                SectorIdentity.comparison_key(s.canonical_name): s
+                for s in eligible_sectors
+            }
+            theme_keys: dict[str, set[str]] = {}
+            for key, sector in sector_by_key.items():
+                theme = self.match_theme(sector.canonical_name)
+                if theme is None:
+                    continue
+                if key not in co_occurrence:
+                    continue
+                has_same_theme_partner = False
+                for partner, count in co_occurrence.get(key, {}).items():
+                    partner_sector = sector_by_key.get(partner)
+                    if not partner_sector:
+                        continue
+                    if count >= 1 and self.match_theme(partner_sector.canonical_name) == theme:
+                        has_same_theme_partner = True
+                        break
+                if has_same_theme_partner:
+                    theme_keys.setdefault(theme, set()).add(key)
+
+            for keys in theme_keys.values():
+                if len(keys) < 2:
+                    continue
+                if any(keys <= existing for existing in raw_clusters):
+                    continue
+                raw_clusters.append(keys)
+
+        if not raw_clusters:
+            return {"new_groups": 0}
+
         # 阶段 2：主题约束 - 为每个聚类匹配主题，拆分跨主题聚类
-        candidate_clusters = self._apply_theme_constraints(
+        candidate_clusters = await self._apply_theme_constraints(
             raw_clusters=raw_clusters,
             eligible_sectors=eligible_sectors,
             co_occurrence=co_occurrence,
             co_source=co_source,
         )
+        candidate_clusters = self._deduplicate_candidate_clusters(candidate_clusters)
 
         # 阶段 3+4：AI 清洗 + 持久化
         new_count = 0
-        for cluster in candidate_clusters[:5]:
+        for cluster in candidate_clusters[:10]:
             if len(cluster.members) < 2:
                 continue
 
@@ -1463,17 +1498,61 @@ class SectorGroupService:
 
         return {"new_groups": new_count}
 
+    @staticmethod
+    def _deduplicate_candidate_clusters(
+        clusters: list[CandidateCluster],
+    ) -> list[CandidateCluster]:
+        """同一主题只保留成员最多、共现最强的一条候选。"""
+        best_by_theme: dict[str, CandidateCluster] = {}
+        others: list[CandidateCluster] = []
+
+        for cluster in clusters:
+            if cluster.theme_name is None:
+                others.append(cluster)
+                continue
+
+            current = best_by_theme.get(cluster.theme_name)
+            if current is None:
+                best_by_theme[cluster.theme_name] = cluster
+                continue
+
+            current_score = (
+                len(current.members),
+                sum(m.co_occurrence_count for m in current.members),
+            )
+            new_score = (
+                len(cluster.members),
+                sum(m.co_occurrence_count for m in cluster.members),
+            )
+            if new_score > current_score:
+                best_by_theme[cluster.theme_name] = cluster
+
+        deduped = list(best_by_theme.values()) + others
+        deduped.sort(key=lambda c: (
+            c.theme_name is None,
+            -len(c.members),
+            -sum(m.co_occurrence_count for m in c.members),
+        ))
+        return deduped
+
     # ------------------------------------------------------------------
     # 主题约束与匹配
     # ------------------------------------------------------------------
 
     @staticmethod
     def match_theme(name: str) -> str | None:
-        """匹配板块名称到内置主题。"""
+        """匹配板块名称到内置主题（静态 fallback）。"""
         key = SectorIdentity.comparison_key(name)
         return _THEME_KEY_INDEX.get(key)
 
-    def _apply_theme_constraints(
+    async def match_theme_dynamic(self, name: str) -> str | None:
+        """匹配板块名称到主题（优先使用动态注册表）。"""
+        if self._theme_registry is not None:
+            registry = await self._theme_registry.get_registry()
+            return registry.match(name)
+        return self.match_theme(name)
+
+    async def _apply_theme_constraints(
         self,
         raw_clusters: list[set[str]],
         eligible_sectors: list[TrackedSector],
@@ -1494,7 +1573,9 @@ class SectorGroupService:
             key_themes: dict[str, str | None] = {}
             for k in raw:
                 if k in sector_by_key:
-                    key_themes[k] = self.match_theme(sector_by_key[k].canonical_name)
+                    key_themes[k] = await self.match_theme_dynamic(
+                        sector_by_key[k].canonical_name
+                    )
                 else:
                     key_themes[k] = None
 

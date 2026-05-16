@@ -916,3 +916,78 @@ class SectorGroupTrendSummary(Base):
 
     def __repr__(self) -> str:
         return f"<SectorGroupTrendSummary(group_name='{self.group_name}', end_date='{self.end_date}')>"
+
+
+class ThemeTermSuggestion(Base):
+    """主题词建议模型 - 主题词典学习建议。"""
+
+    __tablename__ = "theme_term_suggestions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    suggestion_type: Mapped[str] = mapped_column(
+        String(32), nullable=False,
+        comment="建议类型: add_to_existing_theme/create_theme/mark_noise/disable_term",
+    )
+    target_theme_name: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True, comment="目标主题名",
+    )
+    suggested_theme_name: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True, comment="建议新建的主题名",
+    )
+    term: Mapped[str] = mapped_column(
+        String(64), nullable=False, comment="候选主题词",
+    )
+    normalized_key: Mapped[str] = mapped_column(
+        String(64), nullable=False, comment="规范化键(comparison_key)",
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="pending",
+        comment="状态: pending/accepted/ignored/expired",
+    )
+    confidence: Mapped[Optional[float]] = mapped_column(
+        Float, nullable=True, comment="置信度 0-1",
+    )
+    reason: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True, comment="AI/规则判断理由",
+    )
+    evidence_json: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True, comment="证据数据(JSON)",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), comment="创建时间",
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now(), comment="更新时间",
+    )
+
+    def __repr__(self) -> str:
+        return f"<ThemeTermSuggestion(term='{self.term}', type='{self.suggestion_type}', status='{self.status}')>"
+
+
+class AcceptedThemeTerm(Base):
+    """已接受主题词记录 - 经用户确认的主题词学习结果。"""
+
+    __tablename__ = "accepted_theme_terms"
+    __table_args__ = (
+        UniqueConstraint("theme_name", "normalized_key", name="uq_accepted_theme_terms_theme_key"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    theme_name: Mapped[str] = mapped_column(
+        String(64), nullable=False, index=True, comment="主题名",
+    )
+    term: Mapped[str] = mapped_column(
+        String(64), nullable=False, comment="主题词",
+    )
+    normalized_key: Mapped[str] = mapped_column(
+        String(64), nullable=False, comment="规范化键",
+    )
+    source_suggestion_id: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True, comment="来源建议ID",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), comment="创建时间",
+    )
+
+    def __repr__(self) -> str:
+        return f"<AcceptedThemeTerm(theme='{self.theme_name}', term='{self.term}')>"

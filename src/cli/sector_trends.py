@@ -384,6 +384,258 @@ def groups() -> None:
     pass
 
 
+# ---------------------------------------------------------------------------
+# 主题词典子命令组
+# ---------------------------------------------------------------------------
+
+
+@groups.group("themes")
+def themes() -> None:
+    """主题词典管理命令。"""
+    pass
+
+
+@themes.command("ls")
+def themes_ls() -> None:
+    """列出有效主题。"""
+    async def _run() -> None:
+        from src.services.theme_registry import ThemeRegistryService
+
+        db = await get_db()
+        service = ThemeRegistryService(db)
+        registry = await service.get_registry()
+        theme_list = registry.list_themes()
+
+        if not theme_list:
+            console.print("[yellow]暂无主题[/yellow]")
+            return
+
+        table = Table(title=f"主题词典（共 {len(theme_list)} 个）")
+        table.add_column("主题名", style="cyan")
+        table.add_column("来源", style="green")
+        table.add_column("总成员", justify="right")
+        table.add_column("活跃成员", style="blue", justify="right")
+        table.add_column("禁用数", style="yellow", justify="right")
+
+        for t in theme_list:
+            table.add_row(
+                t["name"],
+                t["source"],
+                str(t["total_members"]),
+                str(t["active_members"]),
+                str(t["disabled_count"]),
+            )
+        console.print(table)
+
+    run_async(_run())
+
+
+@themes.command("show")
+@click.option("--theme", "theme_name", required=True, help="主题名")
+def themes_show(theme_name: str) -> None:
+    """查看主题详情。"""
+    async def _run() -> None:
+        from src.services.theme_registry import ThemeRegistryService
+
+        db = await get_db()
+        service = ThemeRegistryService(db)
+        registry = await service.get_registry()
+        detail = registry.show_theme(theme_name)
+
+        if not detail:
+            console.print(f"[red]主题 '{theme_name}' 不存在[/red]")
+            return
+
+        console.print(f"[bold]主题: {detail['name']}[/bold] (来源: {detail['source']})")
+        if detail["aliases"]:
+            console.print(f"  别名: {', '.join(detail['aliases'])}")
+        console.print(f"  成员: {', '.join(detail['members'])}")
+        if detail["disabled_members"]:
+            console.print(f"  禁用: {', '.join(detail['disabled_members'])}")
+
+    run_async(_run())
+
+
+@themes.command("validate")
+def themes_validate() -> None:
+    """校验主题词典冲突。"""
+    async def _run() -> None:
+        from src.services.theme_registry import ThemeRegistryService
+
+        db = await get_db()
+        service = ThemeRegistryService(db)
+        registry = await service.get_registry()
+        issues = registry.validate()
+
+        if not issues:
+            console.print("[green]无冲突[/green]")
+            return
+
+        for issue in issues:
+            console.print(f"[yellow][{issue['type']}] {issue['message']}[/yellow]")
+
+    run_async(_run())
+
+
+@themes.command("add")
+@click.option("--theme", "theme_name", required=True, help="主题名")
+@click.option("--member", required=True, help="主题词")
+def themes_add(theme_name: str, member: str) -> None:
+    """手动添加主题词成员。"""
+    async def _run() -> None:
+        from src.services.theme_registry import ThemeRegistryService
+
+        db = await get_db()
+        service = ThemeRegistryService(db)
+        result = await service.add_theme_member(theme_name, member)
+        if result["action"] == "added":
+            console.print(f"[green]已添加 '{member}' 到 '{theme_name}'[/green]")
+        else:
+            console.print(f"[red]{result.get('error', '操作失败')}[/red]")
+
+    run_async(_run())
+
+
+@themes.command("remove")
+@click.option("--theme", "theme_name", required=True, help="主题名")
+@click.option("--member", required=True, help="主题词")
+def themes_remove(theme_name: str, member: str) -> None:
+    """移除并禁用主题词成员。"""
+    async def _run() -> None:
+        from src.services.theme_registry import ThemeRegistryService
+
+        db = await get_db()
+        service = ThemeRegistryService(db)
+        result = await service.remove_theme_member(theme_name, member)
+        if result["action"] == "removed":
+            console.print(f"[green]已从 '{theme_name}' 移除并禁用 '{member}'[/green]")
+        else:
+            console.print(f"[red]{result.get('error', '操作失败')}[/red]")
+
+    run_async(_run())
+
+
+@themes.command("ignore-term")
+@click.option("--term", required=True, help="噪声词")
+def themes_ignore_term(term: str) -> None:
+    """将词加入噪声词表。"""
+    async def _run() -> None:
+        from src.services.theme_registry import ThemeRegistryService
+
+        db = await get_db()
+        service = ThemeRegistryService(db)
+        result = await service.ignore_term(term)
+        console.print(f"[green]已将 '{term}' 加入噪声词表[/green]")
+
+    run_async(_run())
+
+
+@themes.command("suggest")
+@click.option("--days", type=int, default=10, help="回看天数")
+@click.option("--no-ai", is_flag=True, default=False, help="禁用 AI 分类")
+def themes_suggest(days: int, no_ai: bool) -> None:
+    """生成主题词学习建议。"""
+    async def _run() -> None:
+        from src.services.theme_registry import ThemeRegistryService
+
+        db = await get_db()
+        service = ThemeRegistryService(db)
+
+        ai_processor = None
+        if not no_ai:
+            try:
+                from src.services.ai_processor import AIProcessor
+                ai_processor = AIProcessor(db)
+            except Exception:
+                pass
+
+        with console.status("[bold blue]生成主题词建议中...[/bold blue]"):
+            result = await service.generate_theme_suggestions(
+                days=days, ai_processor=ai_processor
+            )
+
+        console.print(f"[green]主题词建议生成完成[/green]")
+        console.print(f"  新建建议: {result['suggestions_created']} 个")
+        console.print(f"  低证据过滤: {result['candidates_filtered']} 个")
+
+    run_async(_run())
+
+
+@themes.command("suggestions")
+@click.option("--status", type=str, default="pending", help="状态筛选")
+def themes_suggestions(status: str) -> None:
+    """查看主题词建议。"""
+    async def _run() -> None:
+        from src.services.theme_registry import ThemeRegistryService
+
+        db = await get_db()
+        service = ThemeRegistryService(db)
+        suggestions = await service.list_theme_suggestions(status=status)
+
+        if not suggestions:
+            console.print("[yellow]暂无主题词建议[/yellow]")
+            return
+
+        table = Table(title=f"主题词建议（共 {len(suggestions)} 条）")
+        table.add_column("ID", style="dim", justify="right")
+        table.add_column("类型", style="cyan")
+        table.add_column("词", style="green")
+        table.add_column("目标主题", style="blue")
+        table.add_column("置信度", justify="right")
+        table.add_column("原因", style="yellow", max_width=40)
+
+        for s in suggestions:
+            table.add_row(
+                str(s["id"]),
+                s["suggestion_type"],
+                s["term"],
+                s.get("target_theme_name") or s.get("suggested_theme_name") or "-",
+                f"{s.get('confidence', 0):.2f}" if s.get("confidence") else "-",
+                (s.get("reason") or "-")[:40],
+            )
+        console.print(table)
+
+    run_async(_run())
+
+
+@themes.command("accept")
+@click.argument("suggestion_id", type=int)
+def themes_accept(suggestion_id: int) -> None:
+    """接受主题词建议。"""
+    async def _run() -> None:
+        from src.services.theme_registry import ThemeRegistryService
+
+        db = await get_db()
+        service = ThemeRegistryService(db)
+        result = await service.accept_theme_suggestion(suggestion_id)
+        if result["action"] == "accepted":
+            console.print(
+                f"[green]已接受: '{result['term']}' → '{result['theme_name']}'[/green]"
+            )
+        else:
+            console.print(f"[red]{result.get('error', '操作失败')}[/red]")
+
+    run_async(_run())
+
+
+@themes.command("ignore")
+@click.argument("suggestion_id", type=int)
+def themes_ignore(suggestion_id: int) -> None:
+    """忽略主题词建议。"""
+    async def _run() -> None:
+        from src.services.theme_registry import ThemeRegistryService
+
+        db = await get_db()
+        service = ThemeRegistryService(db)
+        result = await service.ignore_theme_suggestion(suggestion_id)
+        if result["action"] == "ignored":
+            console.print(f"[green]已忽略建议 #{suggestion_id}[/green]")
+        else:
+            console.print(f"[red]{result.get('error', '操作失败')}[/red]")
+
+    run_async(_run())
+
+
 @groups.command("ls")
 @click.option("--status", type=str, default=None, help="状态筛选 (active/inactive)")
 @click.option("--limit", "-n", type=int, default=50, help="显示数量（默认 50）")
