@@ -134,6 +134,62 @@ def init(sector: str) -> None:
 
 
 @sector_trends.command()
+@click.option("--date", "report_date", required=True, type=str, help="目标日期 (YYYY-MM-DD)")
+@click.option("--days", type=int, default=10, help="回看窗口天数（默认 10）")
+def repair(report_date: str, days: int) -> None:
+    """修复 CLS 看盘数据板块归属（不生成趋势报告）。"""
+    from datetime import date as date_type
+
+    try:
+        target_date = date_type.fromisoformat(report_date)
+    except ValueError:
+        console.print(f"[red]日期格式错误: {report_date}，请使用 YYYY-MM-DD 格式[/red]")
+        return
+
+    async def _repair() -> None:
+        from src.services.cls_watch_repair import ClsWatchRepairService
+
+        db = await get_db()
+        service = ClsWatchRepairService(db)
+
+        console.print(f"[bold]修复 CLS 看盘板块归属[/bold]")
+        console.print(f"  目标日期: {target_date}")
+        console.print(f"  窗口: {days} 天")
+        console.print()
+
+        with console.status("[bold blue]修复中...[/bold blue]"):
+            result = await service.repair_window(target_date, days)
+
+        console.print(f"\n[bold]修复完成[/bold]")
+        console.print(f"  已修复: [green]{result.repaired}[/green]")
+        console.print(f"  未变更: [dim]{result.unchanged}[/dim]")
+        console.print(f"  未匹配: [yellow]{result.unmatched}[/yellow]")
+        console.print(f"  低置信: [dim]{result.low_confidence}[/dim]")
+        console.print(f"  跳过: [dim]{result.skipped}[/dim]")
+
+        if result.details:
+            table = Table(title="修复详情")
+            table.add_column("标题", style="cyan", max_width=40)
+            table.add_column("归属板块", style="green")
+            table.add_column("置信度", style="yellow")
+
+            for d in result.details[:20]:  # 最多显示 20 条
+                sectors_str = ", ".join(d["sectors"])
+                confidences = ", ".join(
+                    m["confidence"] for m in d["matches"]
+                )
+                table.add_row(
+                    (d["title"] or "")[:40],
+                    sectors_str,
+                    confidences,
+                )
+
+            console.print(table)
+
+    run_async(_repair())
+
+
+@sector_trends.command()
 @click.option("--sector", default=None, help="指定板块名称")
 @click.option("--all", "update_all", is_flag=True, help="更新所有跟踪板块")
 @click.option("--days", type=int, default=10, help="回看窗口天数（默认 10）")
@@ -141,6 +197,7 @@ def init(sector: str) -> None:
 @click.option("--limit", type=int, default=None, help="批量更新数量限制（--all 模式）")
 @click.option("--continue-on-error", is_flag=True, default=True, help="遇到错误继续更新")
 @click.option("--date", "report_date", type=str, default=None, help="报告日期 (YYYY-MM-DD)")
+@click.option("--skip-repair", is_flag=True, default=False, help="跳过 CLS 看盘板块归属修复")
 def update(
     sector: str | None,
     update_all: bool,
@@ -149,6 +206,7 @@ def update(
     limit: int | None,
     continue_on_error: bool,
     report_date: str | None,
+    skip_repair: bool,
 ) -> None:
     """更新板块趋势。"""
     if not sector and not update_all:
@@ -192,12 +250,17 @@ def update(
                     ai_processor=ai_processor,
                     days=days,
                     report_date=parsed_report_date,
+                    skip_repair=skip_repair,
                 )
 
             console.print(f"\n[bold]批量更新完成[/bold]")
             console.print(f"  成功: [green]{result['success']}[/green]")
             console.print(f"  跳过: [yellow]{result['skipped']}[/yellow]")
             console.print(f"  失败: [red]{result['failed']}[/red]")
+
+            if result.get("repair_result"):
+                rr = result["repair_result"]
+                console.print(f"  修复: [green]{rr.repaired}[/green] 已归属, [yellow]{rr.low_confidence}[/yellow] 低置信, [dim]{rr.unmatched} 未匹配[/dim]")
 
             if result.get("results"):
                 table = Table(title="更新详情")
@@ -281,6 +344,7 @@ def update(
                 ai_processor=ai_processor,
                 force=force,
                 report_date=parsed_report_date,
+                skip_repair=skip_repair,
             )
             gen_elapsed = time.perf_counter() - gen_start
 

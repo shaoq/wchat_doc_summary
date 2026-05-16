@@ -706,6 +706,15 @@ class SectorTrendAnalyzer:
             gaps.append("cls_telegraph_missing")
         evidence["data_gaps"] = gaps
 
+        # 5. 诊断计数（用于历史回放、矩阵视图和调试）
+        evidence["diagnostics"] = {
+            "market_count": len(matched_sectors),
+            "cls_watch_count": len(watch_mentions),
+            "cls_telegraph_count": len(telegraph_mentions),
+            "total_evidence_count": total_evidence,
+            "data_gap_count": len(gaps),
+        }
+
         return evidence
 
     async def _collect_telegraph_mentions(
@@ -749,16 +758,27 @@ class SectorTrendAnalyzer:
     # ------------------------------------------------------------------
 
     async def get_previous_summary(
-        self, sector_id: int,
+        self,
+        sector_id: int,
+        *,
+        before_date: date | None = None,
     ) -> SectorTrendSummary | None:
-        """获取板块最近一次趋势总结。"""
+        """获取板块最近一次趋势总结。
+
+        Args:
+            sector_id: 板块 ID
+            before_date: 如果指定，只返回 end_date < before_date 的总结，
+                         用于日期回放时避免使用未来报告作为先前上下文。
+        """
         async with self.db.get_session() as session:
-            result = await session.execute(
+            stmt = (
                 select(SectorTrendSummary)
                 .where(SectorTrendSummary.sector_id == sector_id)
-                .order_by(SectorTrendSummary.end_date.desc())
-                .limit(1)
             )
+            if before_date is not None:
+                stmt = stmt.where(SectorTrendSummary.end_date < before_date)
+            stmt = stmt.order_by(SectorTrendSummary.end_date.desc()).limit(1)
+            result = await session.execute(stmt)
             return result.scalar_one_or_none()
 
     async def save_trend_summary(
@@ -857,16 +877,18 @@ class SectorTrendAnalyzer:
         force: bool = False,
         progress_callback: Callable[[str, str], None] | None = None,
         report_date: date | None = None,
+        skip_repair: bool = False,
     ) -> dict[str, Any]:
         """更新单个板块趋势。
 
         完整流程:
         1. 确保板块为 tracked 状态
         2. 检查是否已有当日更新（除非 force）
-        3. 收集证据
-        4. 获取上次总结
-        5. 生成新总结
-        6. 保存
+        3. 修复 CLS 看盘板块归属（除非 skip_repair）
+        4. 收集证据
+        5. 获取上次总结
+        6. 生成新总结
+        7. 保存
 
         Args:
             sector_name: 板块名称
@@ -875,6 +897,7 @@ class SectorTrendAnalyzer:
             force: 是否强制重新生成
             progress_callback: 进度回调 (stage_name, detail)
             report_date: 报告日期（默认最近交易日）
+            skip_repair: 是否跳过 CLS 看盘板块归属修复
 
         Returns:
             更新结果
@@ -902,14 +925,27 @@ class SectorTrendAnalyzer:
                     "reason": "今日已更新，使用 --force 重新生成",
                 }
 
-        # 4. 收集证据
+        # 4. 修复 CLS 看盘板块归属（日期回放时，只使用本地已有数据）
+        repair_result = None
+        if not skip_repair:
+            _emit("repair", "修复 CLS 看盘板块归属...")
+            try:
+                from src.services.cls_watch_repair import ClsWatchRepairService
+                repair_service = ClsWatchRepairService(self.db)
+                repair_result = await repair_service.repair_window(end_date, days)
+            except Exception as e:
+                logger.warning("CLS 看盘板块归属修复失败，继续使用已有数据: %s", e)
+
+        # 5. 收集证据
         _emit("evidence", "收集板块证据...")
         evidence = await self.collect_sector_evidence(
             sector.canonical_name, end_date, days,
         )
 
-        # 5. 获取上次总结
-        previous_summary = await self.get_previous_summary(sector.id)
+        # 6. 获取上次总结（日期回放时只使用目标日期之前的报告）
+        previous_summary = await self.get_previous_summary(
+            sector.id, before_date=end_date,
+        )
         previous_context = None
         if previous_summary:
             previous_context = {
@@ -921,12 +957,13 @@ class SectorTrendAnalyzer:
                 "end_date": previous_summary.end_date.isoformat() if previous_summary.end_date else None,
             }
 
-        # 6. AI 生成
+        # 7. AI 生成
         if ai_processor is None:
             return {
                 "action": "no_ai_processor",
                 "sector_name": sector.canonical_name,
                 "evidence": evidence,
+                "repair_result": repair_result,
             }
 
         _emit("ai", "AI 生成板块趋势...")
@@ -938,8 +975,18 @@ class SectorTrendAnalyzer:
             window_days=days,
         )
 
-        # 7. 保存
+        # 8. 保存（包含修复诊断信息）
         _emit("save", "保存板块报告...")
+
+        # 将修复诊断信息嵌入证据中
+        if repair_result:
+            evidence["repair_diagnostics"] = {
+                "repaired": repair_result.repaired,
+                "unchanged": repair_result.unchanged,
+                "unmatched": repair_result.unmatched,
+                "low_confidence": repair_result.low_confidence,
+            }
+
         summary = await self.save_trend_summary(
             sector=sector,
             end_date=end_date,
@@ -952,7 +999,7 @@ class SectorTrendAnalyzer:
             evidence_json=json.dumps(evidence, ensure_ascii=False),
         )
 
-        return {
+        result = {
             "action": "updated",
             "sector_name": sector.canonical_name,
             "end_date": end_date.isoformat(),
@@ -961,6 +1008,9 @@ class SectorTrendAnalyzer:
             "strength_level": labels.get("strength_level"),
             "action_bias": labels.get("action_bias"),
         }
+        if repair_result:
+            result["repair_result"] = repair_result
+        return result
 
     # ------------------------------------------------------------------
     # 批量更新
@@ -975,6 +1025,7 @@ class SectorTrendAnalyzer:
         ai_processor: Any = None,
         days: int = 10,
         report_date: date | None = None,
+        skip_repair: bool = False,
     ) -> dict[str, Any]:
         """批量更新所有 tracked 板块趋势。
 
@@ -985,6 +1036,7 @@ class SectorTrendAnalyzer:
             ai_processor: AI 处理器实例
             days: 回看窗口天数
             report_date: 报告日期（默认最近交易日）
+            skip_repair: 是否跳过 CLS 看盘板块归属修复
 
         Returns:
             批量更新结果
@@ -1001,6 +1053,17 @@ class SectorTrendAnalyzer:
             result = await session.execute(query)
             sectors = list(result.scalars().all())
 
+        # 批量修复：对整个证据窗口运行一次修复，避免每个板块重复修复
+        repair_result = None
+        if not skip_repair:
+            end_date = report_date or self._market_analyzer.get_latest_trade_date()
+            try:
+                from src.services.cls_watch_repair import ClsWatchRepairService
+                repair_service = ClsWatchRepairService(self.db)
+                repair_result = await repair_service.repair_window(end_date, days)
+            except Exception as e:
+                logger.warning("批量 CLS 看盘板块归属修复失败，继续使用已有数据: %s", e)
+
         results: list[dict[str, Any]] = []
         success_count = 0
         skipped_count = 0
@@ -1014,6 +1077,7 @@ class SectorTrendAnalyzer:
                     ai_processor=ai_processor,
                     force=force,
                     report_date=report_date,
+                    skip_repair=True,  # 批量模式已在上面统一修复
                 )
                 results.append(update_result)
                 if update_result.get("action") == "updated":
@@ -1031,13 +1095,16 @@ class SectorTrendAnalyzer:
                 if not continue_on_error:
                     break
 
-        return {
+        batch_result = {
             "total": len(sectors),
             "success": success_count,
             "skipped": skipped_count,
             "failed": failed_count,
             "results": results,
         }
+        if repair_result:
+            batch_result["repair_result"] = repair_result
+        return batch_result
 
     # ------------------------------------------------------------------
     # 查看与历史
