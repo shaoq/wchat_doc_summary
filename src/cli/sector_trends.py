@@ -140,6 +140,7 @@ def init(sector: str) -> None:
 @click.option("--force", is_flag=True, help="强制重新生成")
 @click.option("--limit", type=int, default=None, help="批量更新数量限制（--all 模式）")
 @click.option("--continue-on-error", is_flag=True, default=True, help="遇到错误继续更新")
+@click.option("--date", "report_date", type=str, default=None, help="报告日期 (YYYY-MM-DD)")
 def update(
     sector: str | None,
     update_all: bool,
@@ -147,11 +148,23 @@ def update(
     force: bool,
     limit: int | None,
     continue_on_error: bool,
+    report_date: str | None,
 ) -> None:
     """更新板块趋势。"""
     if not sector and not update_all:
         console.print("[red]请指定 --sector <名称> 或 --all[/red]")
         return
+
+    # 解析日期
+    from datetime import date as date_type
+
+    parsed_report_date: date_type | None = None
+    if report_date:
+        try:
+            parsed_report_date = date_type.fromisoformat(report_date)
+        except ValueError:
+            console.print(f"[red]日期格式错误: {report_date}，请使用 YYYY-MM-DD 格式[/red]")
+            return
 
     async def _update() -> None:
         from src.services.ai_processor import AIProcessor
@@ -178,6 +191,7 @@ def update(
                     continue_on_error=continue_on_error,
                     ai_processor=ai_processor,
                     days=days,
+                    report_date=parsed_report_date,
                 )
 
             console.print(f"\n[bold]批量更新完成[/bold]")
@@ -216,7 +230,7 @@ def update(
             return
 
         # 单板块更新 - 阶段式输出
-        end_date = analyzer._market_analyzer.get_latest_trade_date()
+        end_date = parsed_report_date or analyzer._market_analyzer.get_latest_trade_date()
 
         console.print(f"[bold]板块: {sector}[/bold]")
         console.print(f"  交易日: {end_date}")
@@ -266,6 +280,7 @@ def update(
                 days=days,
                 ai_processor=ai_processor,
                 force=force,
+                report_date=parsed_report_date,
             )
             gen_elapsed = time.perf_counter() - gen_start
 
@@ -1021,6 +1036,7 @@ def groups_ignore(suggestion_id: int) -> None:
 @click.option("--continue-on-error", is_flag=True, default=True, help="遇到错误继续")
 @click.option("--verbose", is_flag=True, help="显示详细诊断信息")
 @click.option("--quiet", is_flag=True, help="静默模式，只显示最终汇总")
+@click.option("--date", "report_date", type=str, default=None, help="报告日期 (YYYY-MM-DD)")
 def groups_update(
     group_name: str | None,
     update_all: bool,
@@ -1032,11 +1048,23 @@ def groups_update(
     continue_on_error: bool,
     verbose: bool,
     quiet: bool,
+    report_date: str | None,
 ) -> None:
     """更新分组趋势。"""
     if not group_name and not update_all:
         console.print("[red]请指定 --group <名称> 或 --all[/red]")
         return
+
+    # 解析日期
+    from datetime import date as date_type
+
+    parsed_report_date: date_type | None = None
+    if report_date:
+        try:
+            parsed_report_date = date_type.fromisoformat(report_date)
+        except ValueError:
+            console.print(f"[red]日期格式错误: {report_date}，请使用 YYYY-MM-DD 格式[/red]")
+            return
 
     async def _update() -> None:
         from src.services.ai_processor import AIProcessor
@@ -1331,13 +1359,14 @@ def groups_update(
                 continue_on_error=continue_on_error,
                 limit=limit,
                 progress_callback=_render_event,
+                report_date=parsed_report_date,
             )
             return
 
         # 单分组更新 - 阶段式输出
         from src.services.sector_group_service import SectorGroupService
 
-        end_date = service._get_latest_trade_date()
+        end_date = parsed_report_date or service._get_latest_trade_date()
 
         console.print(f"[bold]分组: {group_name}[/bold]")
         console.print(f"  交易日: {end_date}")
@@ -1376,6 +1405,7 @@ def groups_update(
             force_refresh_members=force_refresh_members,
             days=days,
             continue_on_error=continue_on_error,
+            report_date=parsed_report_date,
         )
 
         refresh_results = result.get("member_refresh_results", [])

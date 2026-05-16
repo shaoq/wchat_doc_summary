@@ -927,3 +927,7 @@ ai.add_command(stocks)
 # 导入并注册 sector-trends 子命令组
 from src.cli.sector_trends import sector_trends
 ai.add_command(sector_trends)
+
+# 导入并注册 market-data 子命令组
+from src.cli.market_data import market_data
+ai.add_command(market_data)

@@ -703,6 +703,7 @@ class SectorGroupService:
         progress_callback: ProgressCallback | None = None,
         group_index: int = 0,
         group_total: int = 0,
+        report_date: date | None = None,
     ) -> dict[str, Any]:
         """更新分组趋势。
 
@@ -717,6 +718,7 @@ class SectorGroupService:
             progress_callback: 进度回调
             group_index: 当前分组序号（批量时）
             group_total: 总分组数（批量时）
+            report_date: 报告日期（默认最近交易日）
 
         Returns:
             更新结果
@@ -734,7 +736,7 @@ class SectorGroupService:
                     **kwargs,
                 ))
 
-        end_date = self._get_latest_trade_date()
+        end_date = report_date or self._get_latest_trade_date()
 
         async with self.db.get_session() as session:
             group = await self._resolve_group(session, group_name)
@@ -924,6 +926,7 @@ class SectorGroupService:
         continue_on_error: bool = True,
         limit: int | None = None,
         progress_callback: ProgressCallback | None = None,
+        report_date: date | None = None,
     ) -> dict[str, Any]:
         """批量更新所有活跃分组趋势。
 
@@ -936,11 +939,12 @@ class SectorGroupService:
             continue_on_error: 错误时继续
             limit: 最大更新数量
             progress_callback: 进度回调
+            report_date: 报告日期（默认最近交易日）
 
         Returns:
             批量更新结果
         """
-        end_date = self._get_latest_trade_date()
+        end_date = report_date or self._get_latest_trade_date()
 
         async with self.db.get_session() as session:
             query = select(SectorGroup).where(
@@ -1004,6 +1008,7 @@ class SectorGroupService:
                     progress_callback=progress_callback,
                     group_index=i,
                     group_total=total,
+                    report_date=report_date,
                 )
                 results.append(update_result)
 
@@ -2216,6 +2221,38 @@ class SectorGroupService:
         window_days: int,
     ) -> dict[str, Any]:
         """收集组级证据。"""
+
+    async def _get_member_summary_for_date(
+        self,
+        sector_id: int,
+        target_date: date,
+    ) -> SectorTrendSummary | None:
+        """获取成员在目标日期或之前的最新趋势报告。
+
+        优先返回目标日期完全匹配的报告。
+        如果无精确匹配，返回不晚于目标日期的最新报告。
+        目标日期之后的报告不会被使用。
+        """
+        async with self.db.get_session() as session:
+            # 优先精确匹配
+            result = await session.execute(
+                select(SectorTrendSummary)
+                .where(SectorTrendSummary.sector_id == sector_id)
+                .where(SectorTrendSummary.end_date == target_date)
+            )
+            summary = result.scalar_one_or_none()
+            if summary:
+                return summary
+
+            # 回退到目标日期之前的最新报告
+            result = await session.execute(
+                select(SectorTrendSummary)
+                .where(SectorTrendSummary.sector_id == sector_id)
+                .where(SectorTrendSummary.end_date <= target_date)
+                .order_by(SectorTrendSummary.end_date.desc())
+                .limit(1)
+            )
+            return result.scalar_one_or_none()
         async with self.db.get_session() as session:
             # 获取已确认成员
             result = await session.execute(
@@ -2234,15 +2271,9 @@ class SectorGroupService:
         }
 
         for member, sector in members:
-            # 获取成员最新的趋势报告
-            async with self.db.get_session() as session:
-                result = await session.execute(
-                    select(SectorTrendSummary)
-                    .where(SectorTrendSummary.sector_id == sector.id)
-                    .order_by(SectorTrendSummary.end_date.desc())
-                    .limit(1)
-                )
-                summary = result.scalar_one_or_none()
+            # 获取成员的趋势报告
+            # 对于历史回放：优先匹配目标日期，否则使用不晚于目标日期的最新报告
+            summary = await self._get_member_summary_for_date(sector.id, end_date)
 
             member_data: dict[str, Any] = {
                 "sector_name": sector.canonical_name,

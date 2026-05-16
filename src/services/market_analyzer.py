@@ -319,9 +319,15 @@ class MarketAnalyzer:
                 logger.info(f"历史交易日缓存命中: {trade_date}")
                 return cached_data
 
-            msg = f"历史交易日 {trade_date} 无可用市场数据（无缓存且无历史数据源）"
+            msg = (
+                f"历史交易日 {trade_date} 无可用市场数据（无缓存且无历史数据源）。"
+                f" 请先运行 wchat ai market-data backfill --date {trade_date} 回填市场数据"
+            )
             if force:
-                msg = f"历史交易日 {trade_date} 不支持强制刷新（无历史数据源）"
+                msg = (
+                    f"历史交易日 {trade_date} 不支持强制刷新（无历史数据源）。"
+                    f" 请先运行 wchat ai market-data backfill --date {trade_date} 回填市场数据"
+                )
             logger.warning(msg)
             return {
                 "indices": {},

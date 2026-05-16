@@ -13,6 +13,7 @@ from sqlalchemy import func as sql_func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models.schema import (
+    CLSTelegraph,
     CLSWatchData,
     MarketSector,
     SectorTrendSummary,
@@ -683,11 +684,65 @@ class SectorTrendAnalyzer:
             evidence["cls_watch_mentions"] = watch_mentions
             total_evidence += len(watch_mentions)
 
-        # 3. 稀疏证据判断
+        # 3. CLS 电报提及
+        telegraph_mentions = await self._collect_telegraph_mentions(
+            sector_name, start_date, end_date,
+        )
+        if telegraph_mentions:
+            evidence["cls_telegraph_mentions"] = telegraph_mentions
+            total_evidence += len(telegraph_mentions)
+
+        # 4. 稀疏证据判断与缺口元数据
         evidence["is_sparse"] = total_evidence < 3
         evidence["total_evidence_count"] = total_evidence
 
+        # 显式缺口标记（用于历史回填场景）
+        gaps: list[str] = []
+        if not matched_sectors:
+            gaps.append("market_sector_cache_missing")
+        if not watch_mentions:
+            gaps.append("cls_watch_missing")
+        if not telegraph_mentions:
+            gaps.append("cls_telegraph_missing")
+        evidence["data_gaps"] = gaps
+
         return evidence
+
+    async def _collect_telegraph_mentions(
+        self,
+        sector_name: str,
+        start_date: date,
+        end_date: date,
+    ) -> list[dict[str, Any]]:
+        """从存储的 CLS 电报中收集匹配板块名称的提及。"""
+        start_ts = int(datetime.combine(start_date, datetime.min.time()).timestamp())
+        end_ts = int(datetime.combine(end_date, datetime.max.time()).timestamp())
+        canonical_key = SectorIdentity.comparison_key(sector_name)
+
+        async with self.db.get_session() as session:
+            result = await session.execute(
+                select(CLSTelegraph)
+                .where(CLSTelegraph.ctime >= start_ts)
+                .where(CLSTelegraph.ctime <= end_ts)
+                .where(
+                    (CLSTelegraph.title.contains(sector_name))
+                    | (CLSTelegraph.content.contains(sector_name))
+                )
+                .order_by(CLSTelegraph.ctime.desc())
+            )
+            telegraphs = result.scalars().all()
+
+        mentions: list[dict[str, Any]] = []
+        for tg in telegraphs:
+            mentions.append({
+                "title": tg.title,
+                "content": (tg.content or "")[:200],
+                "publish_time": datetime.fromtimestamp(tg.ctime).strftime("%Y-%m-%d %H:%M") if tg.ctime else None,
+                "level": tg.level,
+                "category": tg.category,
+            })
+
+        return mentions
 
     # ------------------------------------------------------------------
     # 趋势更新
@@ -801,6 +856,7 @@ class SectorTrendAnalyzer:
         ai_processor: Any = None,
         force: bool = False,
         progress_callback: Callable[[str, str], None] | None = None,
+        report_date: date | None = None,
     ) -> dict[str, Any]:
         """更新单个板块趋势。
 
@@ -818,6 +874,7 @@ class SectorTrendAnalyzer:
             ai_processor: AI 处理器实例
             force: 是否强制重新生成
             progress_callback: 进度回调 (stage_name, detail)
+            report_date: 报告日期（默认最近交易日）
 
         Returns:
             更新结果
@@ -831,8 +888,8 @@ class SectorTrendAnalyzer:
         # 1. 确保板块为 tracked
         sector = await self._ensure_tracked(sector_name)
 
-        # 2. 确定结束日期（最近交易日）
-        end_date = self._market_analyzer.get_latest_trade_date()
+        # 2. 确定结束日期（report_date 或最近交易日）
+        end_date = report_date or self._market_analyzer.get_latest_trade_date()
 
         # 3. 检查是否已有更新
         if not force:
@@ -917,6 +974,7 @@ class SectorTrendAnalyzer:
         continue_on_error: bool = True,
         ai_processor: Any = None,
         days: int = 10,
+        report_date: date | None = None,
     ) -> dict[str, Any]:
         """批量更新所有 tracked 板块趋势。
 
@@ -926,6 +984,7 @@ class SectorTrendAnalyzer:
             continue_on_error: 是否在错误时继续
             ai_processor: AI 处理器实例
             days: 回看窗口天数
+            report_date: 报告日期（默认最近交易日）
 
         Returns:
             批量更新结果
@@ -954,6 +1013,7 @@ class SectorTrendAnalyzer:
                     days=days,
                     ai_processor=ai_processor,
                     force=force,
+                    report_date=report_date,
                 )
                 results.append(update_result)
                 if update_result.get("action") == "updated":

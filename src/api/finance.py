@@ -313,6 +313,19 @@ class FinanceClient:
 
     DEFAULT_TIMEOUT = 30
     MAX_TIMEOUT = 60
+
+    # 市场数据分类的历史安全能力声明。
+    # historical_safe=True 表示该分类支持按指定交易日获取历史数据；
+    # historical_safe=False 表示该分类仅提供实时快照，不能用于历史回填。
+    CATEGORY_CAPABILITIES: dict[str, dict[str, Any]] = {
+        "volume": {"historical_safe": True, "description": "两市成交额（支持历史日期查询）"},
+        "limit_up": {"historical_safe": True, "description": "涨停股池（zt_pool 支持历史日期）"},
+        "indices": {"historical_safe": False, "description": "主要指数（仅实时快照）"},
+        "statistics": {"historical_safe": False, "description": "涨跌统计（pytdx 实时报价）"},
+        "sectors": {"historical_safe": False, "description": "板块涨跌（仅实时快照）"},
+        "snapshot": {"historical_safe": False, "description": "全市场股票快照（仅实时）"},
+    }
+
     SOURCE_STRATEGIES: dict[str, tuple[str, ...]] = {
         "indices": ("tencent_realtime", "akshare_index_spot"),
         "volume": (_OFFICIAL_TURNOVER_SOURCE, _AKSHARE_BREADTH_SOURCE),
