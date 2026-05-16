@@ -220,6 +220,128 @@ class Database:
                 text("CREATE INDEX ix_tracked_sectors_last_seen_date ON tracked_sectors (last_seen_date)")
             )
 
+        # 板块分组相关表
+        if "sector_groups" not in existing_tables:
+            sync_conn.execute(text("""
+                CREATE TABLE sector_groups (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    canonical_name VARCHAR(64) NOT NULL UNIQUE,
+                    aliases TEXT,
+                    keywords TEXT,
+                    description TEXT,
+                    status VARCHAR(16) NOT NULL DEFAULT 'active',
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT uq_sector_groups_canonical_name UNIQUE (canonical_name)
+                )
+            """))
+            sync_conn.execute(
+                text("CREATE INDEX ix_sector_groups_status ON sector_groups (status)")
+            )
+
+        if "sector_group_members" not in existing_tables:
+            sync_conn.execute(text("""
+                CREATE TABLE sector_group_members (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    group_id INTEGER NOT NULL,
+                    sector_id INTEGER NOT NULL,
+                    relation_type VARCHAR(32) NOT NULL DEFAULT 'related',
+                    weight REAL DEFAULT 1.0,
+                    source VARCHAR(64),
+                    confidence REAL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT uq_sector_group_members_group_sector UNIQUE (group_id, sector_id),
+                    FOREIGN KEY (group_id) REFERENCES sector_groups(id) ON DELETE CASCADE,
+                    FOREIGN KEY (sector_id) REFERENCES tracked_sectors(id) ON DELETE CASCADE
+                )
+            """))
+            sync_conn.execute(
+                text("CREATE INDEX ix_sector_group_members_group_id ON sector_group_members (group_id)")
+            )
+            sync_conn.execute(
+                text("CREATE INDEX ix_sector_group_members_sector_id ON sector_group_members (sector_id)")
+            )
+
+        if "sector_group_suggestions" not in existing_tables:
+            sync_conn.execute(text("""
+                CREATE TABLE sector_group_suggestions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    suggestion_type VARCHAR(32) NOT NULL,
+                    target_group_id INTEGER,
+                    suggested_group_name VARCHAR(64),
+                    status VARCHAR(16) NOT NULL DEFAULT 'pending',
+                    confidence REAL,
+                    reason TEXT,
+                    evidence_json TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT uq_sector_group_suggestions_pending UNIQUE (suggestion_type, target_group_id, status),
+                    FOREIGN KEY (target_group_id) REFERENCES sector_groups(id) ON DELETE SET NULL
+                )
+            """))
+            sync_conn.execute(
+                text("CREATE INDEX ix_sector_group_suggestions_status ON sector_group_suggestions (status)")
+            )
+            sync_conn.execute(
+                text("CREATE INDEX ix_sector_group_suggestions_type ON sector_group_suggestions (suggestion_type)")
+            )
+            sync_conn.execute(
+                text("CREATE INDEX ix_sector_group_suggestions_target_group_id ON sector_group_suggestions (target_group_id)")
+            )
+
+        if "sector_group_suggestion_members" not in existing_tables:
+            sync_conn.execute(text("""
+                CREATE TABLE sector_group_suggestion_members (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    suggestion_id INTEGER NOT NULL,
+                    sector_id INTEGER NOT NULL,
+                    suggested_relation_type VARCHAR(32),
+                    current_relation_type VARCHAR(32),
+                    suggested_weight REAL,
+                    current_weight REAL,
+                    confidence REAL,
+                    reason TEXT,
+                    FOREIGN KEY (suggestion_id) REFERENCES sector_group_suggestions(id) ON DELETE CASCADE,
+                    FOREIGN KEY (sector_id) REFERENCES tracked_sectors(id) ON DELETE CASCADE
+                )
+            """))
+            sync_conn.execute(
+                text("CREATE INDEX ix_sector_group_suggestion_members_suggestion_id ON sector_group_suggestion_members (suggestion_id)")
+            )
+            sync_conn.execute(
+                text("CREATE INDEX ix_sector_group_suggestion_members_sector_id ON sector_group_suggestion_members (sector_id)")
+            )
+
+        if "sector_group_trend_summaries" not in existing_tables:
+            sync_conn.execute(text("""
+                CREATE TABLE sector_group_trend_summaries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    group_id INTEGER NOT NULL,
+                    group_name VARCHAR(64) NOT NULL,
+                    end_date DATE NOT NULL,
+                    window_days INTEGER NOT NULL DEFAULT 10,
+                    trend_status VARCHAR(32),
+                    strength_level VARCHAR(16),
+                    action_bias VARCHAR(16),
+                    judgement TEXT,
+                    content TEXT NOT NULL,
+                    evidence_json TEXT,
+                    member_freshness_json TEXT,
+                    output_path VARCHAR(512),
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT uq_sector_group_trend_summaries_group_date UNIQUE (group_id, end_date),
+                    FOREIGN KEY (group_id) REFERENCES sector_groups(id) ON DELETE CASCADE
+                )
+            """))
+            sync_conn.execute(
+                text("CREATE INDEX ix_sector_group_trend_summaries_group_id ON sector_group_trend_summaries (group_id)")
+            )
+            sync_conn.execute(
+                text("CREATE INDEX ix_sector_group_trend_summaries_end_date ON sector_group_trend_summaries (end_date)")
+            )
+
         if "sector_trend_summaries" not in existing_tables:
             sync_conn.execute(text("""
                 CREATE TABLE sector_trend_summaries (

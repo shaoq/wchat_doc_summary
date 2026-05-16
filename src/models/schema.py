@@ -698,3 +698,221 @@ class SectorTrendSummary(Base):
 
     def __repr__(self) -> str:
         return f"<SectorTrendSummary(sector_name='{self.sector_name}', end_date='{self.end_date}')>"
+
+
+class SectorGroup(Base):
+    """板块分组模型 - 主题/产业链分组。"""
+
+    __tablename__ = "sector_groups"
+    __table_args__ = (
+        UniqueConstraint("canonical_name", name="uq_sector_groups_canonical_name"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    canonical_name: Mapped[str] = mapped_column(
+        String(64), nullable=False, unique=True, comment="规范名称",
+    )
+    aliases: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True, comment="别名列表(JSON数组)",
+    )
+    keywords: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True, comment="关键词列表(JSON数组)",
+    )
+    description: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True, comment="分组描述",
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="active",
+        comment="状态: active/inactive",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), comment="创建时间",
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now(), comment="更新时间",
+    )
+
+    def __repr__(self) -> str:
+        return f"<SectorGroup(id={self.id}, name='{self.canonical_name}', status='{self.status}')>"
+
+
+class SectorGroupMember(Base):
+    """分组成员映射模型 - 板块与分组的多对多关系。"""
+
+    __tablename__ = "sector_group_members"
+    __table_args__ = (
+        UniqueConstraint("group_id", "sector_id", name="uq_sector_group_members_group_sector"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    group_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("sector_groups.id", ondelete="CASCADE"),
+        nullable=False, index=True, comment="分组ID",
+    )
+    sector_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("tracked_sectors.id", ondelete="CASCADE"),
+        nullable=False, index=True, comment="板块ID",
+    )
+    relation_type: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="related",
+        comment="关系类型: core/upstream/downstream/material/equipment/catalyst/related",
+    )
+    weight: Mapped[Optional[float]] = mapped_column(
+        Float, nullable=True, default=1.0, comment="权重",
+    )
+    source: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True, comment="来源(manual/suggestion/auto)",
+    )
+    confidence: Mapped[Optional[float]] = mapped_column(
+        Float, nullable=True, comment="置信度(0-1)",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), comment="创建时间",
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now(), comment="更新时间",
+    )
+
+    def __repr__(self) -> str:
+        return f"<SectorGroupMember(group_id={self.group_id}, sector_id={self.sector_id}, type='{self.relation_type}')>"
+
+
+class SectorGroupSuggestion(Base):
+    """分组建议模型 - 待确认的分组变更建议。"""
+
+    __tablename__ = "sector_group_suggestions"
+    __table_args__ = (
+        UniqueConstraint(
+            "suggestion_type", "target_group_id", "status",
+            name="uq_sector_group_suggestions_pending",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    suggestion_type: Mapped[str] = mapped_column(
+        String(32), nullable=False,
+        comment="建议类型: new_group/add_members/update_members",
+    )
+    target_group_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("sector_groups.id", ondelete="SET NULL"),
+        nullable=True, index=True, comment="目标分组ID(add_members/update_members时)",
+    )
+    suggested_group_name: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True, comment="建议的分组名称(new_group时)",
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="pending",
+        comment="状态: pending/accepted/ignored/expired",
+    )
+    confidence: Mapped[Optional[float]] = mapped_column(
+        Float, nullable=True, comment="置信度(0-1)",
+    )
+    reason: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True, comment="建议原因",
+    )
+    evidence_json: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True, comment="证据数据(JSON)",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), comment="创建时间",
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now(), comment="更新时间",
+    )
+
+    def __repr__(self) -> str:
+        return f"<SectorGroupSuggestion(id={self.id}, type='{self.suggestion_type}', status='{self.status}')>"
+
+
+class SectorGroupSuggestionMember(Base):
+    """分组建议成员模型 - 建议中的具体成员变更。"""
+
+    __tablename__ = "sector_group_suggestion_members"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    suggestion_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("sector_group_suggestions.id", ondelete="CASCADE"),
+        nullable=False, index=True, comment="建议ID",
+    )
+    sector_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("tracked_sectors.id", ondelete="CASCADE"),
+        nullable=False, index=True, comment="板块ID",
+    )
+    suggested_relation_type: Mapped[Optional[str]] = mapped_column(
+        String(32), nullable=True, comment="建议的关系类型",
+    )
+    current_relation_type: Mapped[Optional[str]] = mapped_column(
+        String(32), nullable=True, comment="当前关系类型(update_members时)",
+    )
+    suggested_weight: Mapped[Optional[float]] = mapped_column(
+        Float, nullable=True, comment="建议的权重",
+    )
+    current_weight: Mapped[Optional[float]] = mapped_column(
+        Float, nullable=True, comment="当前权重(update_members时)",
+    )
+    confidence: Mapped[Optional[float]] = mapped_column(
+        Float, nullable=True, comment="置信度(0-1)",
+    )
+    reason: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True, comment="建议原因",
+    )
+
+    def __repr__(self) -> str:
+        return f"<SectorGroupSuggestionMember(suggestion_id={self.suggestion_id}, sector_id={self.sector_id})>"
+
+
+class SectorGroupTrendSummary(Base):
+    """分组趋势总结模型 - 组级趋势跟踪报告。"""
+
+    __tablename__ = "sector_group_trend_summaries"
+    __table_args__ = (
+        UniqueConstraint("group_id", "end_date", name="uq_sector_group_trend_summaries_group_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    group_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("sector_groups.id", ondelete="CASCADE"),
+        nullable=False, index=True, comment="分组ID",
+    )
+    group_name: Mapped[str] = mapped_column(
+        String(64), nullable=False, comment="分组名称(快照)",
+    )
+    end_date: Mapped[date] = mapped_column(
+        Date, nullable=False, comment="快照结束日期",
+    )
+    window_days: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=10, comment="回看窗口天数",
+    )
+    trend_status: Mapped[Optional[str]] = mapped_column(
+        String(32), nullable=True, comment="组级趋势状态标签",
+    )
+    strength_level: Mapped[Optional[str]] = mapped_column(
+        String(16), nullable=True, comment="强度等级(强/中/弱)",
+    )
+    action_bias: Mapped[Optional[str]] = mapped_column(
+        String(16), nullable=True, comment="操作倾向(跟踪/观察/回避)",
+    )
+    judgement: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True, comment="研判摘要",
+    )
+    content: Mapped[str] = mapped_column(
+        Text, nullable=False, comment="完整报告内容(Markdown)",
+    )
+    evidence_json: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True, comment="证据数据(JSON)",
+    )
+    member_freshness_json: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True, comment="成员新鲜度数据(JSON)",
+    )
+    output_path: Mapped[Optional[str]] = mapped_column(
+        String(512), nullable=True, comment="报告文件路径",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), comment="创建时间",
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now(), comment="更新时间",
+    )
+
+    def __repr__(self) -> str:
+        return f"<SectorGroupTrendSummary(group_name='{self.group_name}', end_date='{self.end_date}')>"

@@ -87,6 +87,10 @@ MARKET_STRATEGY_ENHANCEMENT_MAX_TOKENS = 1200
 SECTOR_TREND_TEMPLATE_PATH = Path("templates/sector_trend_summary.md")
 SECTOR_TREND_MAX_TOKENS = 2500
 
+# 分组趋势模板路径
+SECTOR_GROUP_TREND_TEMPLATE_PATH = Path("templates/sector_group_trend_summary.md")
+SECTOR_GROUP_TREND_MAX_TOKENS = 3000
+
 
 class AIProcessor:
     """AI 处理服务类。
@@ -1523,6 +1527,214 @@ class AIProcessor:
         valid_trend_statuses = {
             "主线加强", "主线延续", "分歧中继", "低位启动",
             "轮动补涨", "短线脉冲", "高位退潮", "暂无趋势",
+        }
+        valid_strength = {"强", "中", "弱"}
+        valid_actions = {"跟踪", "观察", "回避"}
+
+        for line in content.split("\n"):
+            line_stripped = line.strip().lower()
+
+            if line_stripped.startswith("trend_status:"):
+                value = line.split(":", 1)[1].strip()
+                if value in valid_trend_statuses:
+                    labels["trend_status"] = value
+            elif line_stripped.startswith("strength_level:"):
+                value = line.split(":", 1)[1].strip()
+                if value in valid_strength:
+                    labels["strength_level"] = value
+            elif line_stripped.startswith("action_bias:"):
+                value = line.split(":", 1)[1].strip()
+                if value in valid_actions:
+                    labels["action_bias"] = value
+            elif line_stripped.startswith("judgement:"):
+                labels["judgement"] = line.split(":", 1)[1].strip()
+
+        return labels
+
+    # ------------------------------------------------------------------
+    # 分组趋势总结
+    # ------------------------------------------------------------------
+
+    async def generate_sector_group_trend_summary(
+        self,
+        group_name: str,
+        evidence: dict,
+        member_freshness: list[dict],
+        end_date: str = "",
+        window_days: int = 10,
+    ) -> tuple[str, dict[str, str]]:
+        """生成分组趋势跟踪总结。
+
+        Args:
+            group_name: 分组名称
+            evidence: 组级证据数据
+            member_freshness: 成员新鲜度列表
+            end_date: 结束日期
+            window_days: 回看窗口天数
+
+        Returns:
+            (报告内容, 结构化标签字典)
+        """
+        template = self._load_sector_group_trend_template()
+
+        # 格式化成员报告
+        member_reports = self._format_group_member_reports(
+            evidence.get("member_summaries", []),
+        )
+
+        # 格式化成员新鲜度
+        member_freshness_text = self._format_member_freshness(member_freshness)
+
+        # 数据缺口
+        data_gaps = self._build_group_data_gaps(evidence, member_freshness)
+
+        prompt = template.format(
+            group_name=group_name,
+            end_date=end_date,
+            window_days=window_days,
+            member_count=evidence.get("member_count", 0),
+            member_reports=member_reports,
+            member_freshness=member_freshness_text,
+            data_gaps=data_gaps,
+        )
+
+        logger.info("开始生成分组趋势总结: %s (%s)", group_name, end_date)
+        content = await self._call_api(
+            prompt, max_tokens=SECTOR_GROUP_TREND_MAX_TOKENS, stage="sector-group-trend"
+        )
+
+        labels = self._extract_sector_group_trend_labels(content)
+
+        return content, labels
+
+    def _load_sector_group_trend_template(self) -> str:
+        """加载分组趋势总结模板。"""
+        if not SECTOR_GROUP_TREND_TEMPLATE_PATH.exists():
+            raise FileNotFoundError(
+                f"分组趋势模板文件不存在: {SECTOR_GROUP_TREND_TEMPLATE_PATH}"
+            )
+        return SECTOR_GROUP_TREND_TEMPLATE_PATH.read_text(encoding="utf-8")
+
+    def _format_group_member_reports(
+        self, member_summaries: list[dict],
+    ) -> str:
+        """格式化成员板块报告。"""
+        if not member_summaries:
+            return "无成员板块报告"
+
+        lines = []
+        for ms in member_summaries:
+            name = ms.get("sector_name", "未知")
+            status = ms.get("sector_status", "-")
+            relation = ms.get("relation_type", "-")
+            has_summary = ms.get("has_summary", False)
+
+            header = f"### {name} (关系: {relation}, 状态: {status})"
+            lines.append(header)
+
+            if not has_summary:
+                lines.append("⚠️ 无趋势总结报告\n")
+                continue
+
+            summary_date = ms.get("summary_date", "-")
+            trend = ms.get("trend_status", "-")
+            strength = ms.get("strength_level", "-")
+            bias = ms.get("action_bias", "-")
+            judgement = ms.get("judgement", "-")
+
+            lines.append(f"- 报告日期: {summary_date}")
+            lines.append(f"- 趋势状态: {trend}")
+            lines.append(f"- 强度: {strength}")
+            lines.append(f"- 倾向: {bias}")
+            lines.append(f"- 研判: {judgement}")
+
+            content = ms.get("summary_content", "")
+            if content:
+                # 截取核心内容，避免过长
+                truncated = content[:800]
+                if len(content) > 800:
+                    truncated += "..."
+                lines.append(f"\n{truncated}\n")
+
+        return "\n".join(lines)
+
+    def _format_member_freshness(
+        self, freshness_list: list[dict],
+    ) -> str:
+        """格式化成员新鲜度信息。"""
+        if not freshness_list:
+            return "无成员新鲜度数据"
+
+        lines = []
+        for f in freshness_list:
+            name = f.get("sector_name", "未知")
+            status = f.get("sector_status", "-")
+            relation = f.get("relation_type", "-")
+            is_candidate = f.get("is_candidate", False)
+            is_stale = f.get("is_stale", False)
+            is_missing = f.get("is_missing", False)
+            latest_date = f.get("latest_summary_date", "-")
+            target_date = f.get("target_date", "-")
+
+            flags = []
+            if is_candidate:
+                flags.append("candidate(不参与默认刷新)")
+            if is_stale:
+                flags.append(f"过期(最新报告{latest_date}，目标{target_date})")
+            if is_missing:
+                flags.append("缺少报告")
+            if not flags:
+                flags.append(f"最新(报告日期{latest_date})")
+
+            lines.append(f"- **{name}** ({relation}, {status}): {'; '.join(flags)}")
+
+        return "\n".join(lines)
+
+    def _build_group_data_gaps(
+        self,
+        evidence: dict,
+        member_freshness: list[dict],
+    ) -> str:
+        """构建分组数据缺口提示。"""
+        gaps: list[str] = []
+
+        member_summaries = evidence.get("member_summaries", [])
+        total = len(member_summaries)
+        with_summary = sum(1 for m in member_summaries if m.get("has_summary"))
+        missing = total - with_summary
+
+        if missing == total:
+            gaps.append("所有成员板块缺少趋势总结报告")
+        elif missing > 0:
+            gaps.append(f"{missing}/{total} 个成员板块缺少趋势总结报告")
+
+        stale_count = sum(1 for f in member_freshness if f.get("is_stale"))
+        if stale_count:
+            gaps.append(f"{stale_count} 个成员报告已过期（非目标日期）")
+
+        candidate_count = sum(1 for f in member_freshness if f.get("is_candidate"))
+        if candidate_count:
+            gaps.append(f"{candidate_count} 个成员为 candidate 状态，默认不参与跟踪分析")
+
+        if not gaps:
+            return "无"
+
+        return "⚠️ 以下证据组数据不足，请在生成时进入观察模式：\n" + "\n".join(
+            f"- {gap}" for gap in gaps
+        )
+
+    def _extract_sector_group_trend_labels(self, content: str) -> dict[str, str]:
+        """从分组报告内容中提取结构化标签。"""
+        labels: dict[str, str] = {
+            "trend_status": "暂无趋势",
+            "strength_level": "弱",
+            "action_bias": "观察",
+            "judgement": "",
+        }
+
+        valid_trend_statuses = {
+            "主线共振", "主线扩散", "轮动分化", "低位启动",
+            "补涨蔓延", "短线脉冲", "高位退潮", "暂无趋势",
         }
         valid_strength = {"强", "中", "弱"}
         valid_actions = {"跟踪", "观察", "回避"}
