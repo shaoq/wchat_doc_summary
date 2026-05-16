@@ -81,16 +81,18 @@ The subscription list command SHALL support both public-account-oriented and sou
 - **THEN** the system SHALL group RSS-backed content by configured RSS source
 - **AND** each group SHALL show source health and associated public accounts or article counts when available
 
-<!-- delta from add-rss-auto-subscribe-and-docs -->
-## ADDED Requirements
+<!-- delta from add-rss-auto-subscribe-and-docs, updated by rss-url-based-feed-attribution -->
+## MODIFIED Requirements
 
 ### Requirement: RSS-discovered public accounts can be auto-subscribed
-The subscription system SHALL support automatically creating local public-account subscriptions discovered from RSS items.
+The subscription system SHALL support automatically creating local public-account subscriptions discovered from RSS items, and RSS-discovered subscriptions SHALL use subscribe-compatible article URL resolution when the public account is unknown locally.
 
 #### Scenario: RSS item identifies unknown public account and auto-subscribe is enabled
 - **WHEN** RSS import encounters an item whose public account is not present locally
 - **AND** `rss_auto_subscribe_discovered_feeds` is enabled
-- **THEN** the system SHALL create a local subscription for that public account
+- **AND** the item has a usable original article URL
+- **THEN** the system SHALL resolve the public account through the subscribe-compatible article URL resolver
+- **AND** it SHALL create a local subscription for that public account using the same canonical identity shape as `wchat subscribe`
 - **AND** it SHALL store provider metadata that explains the RSS discovery source
 
 #### Scenario: RSS item identifies existing inactive public account
@@ -98,30 +100,23 @@ The subscription system SHALL support automatically creating local public-accoun
 - **AND** auto-subscribe policy allows activation
 - **THEN** the system SHALL reactivate or update the existing subscription instead of creating a duplicate
 
-### Requirement: Discovered subscription default status is configurable
-The subscription system SHALL apply the configured default status when creating RSS-discovered subscriptions.
-
-#### Scenario: Discovered feed default status is active
-- **WHEN** `rss_discovered_feed_default_status` is `active`
-- **AND** RSS import creates a discovered subscription
-- **THEN** the new subscription SHALL be active
-
-#### Scenario: Discovered feed default status is inactive
-- **WHEN** `rss_discovered_feed_default_status` is `inactive`
-- **AND** RSS import creates a discovered subscription
-- **THEN** the new subscription SHALL be inactive or pending review according to the local subscription status model
-
 ### Requirement: RSS public-account matching prefers stable identifiers
-The subscription system SHALL match RSS-discovered public accounts using stable identifiers before falling back to display names.
+The subscription system SHALL match RSS-discovered public accounts using stable identifiers and cached URL-derived identity before falling back to display names.
 
 #### Scenario: RSS item includes provider-side account identity
 - **WHEN** an RSS item exposes a provider-side public-account identifier
 - **THEN** the system SHALL use that identifier for matching before comparing display names
 
+#### Scenario: RSS item can be matched through URL-derived identity
+- **WHEN** an RSS item has an original article URL whose stable account identity is already cached locally
+- **THEN** the system SHALL match the RSS item to the existing local subscription for that identity
+- **AND** it SHALL NOT invoke subscribe-compatible article URL resolution for that item
+
 #### Scenario: RSS item only includes public-account display name
 - **WHEN** an RSS item exposes only a public-account display name
-- **THEN** the system SHALL normalize that name for matching
-- **AND** if no existing subscription matches, it SHALL create a traceable local identifier when auto-subscribe is enabled
+- **THEN** the system SHALL normalize that name for matching only after stable identity matching fails
+- **AND** if no existing subscription matches, it SHALL use subscribe-compatible article URL resolution when a usable original article URL is available and auto-subscribe is enabled
+- **AND** it SHALL NOT create a title-derived or content-derived local identifier by default
 
 ### Requirement: RSS-discovered subscriptions are reported to users
 The subscription system SHALL expose newly discovered subscriptions in CLI fetch output or diagnostics.
