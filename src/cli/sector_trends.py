@@ -1504,3 +1504,141 @@ def groups_history(group_name: str, limit: int) -> None:
         console.print(table)
 
     run_async(_history())
+
+
+# ---------------------------------------------------------------------------
+# 趋势矩阵命令
+# ---------------------------------------------------------------------------
+
+
+@sector_trends.group("matrix")
+def matrix() -> None:
+    """趋势矩阵视图。"""
+    pass
+
+
+@matrix.command("sectors")
+@click.option("--latest", is_flag=True, help="仅显示最新快照")
+@click.option("--dates", "max_dates", type=int, default=5, help="日期列数（默认 5）")
+@click.option("--export", "export_path", type=str, default=None, help="导出 Markdown 路径")
+def matrix_sectors(latest: bool, max_dates: int, export_path: str | None) -> None:
+    """板块趋势矩阵。"""
+    async def _run() -> None:
+        from src.services.trend_matrix_render import (
+            export_markdown,
+            render_sector_matrix_markdown,
+            render_sector_matrix_rich,
+        )
+        from src.services.trend_matrix_service import TrendMatrixService
+
+        db = await get_db()
+        service = TrendMatrixService(db)
+
+        with console.status("[bold blue]构建板块矩阵...[/bold blue]"):
+            rows, dates = await service.build_sector_matrix(
+                latest_only=latest,
+                max_dates=max_dates,
+            )
+
+        if not rows:
+            console.print("[yellow]暂无板块趋势数据[/yellow]")
+            return
+
+        table = render_sector_matrix_rich(rows, dates)
+        console.print(table)
+
+        if export_path is not None:
+            from pathlib import Path
+
+            md = render_sector_matrix_markdown(rows, dates)
+            path = export_markdown(md, Path(export_path) if export_path else None)
+            console.print(f"[green]已导出: {path}[/green]")
+
+    run_async(_run())
+
+
+@matrix.command("groups")
+@click.option("--latest", is_flag=True, help="仅显示最新快照")
+@click.option("--dates", "max_dates", type=int, default=5, help="日期列数（默认 5）")
+@click.option("--export", "export_path", type=str, default=None, help="导出 Markdown 路径")
+def matrix_groups(latest: bool, max_dates: int, export_path: str | None) -> None:
+    """分组趋势矩阵。"""
+    async def _run() -> None:
+        from src.services.trend_matrix_render import (
+            export_markdown,
+            render_group_matrix_markdown,
+            render_group_matrix_rich,
+        )
+        from src.services.trend_matrix_service import TrendMatrixService
+
+        db = await get_db()
+        service = TrendMatrixService(db)
+
+        with console.status("[bold blue]构建分组矩阵...[/bold blue]"):
+            rows, dates = await service.build_group_matrix(
+                latest_only=latest,
+                max_dates=max_dates,
+            )
+
+        if not rows:
+            console.print("[yellow]暂无分组趋势数据[/yellow]")
+            return
+
+        table = render_group_matrix_rich(rows, dates)
+        console.print(table)
+
+        if export_path is not None:
+            from pathlib import Path
+
+            md = render_group_matrix_markdown(rows, dates)
+            path = export_markdown(md, Path(export_path) if export_path else None)
+            console.print(f"[green]已导出: {path}[/green]")
+
+    run_async(_run())
+
+
+@matrix.command("expand")
+@click.option("--group", "group_name", required=True, help="分组名称")
+@click.option("--dates", "max_dates", type=int, default=5, help="日期列数（默认 5）")
+@click.option("--export", "export_path", type=str, default=None, help="导出 Markdown 路径")
+def matrix_expand(group_name: str, max_dates: int, export_path: str | None) -> None:
+    """展开分组矩阵（含成员板块）。"""
+    async def _run() -> None:
+        from src.services.trend_matrix_render import (
+            export_markdown,
+            render_expanded_group_markdown,
+            render_expanded_group_rich,
+        )
+        from src.services.trend_matrix_service import TrendMatrixService
+
+        db = await get_db()
+        service = TrendMatrixService(db)
+
+        with console.status(f"[bold blue]构建分组展开矩阵: {group_name}...[/bold blue]"):
+            result = await service.build_expanded_group_matrix(
+                group_name,
+                max_dates=max_dates,
+            )
+
+        if result is None:
+            console.print(f"[yellow]分组 '{group_name}' 未找到[/yellow]")
+            return
+
+        # 收集日期
+        all_dates = sorted(
+            set(result.group_row.cells.keys())
+            | {d for mr in result.member_rows for d in mr.cells.keys()},
+            reverse=True,
+        )[:max_dates]
+
+        table = render_expanded_group_rich(result, all_dates)
+        console.print(table)
+
+        if export_path is not None:
+            from pathlib import Path
+
+            md = render_expanded_group_markdown(result, all_dates)
+            path = export_markdown(md, Path(export_path) if export_path else None)
+            console.print(f"[green]已导出: {path}[/green]")
+
+    run_async(_run())
