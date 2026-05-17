@@ -516,12 +516,30 @@ class SectorTrendAnalyzer:
                     }
                 # 提升为 tracked
                 sector.status = "tracked"
-                return {
+
+                # 运行自动证据准备
+                preparation_result = None
+                try:
+                    from src.services.evidence_preparation import EvidencePreparationService
+                    prep_service = EvidencePreparationService(self.db)
+                    end_date = self._market_analyzer.get_latest_trade_date()
+                    preparation_result = await prep_service.prepare_sector(
+                        canonical, end_date, window_days=10,
+                    )
+                except Exception as e:
+                    logger.warning("初始化证据准备失败: %s", e)
+
+                result_dict = {
                     "action": "promoted",
                     "sector_id": sector.id,
                     "canonical_name": sector.canonical_name,
-                    "previous_status": sector.status,
                 }
+                if preparation_result is not None:
+                    result_dict["preparation"] = {
+                        "confidence_tier": preparation_result.confidence_tier.value,
+                        "market_role": preparation_result.market_role.value,
+                    }
+                return result_dict
 
             # 创建新的 tracked 板块
             sector = TrackedSector(
@@ -535,11 +553,31 @@ class SectorTrendAnalyzer:
             session.add(sector)
             await session.flush()
 
-            return {
-                "action": "created",
-                "sector_id": sector.id,
-                "canonical_name": sector.canonical_name,
+        # 运行自动证据准备（不生成报告）
+        preparation_result = None
+        try:
+            from src.services.evidence_preparation import EvidencePreparationService
+            prep_service = EvidencePreparationService(self.db)
+            end_date = self._market_analyzer.get_latest_trade_date()
+            preparation_result = await prep_service.prepare_sector(
+                canonical, end_date, window_days=10,
+            )
+        except Exception as e:
+            logger.warning("初始化证据准备失败: %s", e)
+
+        result_dict = {
+            "action": "created",
+            "sector_id": sector.id,
+            "canonical_name": sector.canonical_name,
+        }
+        if preparation_result is not None:
+            result_dict["preparation"] = {
+                "confidence_tier": preparation_result.confidence_tier.value,
+                "market_role": preparation_result.market_role.value,
+                "aliases_found": len(preparation_result.high_confidence_aliases),
+                "proxy_candidates": len(preparation_result.proxy_candidates),
             }
+        return result_dict
 
     async def _ensure_tracked(self, sector_name: str) -> TrackedSector:
         """确保板块处于 tracked 状态，用于 update 自动初始化。"""
@@ -582,6 +620,8 @@ class SectorTrendAnalyzer:
         sector_name: str,
         end_date: date,
         window_days: int = 10,
+        *,
+        preparation_result: Any | None = None,
     ) -> dict[str, Any]:
         """收集单个板块的证据数据。
 
@@ -589,11 +629,13 @@ class SectorTrendAnalyzer:
         1. MarketSector 缓存中的近期表现
         2. CLS 看盘数据中的相关标签
         3. CLS 电报中的相关提及
+        4. 证据准备结果中的市场角色分类（如果提供）
 
         Args:
             sector_name: 板块名称
             end_date: 结束日期
             window_days: 回看窗口天数
+            preparation_result: 证据准备结果（EvidencePreparationService 输出）
 
         Returns:
             证据数据字典
@@ -608,6 +650,13 @@ class SectorTrendAnalyzer:
             "cls_watch_mentions": [],
             "cls_telegraph_mentions": [],
         }
+
+        # 注入证据准备结果中的市场角色信息
+        if preparation_result is not None:
+            evidence["market_evidence_role"] = preparation_result.market_role.value
+            evidence["preparation_confidence"] = preparation_result.confidence_tier.value
+            evidence["high_confidence_aliases"] = preparation_result.high_confidence_aliases
+            evidence["proxy_candidates"] = preparation_result.proxy_candidates
 
         total_evidence = 0
 
@@ -627,12 +676,40 @@ class SectorTrendAnalyzer:
             sectors = result.scalars().all()
 
         # 精确过滤名称匹配
+        canonical_key = SectorIdentity.comparison_key(sector_name)
         matched_sectors = [
             s for s in sectors
-            if SectorIdentity.comparison_key(s.sector_name) == SectorIdentity.comparison_key(sector_name)
+            if SectorIdentity.comparison_key(s.sector_name) == canonical_key
         ]
 
-        if matched_sectors:
+        # 构建别名/代理键集合（从准备结果中获取）
+        alias_keys: set[str] = set()
+        proxy_keys: set[str] = set()
+        if preparation_result is not None:
+            alias_keys = {
+                SectorIdentity.comparison_key(a)
+                for a in preparation_result.high_confidence_aliases
+            }
+            proxy_keys = {
+                SectorIdentity.comparison_key(p.get("sector_name", ""))
+                for p in preparation_result.proxy_candidates
+            }
+
+        # 按角色分类匹配的市场数据
+        exact_matches = matched_sectors
+        alias_matches = [
+            s for s in sectors
+            if SectorIdentity.comparison_key(s.sector_name) in alias_keys
+            and SectorIdentity.comparison_key(s.sector_name) != canonical_key
+        ]
+        proxy_matches = [
+            s for s in sectors
+            if SectorIdentity.comparison_key(s.sector_name) in proxy_keys
+            and SectorIdentity.comparison_key(s.sector_name) != canonical_key
+            and SectorIdentity.comparison_key(s.sector_name) not in alias_keys
+        ]
+
+        if exact_matches:
             evidence["market_appearances"] = [
                 {
                     "trade_date": s.trade_date.isoformat() if s.trade_date else None,
@@ -640,17 +717,45 @@ class SectorTrendAnalyzer:
                     "change_pct": s.change_pct,
                     "amount": s.amount,
                     "main_inflow": s.main_inflow,
+                    "market_role": "exact_market",
                 }
-                for s in matched_sectors
+                for s in exact_matches
             ]
-            total_evidence += len(matched_sectors)
+            total_evidence += len(exact_matches)
+
+        if alias_matches:
+            evidence["alias_market_appearances"] = [
+                {
+                    "trade_date": s.trade_date.isoformat() if s.trade_date else None,
+                    "sector_name": s.sector_name,
+                    "change_pct": s.change_pct,
+                    "amount": s.amount,
+                    "main_inflow": s.main_inflow,
+                    "market_role": "alias_market",
+                }
+                for s in alias_matches
+            ]
+            total_evidence += len(alias_matches)
+
+        if proxy_matches:
+            evidence["proxy_market_appearances"] = [
+                {
+                    "trade_date": s.trade_date.isoformat() if s.trade_date else None,
+                    "sector_name": s.sector_name,
+                    "change_pct": s.change_pct,
+                    "amount": s.amount,
+                    "main_inflow": s.main_inflow,
+                    "market_role": "proxy_market",
+                }
+                for s in proxy_matches
+            ]
+            # 代理市场数据不计入 total_evidence 用于稀疏判断
 
         # 2. CLS 看盘数据
         start_ts = int(datetime.combine(start_date, datetime.min.time()).timestamp())
         end_ts = int(
             datetime.combine(end_date, datetime.max.time()).timestamp()
         )
-        canonical_key = SectorIdentity.comparison_key(sector_name)
 
         async with self.db.get_session() as session:
             result = await session.execute(
@@ -693,12 +798,29 @@ class SectorTrendAnalyzer:
             total_evidence += len(telegraph_mentions)
 
         # 4. 稀疏证据判断与缺口元数据
+        # 代理市场数据补充判断：如果有别名或代理市场数据，降低稀疏性惩罚
+        has_any_market = bool(exact_matches or alias_matches)
+        has_proxy_market = bool(proxy_matches)
         evidence["is_sparse"] = total_evidence < 3
         evidence["total_evidence_count"] = total_evidence
 
+        # 市场证据角色汇总
+        evidence["has_market_evidence"] = has_any_market
+        evidence["has_proxy_market_evidence"] = has_proxy_market
+
+        # 确定市场角色（从准备结果或本地判断）
+        if not has_any_market and has_proxy_market:
+            evidence["market_evidence_role"] = evidence.get(
+                "market_evidence_role", "proxy_market",
+            )
+        elif not has_any_market and not has_proxy_market:
+            evidence["market_evidence_role"] = evidence.get(
+                "market_evidence_role", "no_market",
+            )
+
         # 显式缺口标记（用于历史回填场景）
         gaps: list[str] = []
-        if not matched_sectors:
+        if not exact_matches and not alias_matches:
             gaps.append("market_sector_cache_missing")
         if not watch_mentions:
             gaps.append("cls_watch_missing")
@@ -708,12 +830,19 @@ class SectorTrendAnalyzer:
 
         # 5. 诊断计数（用于历史回放、矩阵视图和调试）
         evidence["diagnostics"] = {
-            "market_count": len(matched_sectors),
+            "market_count": len(exact_matches),
+            "alias_market_count": len(alias_matches),
+            "proxy_market_count": len(proxy_matches),
             "cls_watch_count": len(watch_mentions),
             "cls_telegraph_count": len(telegraph_mentions),
             "total_evidence_count": total_evidence,
             "data_gap_count": len(gaps),
+            "market_evidence_role": evidence.get("market_evidence_role", "no_market"),
         }
+
+        # 注入准备诊断（如果提供）
+        if preparation_result is not None:
+            evidence["preparation_diagnostics"] = preparation_result.diagnostics.to_dict()
 
         return evidence
 
@@ -878,6 +1007,7 @@ class SectorTrendAnalyzer:
         progress_callback: Callable[[str, str], None] | None = None,
         report_date: date | None = None,
         skip_repair: bool = False,
+        skip_preparation: bool = False,
     ) -> dict[str, Any]:
         """更新单个板块趋势。
 
@@ -885,10 +1015,11 @@ class SectorTrendAnalyzer:
         1. 确保板块为 tracked 状态
         2. 检查是否已有当日更新（除非 force）
         3. 修复 CLS 看盘板块归属（除非 skip_repair）
-        4. 收集证据
-        5. 获取上次总结
-        6. 生成新总结
-        7. 保存
+        4. 运行证据准备（除非 skip_preparation）
+        5. 收集证据
+        6. 获取上次总结
+        7. 生成新总结
+        8. 保存
 
         Args:
             sector_name: 板块名称
@@ -896,6 +1027,9 @@ class SectorTrendAnalyzer:
             ai_processor: AI 处理器实例
             force: 是否强制重新生成
             progress_callback: 进度回调 (stage_name, detail)
+            report_date: 报告日期（默认最近交易日）
+            skip_repair: 是否跳过 CLS 看盘板块归属修复
+            skip_preparation: 是否跳过自动证据准备
             report_date: 报告日期（默认最近交易日）
             skip_repair: 是否跳过 CLS 看盘板块归属修复
 
@@ -936,10 +1070,25 @@ class SectorTrendAnalyzer:
             except Exception as e:
                 logger.warning("CLS 看盘板块归属修复失败，继续使用已有数据: %s", e)
 
+        # 4.5 运行证据准备（自动发现别名、主题、代理候选）
+        preparation_result = None
+        if not skip_preparation:
+            _emit("preparation", "运行证据准备...")
+            try:
+                from src.services.evidence_preparation import EvidencePreparationService
+                prep_service = EvidencePreparationService(self.db)
+                preparation_result = await prep_service.prepare_sector(
+                    sector.canonical_name, end_date, days,
+                    skip_repair=skip_repair,  # 与主流程一致
+                )
+            except Exception as e:
+                logger.warning("证据准备失败，继续使用已有数据: %s", e)
+
         # 5. 收集证据
         _emit("evidence", "收集板块证据...")
         evidence = await self.collect_sector_evidence(
             sector.canonical_name, end_date, days,
+            preparation_result=preparation_result,
         )
 
         # 6. 获取上次总结（日期回放时只使用目标日期之前的报告）
@@ -975,7 +1124,7 @@ class SectorTrendAnalyzer:
             window_days=days,
         )
 
-        # 8. 保存（包含修复诊断信息）
+        # 8. 保存（包含修复诊断信息和准备诊断信息）
         _emit("save", "保存板块报告...")
 
         # 将修复诊断信息嵌入证据中
@@ -985,6 +1134,16 @@ class SectorTrendAnalyzer:
                 "unchanged": repair_result.unchanged,
                 "unmatched": repair_result.unmatched,
                 "low_confidence": repair_result.low_confidence,
+            }
+
+        # 将准备结果摘要嵌入证据中
+        if preparation_result is not None:
+            evidence["preparation_summary"] = {
+                "confidence_tier": preparation_result.confidence_tier.value,
+                "market_role": preparation_result.market_role.value,
+                "high_confidence_aliases": preparation_result.high_confidence_aliases,
+                "proxy_candidates": preparation_result.proxy_candidates,
+                "diagnostics": preparation_result.diagnostics.to_dict(),
             }
 
         summary = await self.save_trend_summary(

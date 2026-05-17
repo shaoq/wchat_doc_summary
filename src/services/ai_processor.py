@@ -1477,20 +1477,25 @@ class AIProcessor:
 
         # 提取结构化标签
         labels = self._extract_sector_trend_labels(content)
+        raw_stage = labels["trend_status"]
 
         # 阶段验证降级
         validated_stage = self._validate_sector_stage_post_extract(
-            labels["trend_status"],
+            raw_stage,
             evidence=evidence,
             previous_summary=previous_summary,
         )
-        if validated_stage != labels["trend_status"]:
+        evidence["raw_label"] = raw_stage
+        evidence["final_label"] = validated_stage
+        evidence["validation_adjusted"] = validated_stage != raw_stage
+        if validated_stage != raw_stage:
             logger.info(
                 "板块趋势阶段降级: %s → %s (%s)",
-                labels["trend_status"], validated_stage, sector_name,
+                raw_stage, validated_stage, sector_name,
             )
             labels["trend_status"] = validated_stage
 
+        content = self._sync_structured_labels(content, labels)
         return content, labels
 
     def _load_sector_trend_template(self) -> str:
@@ -1681,21 +1686,48 @@ class AIProcessor:
         )
 
         labels = self._extract_sector_group_trend_labels(content)
+        raw_stage = labels["trend_status"]
 
         # 阶段验证降级
         validated_stage = self._validate_group_stage_post_extract(
-            labels["trend_status"],
+            raw_stage,
             evidence=evidence,
             member_freshness=member_freshness,
         )
-        if validated_stage != labels["trend_status"]:
+        evidence["raw_label"] = raw_stage
+        evidence["final_label"] = validated_stage
+        evidence["validation_adjusted"] = validated_stage != raw_stage
+        if validated_stage != raw_stage:
             logger.info(
                 "分组趋势阶段降级: %s → %s (%s)",
-                labels["trend_status"], validated_stage, group_name,
+                raw_stage, validated_stage, group_name,
             )
             labels["trend_status"] = validated_stage
 
+        content = self._sync_structured_labels(content, labels)
         return content, labels
+
+    def _sync_structured_labels(
+        self,
+        content: str,
+        labels: dict[str, str],
+    ) -> str:
+        """把最终验证后的结构化标签同步回 Markdown 内容。"""
+        final_lines = {
+            "trend_status": f"trend_status: {labels.get('trend_status', '暂无趋势')}",
+            "strength_level": f"strength_level: {labels.get('strength_level', '弱')}",
+            "action_bias": f"action_bias: {labels.get('action_bias', '观察')}",
+            "judgement": f"judgement: {labels.get('judgement', '')}",
+        }
+
+        synced = content
+        for key, line in final_lines.items():
+            pattern = re.compile(rf"(?im)^\s*{key}\s*:\s*.*$")
+            if pattern.search(synced):
+                synced = pattern.sub(line, synced)
+            else:
+                synced = synced.rstrip() + f"\n{line}\n"
+        return synced
 
     def _load_sector_group_trend_template(self) -> str:
         """加载分组趋势总结模板。"""
@@ -1867,10 +1899,19 @@ class AIProcessor:
         )
         is_first_report = not has_prior
 
-        # 多信号新鲜证据：有行情 + 至少一个信息源
+        market_role = evidence.get("market_evidence_role", "no_market")
+        has_high_confidence_alias = bool(evidence.get("high_confidence_aliases"))
+        has_proxy_market = bool(evidence.get("proxy_market_appearances")) or bool(
+            evidence.get("has_proxy_market_evidence")
+        )
+        has_fresh_info = bool(
+            evidence.get("cls_watch_mentions") or evidence.get("cls_telegraph_mentions")
+        )
+
+        # 多信号新鲜证据：有直接/别名行情 + 至少一个信息源
         has_multi_signal = (
-            has_market
-            and bool(evidence.get("cls_watch_mentions") or evidence.get("cls_telegraph_mentions"))
+            (has_market or market_role == "alias_market")
+            and has_fresh_info
         )
 
         return validate_sector_stage(
@@ -1881,6 +1922,10 @@ class AIProcessor:
             prior_stage=prior_stage,
             is_first_report=is_first_report,
             has_multi_signal_fresh=has_multi_signal,
+            market_evidence_role=market_role,
+            has_high_confidence_alias=has_high_confidence_alias,
+            has_proxy_market_with_confirmation=has_proxy_market and has_fresh_info,
+            has_fresh_watch_or_telegraph=has_fresh_info,
         )
 
     def _validate_group_stage_post_extract(
@@ -1898,6 +1943,7 @@ class AIProcessor:
         member_sectors = []
         for ms in member_summaries:
             member_sectors.append({
+                "sector_name": ms.get("sector_name", ""),
                 "trend_status": ms.get("trend_status", ""),
                 "sector_status": ms.get("sector_status", ""),
                 "relation_type": ms.get("relation_type", ""),
@@ -1911,4 +1957,5 @@ class AIProcessor:
             stage,
             member_freshness=member_freshness,
             member_sectors=member_sectors,
+            member_evidence_quality=evidence.get("member_evidence_quality", []),
         )

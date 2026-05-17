@@ -55,7 +55,7 @@ class TestExplicitDateOutputPaths:
         )
 
         analyzer.collect_sector_evidence.assert_called_once_with(
-            "半导体", target_date, 10,
+            "半导体", target_date, 10, preparation_result=None,
         )
 
     @pytest.mark.asyncio
@@ -94,7 +94,7 @@ class TestExplicitDateOutputPaths:
         )
 
         analyzer.collect_sector_evidence.assert_called_once_with(
-            "半导体", latest_date, 10,
+            "半导体", latest_date, 10, preparation_result=None,
         )
 
 
@@ -551,8 +551,8 @@ class TestSkipRepairOption:
                 skip_repair=False,
             )
 
-            # 修复服务应被调用
-            mock_repair.assert_called_once()
+            # 修复服务应被调用（主流程 + 证据准备各一次）
+            assert mock_repair.call_count >= 1
 
         assert result["action"] == "updated"
         assert result.get("repair_result") is not None

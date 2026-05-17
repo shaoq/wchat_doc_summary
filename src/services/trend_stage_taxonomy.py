@@ -187,6 +187,10 @@ def validate_sector_stage(
     prior_stage: str | None = None,
     is_first_report: bool = False,
     has_multi_signal_fresh: bool = False,
+    market_evidence_role: str = "no_market",
+    has_high_confidence_alias: bool = False,
+    has_proxy_market_with_confirmation: bool = False,
+    has_fresh_watch_or_telegraph: bool = False,
 ) -> str:
     """验证板块趋势阶段，返回可能被降级的阶段。
 
@@ -198,6 +202,10 @@ def validate_sector_stage(
         prior_stage: 先前的趋势阶段
         is_first_report: 是否为首次报告
         has_multi_signal_fresh: 是否有新鲜多信号证据
+        market_evidence_role: 市场证据角色 (exact_market/alias_market/proxy_market/no_market)
+        has_high_confidence_alias: 是否有高置信度别名证据
+        has_proxy_market_with_confirmation: 是否有代理市场证据加 watch/telegraph 确认
+        has_fresh_watch_or_telegraph: 是否有新鲜 watch 或 telegraph 证据
 
     Returns:
         验证后（可能降级的）趋势阶段
@@ -205,39 +213,61 @@ def validate_sector_stage(
     if stage not in SECTOR_STAGE_DEFINITIONS:
         return "暂无趋势"
 
+    # 确定有效市场证据：
+    # 当 market_evidence_role 使用默认值 "no_market" 时（未提供准备结果），
+    # 回退到 has_market_evidence 参数（向后兼容旧行为）
+    using_evidence_roles = market_evidence_role != "no_market"
+
+    if using_evidence_roles:
+        effective_market = (
+            market_evidence_role == "exact_market"
+            or (market_evidence_role == "alias_market" and has_high_confidence_alias)
+        )
+    else:
+        effective_market = has_market_evidence
+
+    # 代理市场证据需要额外 fresh watch/telegraph 确认才可用于部分活跃阶段
+    proxy_with_confirmation = (
+        market_evidence_role == "proxy_market"
+        and has_proxy_market_with_confirmation
+        and has_fresh_watch_or_telegraph
+    )
+
     # 首次报告约束
     if is_first_report and stage not in SECTOR_FIRST_REPORT_ALLOWED:
         if has_multi_signal_fresh and stage == "低位启动":
             return stage
         if has_multi_signal_fresh and stage in ("主线延续", "分歧中继"):
-            # 仅当窗口内证据充分证明连续性时允许
             return stage
         return "暂无趋势"
 
     # 稀疏证据降级
     if is_sparse and stage not in SECTOR_SPARSE_ALLOWED:
-        # 除非有先前上下文且为延续型
         if has_prior and prior_stage in SECTOR_ACTIVE_PRIOR_STAGES:
             if stage == "主线延续":
                 return stage
         return "暂无趋势"
 
     # 缺少行情证据降级
-    if not has_market_evidence and stage in SECTOR_NO_MARKET_FORBIDDEN:
-        return "暂无趋势"
+    # 高置信度 alias 视为有行情证据
+    if not effective_market and not proxy_with_confirmation:
+        if stage in SECTOR_NO_MARKET_FORBIDDEN:
+            return "暂无趋势"
+    elif not effective_market and proxy_with_confirmation:
+        # 代理市场 + fresh 确认不允许主线加强/主线延续/低位启动
+        if stage in ("主线加强", "主线延续", "低位启动"):
+            return "暂无趋势"
 
     # 需要先前上下文的阶段
     if stage in SECTOR_PRIOR_REQUIRED_STAGES:
         if not has_prior:
-            # 无先前上下文，但窗口内证据可能充分
             if has_multi_signal_fresh and stage in ("主线延续", "分歧中继"):
                 return stage
             return "暂无趋势"
         if prior_stage not in SECTOR_ACTIVE_PRIOR_STAGES and prior_stage != stage:
-            # 先前非活跃阶段
             if stage == "高位退潮" and prior_stage in ("主线加强",):
                 return stage
-            if has_multi_signal_fresh and stage in ("主线延续", "分歧中继"):
+            if has_multi_signal_fresh and stage in ("主线加强", "主线延续", "分歧中继"):
                 return stage
             if stage == "主线加强" and prior_stage in SECTOR_ACTIVE_PRIOR_STAGES:
                 return stage
@@ -253,6 +283,7 @@ def validate_group_stage(
     member_sectors: list[dict] | None = None,
     has_prior: bool = False,
     prior_stage: str | None = None,
+    member_evidence_quality: list[dict] | None = None,
 ) -> str:
     """验证分组趋势阶段，返回可能被降级的阶段。
 
@@ -262,6 +293,9 @@ def validate_group_stage(
         member_sectors: 成员板块报告列表，每项包含 trend_status, relation_type 等
         has_prior: 是否有先前分组总结
         prior_stage: 先前的分组趋势阶段
+        member_evidence_quality: 成员证据质量列表，每项包含
+            sector_name, confidence_tier, market_role, has_multi_source,
+            is_fresh 等准备结果摘要
 
     Returns:
         验证后（可能降级的）分组趋势阶段
@@ -271,6 +305,7 @@ def validate_group_stage(
 
     freshness = member_freshness or []
     sectors = member_sectors or []
+    evidence_quality = member_evidence_quality or []
 
     fresh_members = [m for m in freshness if m.get("is_fresh", False)]
     active_members = [
@@ -286,6 +321,43 @@ def validate_group_stage(
         and s.get("trend_status", "") in GROUP_MEMBER_ACTIVE_SECTOR_STAGES
     ]
 
+    # 成员证据质量：识别代理支持的活跃成员
+    proxy_backed_active = [
+        eq for eq in evidence_quality
+        if eq.get("confidence_tier") in ("high", "medium")
+        and eq.get("market_role") in ("proxy_market", "alias_market")
+        and eq.get("is_fresh", False)
+    ]
+
+    # 高置信度多源证据成员（即使 final label 是暂无趋势）
+    strong_evidence_members = [
+        eq for eq in evidence_quality
+        if eq.get("confidence_tier") == "high"
+        and eq.get("has_multi_source", False)
+        and eq.get("is_fresh", False)
+    ]
+
+    # 有效活跃成员 = 标签活跃 + 代理支持活跃 + 高置信度多源证据成员
+    effective_active_names = {
+        s.get("sector_name")
+        for s in fresh_active_confirmed
+        if s.get("sector_name")
+    }
+    effective_active_names.update(
+        eq.get("sector_name")
+        for eq in proxy_backed_active
+        if eq.get("sector_name")
+    )
+    effective_active_names.update(
+        eq.get("sector_name")
+        for eq in strong_evidence_members
+        if eq.get("sector_name")
+    )
+    effective_active_count = max(
+        len(fresh_active_confirmed),
+        len(effective_active_names),
+    )
+
     # 无新鲜成员 → 严重降级
     if not fresh_members:
         return "暂无趋势"
@@ -295,7 +367,7 @@ def validate_group_stage(
     if stale_ratio > 0.5 and stage in GROUP_MULTI_MEMBER_STAGES:
         return "暂无趋势"
 
-    # 候选成员为主 → 禁止共振/扩散/补涨（优先于单活跃检查）
+    # 候选成员为主 → 禁止共振/扩散/补涨
     candidate_ratio = (
         len([s for s in sectors if s.get("sector_status") == "candidate"])
         / max(len(sectors), 1)
@@ -303,9 +375,28 @@ def validate_group_stage(
     if candidate_ratio > 0.5 and stage in GROUP_MULTI_MEMBER_STAGES:
         return "暂无趋势"
 
-    # 仅单一活跃确认成员 → 限制到单成员允许集
-    if len(fresh_active_confirmed) <= 1 and stage in GROUP_MULTI_MEMBER_STAGES:
-        return "暂无趋势" if not fresh_active_confirmed else "短线脉冲"
+    # 低置信度或过期成员证据仍然降级多成员分组活跃阶段
+    low_confidence_members = [
+        eq for eq in evidence_quality
+        if eq.get("confidence_tier") == "low" or not eq.get("is_fresh", False)
+    ]
+    if (
+        len(low_confidence_members) > len(evidence_quality) / 2
+        and stage in GROUP_MULTI_MEMBER_STAGES
+    ):
+        return "暂无趋势"
+
+    # 有效活跃成员不足 → 限制到单成员允许集
+    if effective_active_count <= 1 and stage in GROUP_MULTI_MEMBER_STAGES:
+        # 如果有高置信度多源证据成员，允许短线脉冲
+        if strong_evidence_members and stage == "短线脉冲":
+            return stage
+        return "暂无趋势" if not fresh_active_confirmed and not proxy_backed_active else "短线脉冲"
+
+    # 多个新鲜活跃确认成员 → 不因 proxy 未使用而降级
+    if len(fresh_active_confirmed) >= 2:
+        # 已有足够的标签活跃成员，proxy 证据不影响
+        pass
 
     # 高位退潮需要先前活跃上下文
     if stage == "高位退潮":

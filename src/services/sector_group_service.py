@@ -381,13 +381,26 @@ class SectorGroupService:
             )
             session.add(member)
 
-            return {
-                "action": "added",
-                "group_id": group.id,
-                "sector_id": sector.id,
-                "sector_name": sector.canonical_name,
-                "relation_type": relation_type,
-            }
+        # 运行自动成员证据准备（不生成分组报告）
+        try:
+            from src.services.evidence_preparation import EvidencePreparationService
+            from src.services.market_analyzer import MarketAnalyzer
+            prep_service = EvidencePreparationService(self.db)
+            market_analyzer = MarketAnalyzer(self.db)
+            end_date = market_analyzer.get_latest_trade_date()
+            await prep_service.prepare_sector(
+                sector.canonical_name, end_date, window_days=10,
+            )
+        except Exception as e:
+            logger.warning("成员证据准备失败: %s", e)
+
+        return {
+            "action": "added",
+            "group_id": group.id,
+            "sector_id": sector.id,
+            "sector_name": sector.canonical_name,
+            "relation_type": relation_type,
+        }
 
     # ------------------------------------------------------------------
     # 建议生成
@@ -648,7 +661,25 @@ class SectorGroupService:
 
             suggestion.status = "accepted"
 
-            return {
+        # 对接受的成员运行证据准备
+        if accepted_members:
+            try:
+                from src.services.evidence_preparation import EvidencePreparationService
+                from src.services.market_analyzer import MarketAnalyzer
+                prep_service = EvidencePreparationService(self.db)
+                market_analyzer = MarketAnalyzer(self.db)
+                end_date = market_analyzer.get_latest_trade_date()
+                for member_name in accepted_members:
+                    try:
+                        await prep_service.prepare_sector(
+                            member_name, end_date, window_days=10,
+                        )
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.warning("接受建议后证据准备失败: %s", e)
+
+        return {
                 "action": "accepted",
                 "suggestion_id": suggestion_id,
                 "group_id": group_id,
@@ -833,10 +864,29 @@ class SectorGroupService:
                     if not continue_on_error:
                         break
 
+        # 运行分组证据准备
+        group_prep_result = None
+        try:
+            from src.services.evidence_preparation import EvidencePreparationService
+            prep_service = EvidencePreparationService(self.db)
+            group_prep_result = await prep_service.prepare_group(
+                group.canonical_name, end_date, days,
+            )
+        except Exception as e:
+            logger.warning("分组证据准备失败: %s", e)
+
         # 收集组级证据
         _emit("group_evidence_start", stage="evidence")
         evidence_start = _time.perf_counter()
         evidence = await self._collect_group_evidence(group_id, end_date, days)
+        if group_prep_result is not None:
+            evidence["preparation_summary"] = group_prep_result.to_dict()
+            evidence["preparation_diagnostics"] = group_prep_result.diagnostics.to_dict()
+            evidence["member_evidence_quality"] = self._build_member_evidence_quality(
+                evidence.get("member_summaries", []),
+                group_prep_result,
+                end_date,
+            )
         _emit("group_evidence_done", stage="evidence", elapsed=_time.perf_counter() - evidence_start)
 
         # 成员新鲜度
@@ -887,7 +937,6 @@ class SectorGroupService:
                 "member_refresh_results": refresh_results,
             }
 
-        # 保存报告
         summary = await self._save_group_trend_summary(
             group_id=group_id,
             group_name=group_canonical,
@@ -946,6 +995,14 @@ class SectorGroupService:
             批量更新结果
         """
         end_date = report_date or self._get_latest_trade_date()
+
+        # 批量共享准备：对共享窗口运行一次 CLS 修复
+        try:
+            from src.services.evidence_preparation import EvidencePreparationService
+            prep_service = EvidencePreparationService(self.db)
+            await prep_service.prepare_window_shared(end_date, days)
+        except Exception as e:
+            logger.warning("批量分组共享准备失败: %s", e)
 
         async with self.db.get_session() as session:
             query = select(SectorGroup).where(
@@ -2257,12 +2314,77 @@ class SectorGroupService:
                 member_data["action_bias"] = summary.action_bias
                 member_data["judgement"] = summary.judgement
                 member_data["summary_content"] = summary.content
+                if summary.evidence_json:
+                    try:
+                        member_data["evidence"] = json.loads(summary.evidence_json)
+                    except (json.JSONDecodeError, TypeError):
+                        member_data["evidence"] = {}
 
             evidence["member_summaries"].append(member_data)
 
         evidence["member_count"] = len(evidence["member_summaries"])
 
         return evidence
+
+    def _build_member_evidence_quality(
+        self,
+        member_summaries: list[dict[str, Any]],
+        group_prep_result: Any,
+        target_date: date,
+    ) -> list[dict[str, Any]]:
+        """从成员报告证据与准备结果构建组级校验输入。"""
+        prep_by_name = {
+            r.sector_name: r
+            for r in getattr(group_prep_result, "member_results", [])
+        }
+
+        quality: list[dict[str, Any]] = []
+        for member in member_summaries:
+            name = member.get("sector_name", "")
+            evidence = member.get("evidence") or {}
+            diagnostics = evidence.get("diagnostics", {})
+            prep = prep_by_name.get(name)
+
+            market_role = evidence.get("market_evidence_role") or (
+                prep.market_role.value if prep is not None else "no_market"
+            )
+            confidence_tier = evidence.get("preparation_confidence") or (
+                prep.confidence_tier.value if prep is not None else "low"
+            )
+            watch_count = int(diagnostics.get("cls_watch_count") or 0)
+            telegraph_count = int(diagnostics.get("cls_telegraph_count") or 0)
+            market_count = int(diagnostics.get("market_count") or 0)
+            alias_market_count = int(diagnostics.get("alias_market_count") or 0)
+            proxy_market_count = int(diagnostics.get("proxy_market_count") or 0)
+            source_count = sum(
+                1 for count in (
+                    market_count + alias_market_count + proxy_market_count,
+                    watch_count,
+                    telegraph_count,
+                )
+                if count > 0
+            )
+            if source_count >= 2 and (watch_count + telegraph_count) >= 3:
+                confidence_tier = "high"
+            elif source_count >= 1 and (watch_count + telegraph_count) >= 3:
+                confidence_tier = "medium"
+
+            quality.append({
+                "sector_name": name,
+                "sector_status": member.get("sector_status", ""),
+                "trend_status": member.get("trend_status", ""),
+                "is_fresh": member.get("summary_date") == target_date.isoformat(),
+                "confidence_tier": confidence_tier,
+                "market_role": market_role,
+                "has_multi_source": source_count >= 2,
+                "watch_count": watch_count,
+                "telegraph_count": telegraph_count,
+                "market_count": market_count,
+                "alias_market_count": alias_market_count,
+                "proxy_market_count": proxy_market_count,
+            })
+
+        return quality
 
     async def _get_member_summary_for_date(
         self,

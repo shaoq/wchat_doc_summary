@@ -130,6 +130,15 @@ def init(sector: str) -> None:
         elif action == "created":
             console.print(f"[green]板块 '{result['canonical_name']}' 已创建为跟踪板块[/green]")
 
+        # 显示证据准备摘要
+        prep = result.get("preparation")
+        if prep:
+            console.print(f"  证据准备: 置信度={prep['confidence_tier']}, 市场角色={prep['market_role']}")
+            if prep.get("aliases_found"):
+                console.print(f"    别名发现: {prep['aliases_found']} 个")
+            if prep.get("proxy_candidates"):
+                console.print(f"    代理候选: {prep['proxy_candidates']} 个")
+
     run_async(_init())
 
 
@@ -198,6 +207,7 @@ def repair(report_date: str, days: int) -> None:
 @click.option("--continue-on-error", is_flag=True, default=True, help="遇到错误继续更新")
 @click.option("--date", "report_date", type=str, default=None, help="报告日期 (YYYY-MM-DD)")
 @click.option("--skip-repair", is_flag=True, default=False, help="跳过 CLS 看盘板块归属修复")
+@click.option("--skip-preparation", is_flag=True, default=False, help="跳过自动证据准备")
 def update(
     sector: str | None,
     update_all: bool,
@@ -207,6 +217,7 @@ def update(
     continue_on_error: bool,
     report_date: str | None,
     skip_repair: bool,
+    skip_preparation: bool,
 ) -> None:
     """更新板块趋势。"""
     if not sector and not update_all:
@@ -320,6 +331,19 @@ def update(
         _stage_ok("证据收集完成")
         _stage_detail(f"行情强弱榜: {len(evidence.get('market_appearances', []))} 条")
         _stage_detail(f"看盘标签: {len(evidence.get('cls_watch_mentions', []))} 条")
+        # 显示证据准备摘要
+        market_role = evidence.get("market_evidence_role")
+        if market_role and market_role != "no_market":
+            _stage_detail(f"市场角色: {market_role}")
+        prep_confidence = evidence.get("preparation_confidence")
+        if prep_confidence:
+            _stage_detail(f"准备置信度: {prep_confidence}")
+        alias_appearances = len(evidence.get("alias_market_appearances", []))
+        if alias_appearances:
+            _stage_detail(f"别名行情: {alias_appearances} 条")
+        proxy_appearances = len(evidence.get("proxy_market_appearances", []))
+        if proxy_appearances:
+            _stage_detail(f"代理行情: {proxy_appearances} 条")
         if sparse:
             _stage_detail("[yellow]~ 证据质量: 偏稀疏[/yellow]")
         console.print()
@@ -345,6 +369,7 @@ def update(
                 force=force,
                 report_date=parsed_report_date,
                 skip_repair=skip_repair,
+                skip_preparation=skip_preparation,
             )
             gen_elapsed = time.perf_counter() - gen_start
 
