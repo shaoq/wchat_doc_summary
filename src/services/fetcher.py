@@ -1711,6 +1711,7 @@ class FetcherService:
             name=name,
             provider="rss",
         )
+        return feed
 
     async def _resolve_rss_content(
         self,

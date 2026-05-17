@@ -203,7 +203,7 @@ class TestCacheFirstAttribution:
 
         # Mock subscription service
         resolved_feed = _make_feed(id=10, mp_id="MP_WXS_resolved", name="解析公众号")
-        attribution_service.subscription_service.add_subscription = AsyncMock(return_value=resolved_feed)
+        attribution_service.subscription_service.add_subscription = AsyncMock(return_value=(resolved_feed, True))
 
         # All cache lookups return None
         session, ctx = _make_mock_session(scalar_result=None)
@@ -480,7 +480,7 @@ class TestMembershipPreservation:
         mock_provider.get_subscription_from_article = AsyncMock(return_value=subscription)
 
         fixed_feed = _make_feed(id=20, mp_id="MP_WXS_fixed", name="正确公众号")
-        mock_subscription_service.add_subscription = AsyncMock(return_value=fixed_feed)
+        mock_subscription_service.add_subscription = AsyncMock(return_value=(fixed_feed, True))
 
         with patch("src.services.rss_repair.create_article_list_provider", return_value=mock_provider), \
              patch("src.services.rss_repair.get_settings") as mock_settings:

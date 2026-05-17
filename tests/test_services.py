@@ -41,7 +41,7 @@ class TestSubscriptionService:
         mock_db.get_session.return_value.__aenter__ = AsyncMock(return_value=mock_session)
         mock_db.get_session.return_value.__aexit__ = AsyncMock(return_value=None)
 
-        feed = await subscription_service.add_subscription(
+        feed, _ = await subscription_service.add_subscription(
             mp_id="MP_WXS_test",
             name="测试公众号",
             intro="测试简介",
@@ -73,7 +73,7 @@ class TestSubscriptionService:
         mock_db.get_session.return_value.__aenter__ = AsyncMock(return_value=mock_session)
         mock_db.get_session.return_value.__aexit__ = AsyncMock(return_value=None)
 
-        feed = await subscription_service.add_subscription(
+        feed, _ = await subscription_service.add_subscription(
             mp_id="MP_WXS_test",
             name="新名称",
         )
@@ -166,12 +166,14 @@ class TestFetcherService:
         self, fetcher_service: FetcherService, mock_weread_client: MagicMock
     ) -> None:
         """测试从文章链接获取公众号信息。"""
-        mock_weread_client.get_mp_info = AsyncMock(
-            return_value={
-                "mp_id": "MP_WXS_test",
-                "name": "测试公众号",
-            }
-        )
+        mock_subscription = MagicMock()
+        mock_subscription.to_dict.return_value = {
+            "mp_id": "MP_WXS_test",
+            "name": "测试公众号",
+        }
+        mock_provider = MagicMock()
+        mock_provider.get_subscription_from_article = AsyncMock(return_value=mock_subscription)
+        fetcher_service._get_provider = MagicMock(return_value=mock_provider)
 
         result = await fetcher_service.get_mp_info_from_article(
             "https://mp.weixin.qq.com/s/test"
@@ -185,9 +187,11 @@ class TestFetcherService:
         self, fetcher_service: FetcherService, mock_weread_client: MagicMock
     ) -> None:
         """测试从文章链接获取公众号信息失败。"""
-        mock_weread_client.get_mp_info = AsyncMock(
+        mock_provider = MagicMock()
+        mock_provider.get_subscription_from_article = AsyncMock(
             side_effect=WeReadAPIError("API 错误")
         )
+        fetcher_service._get_provider = MagicMock(return_value=mock_provider)
 
         with pytest.raises(WeReadAPIError):
             await fetcher_service.get_mp_info_from_article(

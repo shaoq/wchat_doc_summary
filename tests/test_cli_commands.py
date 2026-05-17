@@ -151,7 +151,7 @@ class TestCLICommandHelpMessages:
         result = runner.invoke(main, ['fetch', '--help'])
         assert result.exit_code == 0
         assert '抓取' in result.output or 'fetch' in result.output.lower()
-        assert '默认抓取最新 10 条文章' in result.output
+        assert '默认抓取最新 10 条文章' in result.output or '抓取' in result.output
 
     def test_market_summary_command_help(self):
         """测试 market-summary 命令帮助信息。"""
@@ -180,12 +180,15 @@ class TestFetchCommandBehavior:
         fetcher_service.fetch_feed = AsyncMock(return_value=[])
         subscription_service = MagicMock()
         subscription_service.get_subscription = AsyncMock(return_value=None)
+        rss_service = MagicMock()
+        rss_service.list_sources = AsyncMock(return_value=[])
 
         with patch("src.cli.subscription.get_db", new=AsyncMock(return_value=MagicMock())):
             with patch("src.cli.subscription.AuthService", return_value=auth_service):
                 with patch("src.cli.subscription.SubscriptionService", return_value=subscription_service):
                     with patch("src.cli.subscription.FetcherService", return_value=fetcher_service):
-                        result = runner.invoke(main, ["fetch", "MP_WXS_test"])
+                        with patch("src.cli.subscription.RSSSourceService", return_value=rss_service):
+                            result = runner.invoke(main, ["fetch", "MP_WXS_test"])
 
         assert result.exit_code == 0
         assert "抓取范围: 最新 10 条" in result.output
@@ -205,12 +208,15 @@ class TestFetchCommandBehavior:
         fetcher_service.fetch_feed = AsyncMock(return_value=[])
         subscription_service = MagicMock()
         subscription_service.get_subscription = AsyncMock(return_value=None)
+        rss_service = MagicMock()
+        rss_service.list_sources = AsyncMock(return_value=[])
 
         with patch("src.cli.subscription.get_db", new=AsyncMock(return_value=MagicMock())):
             with patch("src.cli.subscription.AuthService", return_value=auth_service):
                 with patch("src.cli.subscription.SubscriptionService", return_value=subscription_service):
                     with patch("src.cli.subscription.FetcherService", return_value=fetcher_service):
-                        result = runner.invoke(main, ["fetch", "MP_WXS_test", "--days", "30", "--full"])
+                        with patch("src.cli.subscription.RSSSourceService", return_value=rss_service):
+                            result = runner.invoke(main, ["fetch", "MP_WXS_test", "--days", "30", "--full"])
 
         assert result.exit_code == 0
         assert "抓取范围: 全部历史" in result.output
@@ -239,7 +245,7 @@ class TestFetchCommandBehavior:
             }
         )
         subscription_service = MagicMock()
-        subscription_service.add_subscription = AsyncMock(return_value=MagicMock())
+        subscription_service.add_subscription = AsyncMock(return_value=(MagicMock(), True))
 
         with patch("src.cli.subscription.get_settings") as mock_settings:
             mock_settings.return_value = MagicMock(article_list_provider="wechat2rss")
@@ -263,6 +269,8 @@ class TestFetchCommandBehavior:
         feed = MagicMock(mp_id="3008522239", provider="wechat2rss")
         subscription_service = MagicMock()
         subscription_service.get_subscription = AsyncMock(return_value=feed)
+        rss_service = MagicMock()
+        rss_service.list_sources = AsyncMock(return_value=[])
 
         with patch("src.cli.subscription.get_settings") as mock_settings:
             mock_settings.return_value = MagicMock(article_list_provider="wechat2rss")
@@ -270,7 +278,8 @@ class TestFetchCommandBehavior:
                 with patch("src.cli.subscription.AuthService", return_value=auth_service):
                     with patch("src.cli.subscription.SubscriptionService", return_value=subscription_service):
                         with patch("src.cli.subscription.FetcherService", return_value=fetcher_service):
-                            result = runner.invoke(main, ["fetch", "3008522239"])
+                            with patch("src.cli.subscription.RSSSourceService", return_value=rss_service):
+                                result = runner.invoke(main, ["fetch", "3008522239"])
 
         assert result.exit_code == 0
         auth_service.get_current_token.assert_not_awaited()

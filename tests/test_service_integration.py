@@ -17,7 +17,7 @@ from src.storage.database import Database
 async def test_subscription_service_persists_feed(integration_db: Database) -> None:
     """订阅服务会持久化 feed。"""
     service = SubscriptionService(integration_db)
-    feed = await service.add_subscription("MP_WXS_test", "测试公众号", "简介", "cover")
+    feed, _ = await service.add_subscription("MP_WXS_test", "测试公众号", "简介", "cover")
 
     async with integration_db.get_session() as session:
         result = await session.execute(select(Feed).where(Feed.mp_id == "MP_WXS_test"))

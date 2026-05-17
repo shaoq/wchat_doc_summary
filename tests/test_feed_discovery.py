@@ -240,7 +240,7 @@ class TestFeedDiscoveryServiceResolve:
         mock_feed.name = "新公众号"
         mock_feed.status = 0
 
-        discovery_service.subscription_service.add_subscription = AsyncMock(return_value=mock_feed)
+        discovery_service.subscription_service.add_subscription = AsyncMock(return_value=(mock_feed, True))
 
         # 模拟 session: 匹配不到已有 Feed
         mock_session = AsyncMock()
@@ -300,7 +300,7 @@ class TestFeedDiscoveryServiceResolve:
         mock_feed.name = "活跃测试"
         mock_feed.status = 1
 
-        discovery_service.subscription_service.add_subscription = AsyncMock(return_value=mock_feed)
+        discovery_service.subscription_service.add_subscription = AsyncMock(return_value=(mock_feed, True))
 
         mock_session = AsyncMock()
         result_mock = MagicMock()

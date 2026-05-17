@@ -62,7 +62,7 @@ async def test_fetch_feed_persists_article(integration_db: Database) -> None:
 async def test_backfill_publish_time_updates_missing_article(integration_db: Database) -> None:
     """测试发布时间回填会更新数据库中的空字段。"""
     subscription_service = SubscriptionService(integration_db)
-    feed = await subscription_service.add_subscription("MP_WXS_test", "测试公众号")
+    feed, _ = await subscription_service.add_subscription("MP_WXS_test", "测试公众号")
 
     async with integration_db.get_session() as session:
         article = Article(
@@ -102,7 +102,7 @@ async def test_backfill_publish_time_updates_missing_article(integration_db: Dat
 async def test_repair_weread_publish_time_only_updates_weread_records(integration_db: Database) -> None:
     """测试历史修复只处理 weread 记录。"""
     subscription_service = SubscriptionService(integration_db)
-    feed = await subscription_service.add_subscription("MP_WXS_test", "测试公众号")
+    feed, _ = await subscription_service.add_subscription("MP_WXS_test", "测试公众号")
 
     async with integration_db.get_session() as session:
         session.add_all(

@@ -7,6 +7,37 @@ from src.models.schema import Article, Feed
 from src.services.fetcher import FetcherService
 
 
+def _make_mock_provider(get_articles_side_effect=None, get_articles_return_value=None):
+    """创建模拟 ArticleListProvider。"""
+    provider = MagicMock()
+    provider.supports_narrow_retry = False
+    if get_articles_side_effect is not None:
+        mock_page = MagicMock()
+        articles_list = []
+        for raw in get_articles_side_effect:
+            arts = []
+            for a in raw.get("articles", []):
+                art = MagicMock()
+                art.to_article_info.return_value = a
+                arts.append(art)
+            p = MagicMock()
+            p.articles = arts
+            p.page_size = raw.get("page_size", 50)
+            articles_list.append(p)
+        provider.get_articles = AsyncMock(side_effect=articles_list)
+    elif get_articles_return_value is not None:
+        arts = []
+        for a in get_articles_return_value.get("articles", []):
+            art = MagicMock()
+            art.to_article_info.return_value = a
+            arts.append(art)
+        p = MagicMock()
+        p.articles = arts
+        p.page_size = get_articles_return_value.get("page_size", 50)
+        provider.get_articles = AsyncMock(return_value=p)
+    return provider
+
+
 class TestFetchBackfillDeduplication:
     """抓取回填去重测试。
 
@@ -74,14 +105,11 @@ class TestFetchBackfillDeduplication:
         article1 = Article(id=1, feed_id=1, article_id="a1", title="文章1")
         article2 = Article(id=2, feed_id=2, article_id="a2", title="文章2")
 
-        mock_weread_client.get_articles = AsyncMock(
-            side_effect=[
-                # MP_1 的第一页
-                {"articles": [{"id": "a1", "title": "文章1"}], "page_size": 50},
-                # MP_2 的第一页
-                {"articles": [{"id": "a2", "title": "文章2"}], "page_size": 50},
-            ]
-        )
+        mock_provider = _make_mock_provider(get_articles_side_effect=[
+            {"articles": [{"id": "a1", "title": "文章1"}], "page_size": 50},
+            {"articles": [{"id": "a2", "title": "文章2"}], "page_size": 50},
+        ])
+        fetcher_service._get_provider = MagicMock(return_value=mock_provider)
 
         fetcher_service._fetch_and_save_article = AsyncMock(
             side_effect=[("inserted", article1), ("inserted", article2)]
@@ -124,9 +152,11 @@ class TestFetchBackfillDeduplication:
         mock_subscription_service.update_sync_time = AsyncMock()
 
         article1 = Article(id=1, feed_id=1, article_id="a1", title="文章1")
-        mock_weread_client.get_articles = AsyncMock(
-            return_value={"articles": [{"id": "a1", "title": "文章1"}], "page_size": 50}
-        )
+        mock_provider = _make_mock_provider(get_articles_return_value={
+            "articles": [{"id": "a1", "title": "文章1"}], "page_size": 50
+        })
+        fetcher_service._get_provider = MagicMock(return_value=mock_provider)
+
         fetcher_service._fetch_and_save_article = AsyncMock(
             return_value=("inserted", article1)
         )
