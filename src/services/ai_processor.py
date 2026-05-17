@@ -689,6 +689,7 @@ class AIProcessor:
         telegraphs: list[dict] | None = None,
         watch_items: list[dict] | None = None,
         global_market_context: dict | None = None,
+        article_evidence: list[dict] | None = None,
     ) -> str:
         """生成市场总结。
 
@@ -699,6 +700,7 @@ class AIProcessor:
             telegraphs: 财联社重要电报列表（可选）
             watch_items: 财联社看盘数据列表（可选）
             global_market_context: 海外市场上下文（可选）
+            article_evidence: 结构化文章证据列表（可选）
 
         Returns:
             市场总结文本
@@ -728,8 +730,11 @@ class AIProcessor:
         if source_type == "approximate_candidates":
             limit_up_stocks = limit_up_stocks + "\n(注: 涨停池数据为近似候选集，非正式涨停池)"
 
-        # 格式化文章
-        articles_text = self._format_articles_for_prompt(articles[:10])
+        # 格式化文章（优先使用结构化证据）
+        if article_evidence:
+            articles_text = self._format_article_evidence_for_prompt(article_evidence)
+        else:
+            articles_text = self._format_articles_for_prompt(articles[:10])
 
         # 格式化电报
         telegraphs_text = self._format_telegraphs_for_prompt(telegraphs[:30] if telegraphs else [])
@@ -798,6 +803,7 @@ class AIProcessor:
                 articles=articles,
                 global_market_context=global_market_context,
                 data_gaps=data_gaps,
+                article_evidence=article_evidence,
             )
             try:
                 enhanced_strategy = await self._call_api(
@@ -835,6 +841,7 @@ class AIProcessor:
         articles: list,
         global_market_context: dict | None,
         data_gaps: str,
+        article_evidence: list[dict] | None = None,
     ) -> str:
         """构建第六节后续策略增强 prompt。
 
@@ -953,6 +960,7 @@ class AIProcessor:
         articles: list,
         global_market_context: dict | None,
         data_gaps: str,
+        article_evidence: list[dict] | None = None,
     ) -> str:
         """构建策略增强用的压缩证据摘要。"""
         lines = [
@@ -1008,13 +1016,34 @@ class AIProcessor:
                 lines.append("- 财联社电报关键标题: 事件标题证据不可用，仅使用结构化信号")
 
         if articles:
-            safe_article_titles = self._filter_safe_titles(
-                [a.get("title", "").strip() for a in articles[:5]]
-            )
-            if safe_article_titles:
-                lines.append(f"- 文章观点标题: {'；'.join(safe_article_titles)}")
+            if article_evidence:
+                # 使用结构化文章证据的看点和风险
+                all_watch: list[str] = []
+                all_risks: list[str] = []
+                for rec in article_evidence:
+                    evidence = rec.get("evidence", {})
+                    for wi in evidence.get("next_day_watch_items", []):
+                        all_watch.append(wi)
+                    for rp in evidence.get("risk_points", []):
+                        all_risks.append(rp)
+
+                if all_watch:
+                    lines.append(f"- 文章明日关注: {'；'.join(all_watch[:8])}")
+                else:
+                    lines.append("- 文章明日关注: 无明确方向")
+
+                if all_risks:
+                    lines.append(f"- 文章风险提示: {'；'.join(all_risks[:5])}")
+                else:
+                    lines.append("- 文章风险提示: 无明确风险点")
             else:
-                lines.append("- 文章观点标题: 文章标题证据不可用，仅使用结构化信号")
+                safe_article_titles = self._filter_safe_titles(
+                    [a.get("title", "").strip() for a in articles[:5]]
+                )
+                if safe_article_titles:
+                    lines.append(f"- 文章观点标题: {'；'.join(safe_article_titles)}")
+                else:
+                    lines.append("- 文章观点标题: 文章标题证据不可用，仅使用结构化信号")
 
         lines.append(f"- 数据缺口与降级约束: {data_gaps}")
         return "\n".join(lines)
@@ -1241,6 +1270,105 @@ class AIProcessor:
             lines.append(f"{i}. {title}")
             if summary:
                 lines.append(f"   摘要：{summary}...")
+
+        return "\n".join(lines)
+
+    def _format_article_evidence_for_prompt(self, evidence_records: list[dict]) -> str:
+        """格式化结构化文章证据用于 prompt。
+
+        将提取的文章观点证据渲染为结构化文本，标记为"公众号作者观点"，
+        而非已确认的市场事实。
+
+        Args:
+            evidence_records: 文章证据记录列表（来自 ArticleEvidenceRecord.to_dict()）
+
+        Returns:
+            格式化的证据文本
+        """
+        if not evidence_records:
+            return "无相关新闻"
+
+        # 过滤掉低相关度和无关文章
+        relevant = [
+            r for r in evidence_records
+            if r.get("evidence", {}).get("relevance") not in ("unrelated",)
+        ]
+
+        if not relevant:
+            # 全部低相关度时回退到标题列表
+            titles = [r.get("title", "") for r in evidence_records[:5] if r.get("title")]
+            if titles:
+                return "（文章均非市场复盘/策略类，仅列标题参考）\n" + "\n".join(
+                    f"- {t}" for t in titles
+                )
+            return "无相关新闻"
+
+        lines = [
+            "以下为公众号文章作者观点（辅助证据，非确认性市场事实，需与行情数据交叉验证）：",
+            "",
+        ]
+
+        for i, record in enumerate(relevant[:10], 1):
+            evidence = record.get("evidence", {})
+            title = record.get("title", "")
+            feed_name = record.get("feed_name", "")
+            outcome = record.get("outcome", "")
+
+            # 标题行
+            source_label = f"（来源: {feed_name}）" if feed_name else ""
+            lines.append(f"{i}. [{evidence.get('article_type', '未知')}] {title}{source_label}")
+
+            # 降级标记
+            if outcome == "fallback":
+                lines.append(f"   [降级: 仅标题/摘要可用]")
+                if evidence.get("usable_summary"):
+                    lines.append(f"   摘要: {evidence['usable_summary'][:200]}")
+                continue
+
+            # 相关度标记
+            relevance = evidence.get("relevance", "low")
+            if relevance in ("high", "medium"):
+                lines.append(f"   市场相关度: {relevance}")
+
+            # 提及板块
+            sectors = evidence.get("mentioned_sectors", [])
+            if sectors:
+                lines.append(f"   提及板块: {', '.join(sectors[:5])}")
+
+            # 提及个股
+            stocks = evidence.get("mentioned_stocks", [])
+            if stocks:
+                lines.append(f"   提及个股: {', '.join(stocks[:5])}")
+
+            # 主线观点
+            mainlines = evidence.get("mainline_views", [])
+            if mainlines:
+                for mv in mainlines[:3]:
+                    lines.append(f"   主线观点: {mv}")
+
+            # 情绪
+            sentiment = evidence.get("sentiment_view", "")
+            if sentiment:
+                lines.append(f"   情绪倾向: {sentiment}")
+
+            # 明日关注
+            watch_items = evidence.get("next_day_watch_items", [])
+            if watch_items:
+                for wi in watch_items[:3]:
+                    lines.append(f"   明日关注: {wi}")
+
+            # 风险提示
+            risks = evidence.get("risk_points", [])
+            if risks:
+                for rp in risks[:3]:
+                    lines.append(f"   风险提示: {rp}")
+
+            # 精炼摘要
+            summary = evidence.get("usable_summary", "")
+            if summary:
+                lines.append(f"   摘要: {summary[:150]}")
+
+            lines.append("")
 
         return "\n".join(lines)
 

@@ -428,6 +428,9 @@ class MarketAnalyzer:
         self,
         trade_date: date,
         offline: bool = False,
+        *,
+        prepare_article_evidence: bool = False,
+        force_evidence: bool = False,
     ) -> NewsAggregationResult:
         """聚合新闻数据（财联社电报、看盘数据、相关文章）。
 
@@ -436,24 +439,21 @@ class MarketAnalyzer:
         Args:
             trade_date: 交易日期
             offline: 是否仅使用本地数据
+            prepare_article_evidence: 是否自动准备文章证据
+            force_evidence: 是否强制刷新文章证据（忽略缓存）
 
         Returns:
             新闻聚合结果:
             {
                 "status": "success" | "degraded" | "failed",
-                "telegraphs": [...],      # 财联社重要电报
-                "watch_items": [...],     # 财联社看盘数据
-                "articles": [...],        # 相关市场文章
-                "sources_status": {       # 各来源状态
-                    "telegraphs": "ok" | "empty" | "error",
-                    "watch_items": "ok" | "empty" | "error",
-                    "articles": "ok" | "empty" | "error",
-                },
-                "time_windows": {         # 各资料类型的时间窗口
-                    "watch": {"start": "...", "end": "..."},
-                    "telegraph": {"start": "...", "end": "..."},
-                    "article": {"start": "...", "end": "..."},
-                },
+                "telegraphs": [...],
+                "watch_items": [...],
+                "articles": [...],
+                "article_evidence": [...],   # 结构化文章证据（可选）
+                "sources_status": {...},
+                "source_details": {...},
+                "article_evidence_diagnostics": {...},  # 证据准备诊断（可选）
+                "time_windows": {...},
             }
         """
         # 计算各资料类型的时间窗口
@@ -649,9 +649,11 @@ class MarketAnalyzer:
             }
             logger.warning(f"获取财联社看盘数据失败: {e}")
 
-        # ========== 3. 收集相关市场文章 ==========
+        # ========== 3. 收集相关市场文章（含 feed 元数据） ==========
         try:
-            articles = await self.get_related_articles(trade_date, time_window=article_window)
+            articles = await self.get_related_articles(
+                trade_date, time_window=article_window, include_feed_metadata=True,
+            )
 
             if articles:
                 result["articles"] = articles
@@ -676,6 +678,48 @@ class MarketAnalyzer:
                 "message": "获取失败",
             }
             logger.warning(f"获取相关文章失败: {e}")
+
+        # ========== 4. 自动准备文章证据（可选） ==========
+        if prepare_article_evidence and result.get("articles"):
+            result["article_evidence"] = []
+            result["article_evidence_diagnostics"] = {}
+            try:
+                from src.services.article_evidence import ArticleEvidenceService
+
+                evidence_service = ArticleEvidenceService(self.db)
+
+                # 选择候选集
+                candidates = self.select_evidence_candidates(result["articles"])
+
+                # 离线模式：只复用缓存，不生成新证据
+                if offline:
+                    batch_result = await evidence_service.prepare_batch(
+                        candidates, force=False,
+                    )
+                    # 离线模式标记：过滤掉 prepared 记录（不应有新调用）
+                    # 但如果 AI 调用已经发生（缓存命中返回 reused），保留
+                else:
+                    batch_result = await evidence_service.prepare_batch(
+                        candidates, force=force_evidence,
+                    )
+
+                result["article_evidence"] = [
+                    r.to_dict() for r in batch_result.records
+                ]
+                result["article_evidence_diagnostics"] = batch_result.to_dict()
+
+                logger.info(
+                    "文章证据准备完成: prepared=%d, reused=%d, fallback=%d, failed=%d",
+                    batch_result.prepared, batch_result.reused,
+                    batch_result.fallback, batch_result.failed,
+                )
+
+            except Exception as e:
+                logger.warning("文章证据准备失败（降级继续）: %s", e)
+                result["article_evidence_diagnostics"] = {
+                    "error": str(e),
+                    "total": len(result.get("articles", [])),
+                }
 
         # 计算聚合状态: success / degraded / failed
         statuses = list(result["sources_status"].values())
@@ -707,6 +751,8 @@ class MarketAnalyzer:
         self,
         trade_date: date,
         time_window: tuple[datetime, datetime] | None = None,
+        *,
+        include_feed_metadata: bool = False,
     ) -> list[dict[str, Any]]:
         """获取与交易日相关的文章（精确时间窗口）。
 
@@ -716,9 +762,10 @@ class MarketAnalyzer:
         Args:
             trade_date: 交易日期
             time_window: 精确时间窗口 (start, end)，如未提供则自动计算
+            include_feed_metadata: 是否包含 feed 元数据（名称、权重、provider）
 
         Returns:
-            文章列表（包含标题、摘要、内容）
+            文章列表（包含标题、摘要、内容，可选 feed 元数据）
         """
         if time_window is None:
             time_window = self.calculate_article_time_window(trade_date)
@@ -738,21 +785,104 @@ class MarketAnalyzer:
             )
             articles = result.scalars().all()
 
-        return [
-            {
+            # 批量加载 feed 元数据
+            feed_map: dict[int, dict[str, Any]] = {}
+            if include_feed_metadata:
+                feed_ids = {a.feed_id for a in articles if a.feed_id}
+                if feed_ids:
+                    from src.models.schema import Feed
+                    feed_result = await session.execute(
+                        select(Feed).where(Feed.id.in_(feed_ids))
+                    )
+                    for feed in feed_result.scalars().all():
+                        feed_map[feed.id] = {
+                            "feed_name": feed.name or "",
+                            "feed_weight": feed.weight if feed.weight is not None else 5,
+                            "provider": feed.provider or "",
+                        }
+
+        article_dicts = []
+        for a in articles:
+            d: dict[str, Any] = {
+                "id": a.id,
                 "title": a.title,
                 "summary": a.summary or "",
                 "content": (a.content or "")[:1000] if a.content else "",
                 "publish_time": a.publish_time.isoformat() if a.publish_time else None,
             }
-            for a in articles
-        ]
+            if include_feed_metadata and a.feed_id and a.feed_id in feed_map:
+                d.update(feed_map[a.feed_id])
+            elif include_feed_metadata:
+                d["feed_name"] = ""
+                d["feed_weight"] = 5
+                d["provider"] = a.provider or ""
+            article_dicts.append(d)
+
+        return article_dicts
+
+    @staticmethod
+    def select_evidence_candidates(
+        articles: list[dict[str, Any]],
+        max_candidates: int = 10,
+    ) -> list[dict[str, Any]]:
+        """从文章列表中按市场相关度选择候选集。
+
+        使用确定性信号排序：复盘 > 策略 > 主线 > 板块 > 情绪 > 涨停 > 风险。
+        同时考虑 feed 权重作为次要排序因子。
+
+        Args:
+            articles: 文章列表（需包含 title, summary, content）
+            max_candidates: 最大候选数
+
+        Returns:
+            排序后的候选文章列表
+        """
+        from src.services.article_evidence import compute_relevance_score
+
+        scored: list[tuple[int, dict[str, Any]]] = []
+        for a in articles:
+            score = compute_relevance_score(
+                title=a.get("title", ""),
+                summary=a.get("summary", ""),
+                content_available=bool(a.get("content")),
+            )
+            # feed 权重加成（0-10 → 0-10 分加成）
+            weight = a.get("feed_weight", 5)
+            score += weight
+            scored.append((score, a))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [a for _, a in scored[:max_candidates]]
+
+    @staticmethod
+    def build_fallback_article_signals(
+        articles: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """当证据提取不可用时，从文章标题/摘要构建降级信号。
+
+        Args:
+            articles: 原始文章列表
+
+        Returns:
+            降级后的文章信号列表
+        """
+        fallback = []
+        for a in articles[:10]:
+            fallback.append({
+                "title": a.get("title", ""),
+                "summary": (a.get("summary") or "")[:200],
+                "feed_name": a.get("feed_name", ""),
+                "fallback": True,
+            })
+        return fallback
 
     async def save_summary(
         self,
         trade_date: date,
         content: str,
         data_sources: dict[str, Any],
+        *,
+        article_evidence_diagnostics: dict[str, Any] | None = None,
     ) -> MarketSummary:
         """保存市场总结。
 
@@ -773,6 +903,11 @@ class MarketAnalyzer:
             RuntimeError: 文件或数据库持久化失败
         """
         from sqlalchemy import select
+
+        # 合并文章证据溯源到 data_sources
+        save_sources = dict(data_sources) if data_sources else {}
+        if article_evidence_diagnostics:
+            save_sources["article_evidence_diagnostics"] = article_evidence_diagnostics
 
         # 1. 先保存到文件（非事务性，容易重试）
         try:
@@ -796,14 +931,14 @@ class MarketAnalyzer:
             if summary:
                 # 更新已有记录
                 summary.content = content
-                summary.data_sources = json.dumps(data_sources, ensure_ascii=False)
+                summary.data_sources = json.dumps(save_sources, ensure_ascii=False)
                 logger.info(f"更新已有市场总结: {trade_date}")
             else:
                 # 插入新记录
                 summary = MarketSummary(
                     trade_date=trade_date,
                     content=content,
-                    data_sources=json.dumps(data_sources, ensure_ascii=False),
+                    data_sources=json.dumps(save_sources, ensure_ascii=False),
                 )
                 session.add(summary)
                 logger.info(f"创建新市场总结: {trade_date}")

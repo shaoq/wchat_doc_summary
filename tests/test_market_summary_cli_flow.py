@@ -73,7 +73,7 @@ class _FakeAnalyzer:
             "data_source": "api",
         }
 
-    async def collect_news_data(self, trade_date, offline=False):
+    async def collect_news_data(self, trade_date, offline=False, **kwargs):
         self.collect_news_data_calls.append({"trade_date": trade_date, "offline": offline})
         return {
             "status": "success",
@@ -93,7 +93,7 @@ class _FakeAnalyzer:
             "time_window": {"start": "2026-03-27 15:00", "end": "2026-03-30 09:15"},
         }
 
-    async def save_summary(self, trade_date, content, market_data):
+    async def save_summary(self, trade_date, content, market_data, **kwargs):
         return None
 
 
@@ -833,7 +833,7 @@ def test_existing_summary_exits_before_ai_processor_init():
 class _DegradedNewsAnalyzer(_FakeAnalyzer):
     """部分新闻源失败的 analyzer。"""
 
-    async def collect_news_data(self, trade_date, offline=False):
+    async def collect_news_data(self, trade_date, offline=False, **kwargs):
         self.collect_news_data_calls.append({"trade_date": trade_date, "offline": offline})
         return {
             "status": "degraded",
@@ -857,7 +857,7 @@ class _DegradedNewsAnalyzer(_FakeAnalyzer):
 class _FailedNewsAnalyzer(_FakeAnalyzer):
     """所有新闻源失败的 analyzer。"""
 
-    async def collect_news_data(self, trade_date, offline=False):
+    async def collect_news_data(self, trade_date, offline=False, **kwargs):
         self.collect_news_data_calls.append({"trade_date": trade_date, "offline": offline})
         return {
             "status": "failed",
@@ -898,7 +898,7 @@ class _PreflightSummaryAnalyzer(_FakeAnalyzer):
             "data_source": "api",
         }
 
-    async def collect_news_data(self, trade_date, offline=False):
+    async def collect_news_data(self, trade_date, offline=False, **kwargs):
         self.collect_news_data_calls.append({"trade_date": trade_date, "offline": offline})
         return {
             "status": "degraded",
@@ -922,7 +922,7 @@ class _PreflightSummaryAnalyzer(_FakeAnalyzer):
 class _AutoFetchedNewsAnalyzer(_FakeAnalyzer):
     """返回包含自动补抓摘要的新闻结果。"""
 
-    async def collect_news_data(self, trade_date, offline=False):
+    async def collect_news_data(self, trade_date, offline=False, **kwargs):
         self.collect_news_data_calls.append({"trade_date": trade_date, "offline": offline})
         return {
             "status": "success",
@@ -951,7 +951,7 @@ class _AutoFetchedNewsAnalyzer(_FakeAnalyzer):
 class _AutoFetchFailedNewsAnalyzer(_FakeAnalyzer):
     """返回自动补抓失败的新闻结果。"""
 
-    async def collect_news_data(self, trade_date, offline=False):
+    async def collect_news_data(self, trade_date, offline=False, **kwargs):
         self.collect_news_data_calls.append({"trade_date": trade_date, "offline": offline})
         return {
             "status": "degraded",
@@ -1192,7 +1192,7 @@ def test_news_stage_shows_auto_fetch_failure_message():
 class _SaveFailureAnalyzer(_FakeAnalyzer):
     """save_summary 抛出 RuntimeError 的 analyzer。"""
 
-    async def save_summary(self, trade_date, content, market_data):
+    async def save_summary(self, trade_date, content, market_data, **kwargs):
         raise RuntimeError("磁盘空间不足，无法写入文件")
 
 

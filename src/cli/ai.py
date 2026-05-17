@@ -347,6 +347,36 @@ def _get_news_status_items(news_data: dict[str, Any]) -> list[dict[str, str]]:
     ]
 
 
+def _render_article_evidence_diagnostics(diagnostics: dict[str, Any]) -> None:
+    """渲染文章证据准备诊断信息。"""
+    console.print("[bold cyan][预检] 文章证据准备[/bold cyan]")
+    if diagnostics.get("error"):
+        _status_detail("证据准备", "error", error_message=diagnostics["error"])
+        console.print()
+        return
+
+    total = diagnostics.get("total", 0)
+    prepared = diagnostics.get("prepared", 0)
+    reused = diagnostics.get("reused", 0)
+    fallback = diagnostics.get("fallback", 0)
+    failed = diagnostics.get("failed", 0)
+
+    status = "ok" if failed == 0 else "degraded"
+    parts = []
+    if prepared:
+        parts.append(f"新提取 {prepared}")
+    if reused:
+        parts.append(f"复用缓存 {reused}")
+    if fallback:
+        parts.append(f"降级 {fallback}")
+    if failed:
+        parts.append(f"失败 {failed}")
+
+    msg = f"{total} 篇候选（{', '.join(parts) or '无'}）" if total else "无候选文章"
+    _status_detail("文章证据", status, ok_message=msg, error_message=msg)
+    console.print()
+
+
 def _render_pre_generation_summary(market_data: dict[str, Any], news_data: dict[str, Any]) -> None:
     """在生成报告前输出 AI 输入数据清单。"""
     console.print("[bold cyan][预检] AI 输入数据清单[/bold cyan]")
@@ -847,7 +877,11 @@ def market_summary(target_date: str | None, offline: bool, list_summaries: bool,
         # ── [2/3] 获取新闻数据 ──
         console.print(f"[bold cyan]{_stage_header(2, 3, '获取新闻数据')}[/bold cyan]")
         with console.status("[bold blue]获取中...[/bold blue]"):
-            news_data = await analyzer.collect_news_data(trade_date, offline=offline)
+            news_data = await analyzer.collect_news_data(
+                trade_date, offline=offline,
+                prepare_article_evidence=True,
+                force_evidence=force,
+            )
 
         time_windows = news_data.get("time_windows", {})
         news_stage_status = news_data.get("status", "success")
@@ -879,6 +913,11 @@ def market_summary(target_date: str | None, offline: bool, list_summaries: bool,
             _stage_detail(f"[dim]文章窗口: {article_w.get('start', '-')} ~ {article_w.get('end', '-')}[/dim]")
         console.print()
 
+        # 文章证据诊断
+        evidence_diagnostics = news_data.get("article_evidence_diagnostics", {})
+        if evidence_diagnostics:
+            _render_article_evidence_diagnostics(evidence_diagnostics)
+
         _render_pre_generation_summary(market_data, news_data)
 
         # ── [3/3] 生成并保存市场总结 ──
@@ -893,13 +932,17 @@ def market_summary(target_date: str | None, offline: bool, list_summaries: bool,
                 telegraphs=news_data.get("telegraphs", []),
                 watch_items=news_data.get("watch_items", []),
                 global_market_context=market_data.get("global_market_context"),
+                article_evidence=news_data.get("article_evidence"),
             )
             elapsed = time.perf_counter() - start_time
 
         # 保存总结（文件 + 数据库双重持久化）
         save_path = f"output/market_summaries/{trade_date}.md"
         try:
-            await analyzer.save_summary(trade_date, content, market_data)
+            await analyzer.save_summary(
+                trade_date, content, market_data,
+                article_evidence_diagnostics=news_data.get("article_evidence_diagnostics"),
+            )
         except RuntimeError as e:
             _stage_conclusion(False, f"保存失败: {e}")
             console.print()
