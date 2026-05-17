@@ -977,6 +977,37 @@ class _AutoFetchFailedNewsAnalyzer(_FakeAnalyzer):
         }
 
 
+class _ArticleEvidenceDiagnosticsAnalyzer(_FakeAnalyzer):
+    """返回文章证据诊断结果，覆盖诊断渲染路径。"""
+
+    async def collect_news_data(self, trade_date, offline=False, **kwargs):
+        self.collect_news_data_calls.append({"trade_date": trade_date, "offline": offline})
+        return {
+            "status": "success",
+            "telegraphs": [],
+            "watch_items": [],
+            "articles": [{"title": "Article"}],
+            "sources_status": {
+                "telegraphs": "empty",
+                "watch_items": "empty",
+                "articles": "ok",
+            },
+            "article_evidence_diagnostics": {
+                "total": 1,
+                "prepared": 1,
+                "reused": 0,
+                "fallback": 0,
+                "failed": 0,
+            },
+            "time_windows": {
+                "watch": {"start": "2026-03-27 09:00", "end": "2026-03-27 15:00"},
+                "telegraph": {"start": "2026-03-27 09:00", "end": "2026-03-30 09:15"},
+                "article": {"start": "2026-03-27 15:00", "end": "2026-03-30 09:15"},
+            },
+            "time_window": {"start": "2026-03-27 15:00", "end": "2026-03-30 09:15"},
+        }
+
+
 def test_news_degraded_status_shows_warning():
     """部分新闻源失败时，CLI 应展示退化提示。"""
     runner = CliRunner()
@@ -1182,6 +1213,27 @@ def test_news_stage_shows_auto_fetch_failure_message():
     assert result.exit_code == 0
     assert "财联社电报: 自动补抓失败" in output
     assert "看盘数据: 自动补抓失败" in output
+
+
+def test_article_evidence_diagnostics_render_without_type_error():
+    """文章证据诊断存在时，CLI 应正常渲染并继续生成。"""
+    runner = CliRunner()
+    _ArticleEvidenceDiagnosticsAnalyzer.instances = []
+    _FakeProcessor.instances = []
+
+    with patch("src.cli.ai.get_db", new=_fake_get_db):
+        with patch("src.cli.ai.MarketAnalyzer", _ArticleEvidenceDiagnosticsAnalyzer):
+            with patch("src.cli.ai.AIProcessor", _FakeProcessor):
+                result = runner.invoke(
+                    main,
+                    ["ai", "market-summary", "--date", "2026-03-27", "--force"],
+                )
+
+    output = result.output
+    assert result.exit_code == 0
+    assert "[预检] 文章证据准备" in output
+    assert "文章证据: 1 篇候选（新提取 1）" in output
+    assert "生成并保存完成" in output
 
 
 # ---------------------------------------------------------------------------

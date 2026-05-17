@@ -351,7 +351,13 @@ def _render_article_evidence_diagnostics(diagnostics: dict[str, Any]) -> None:
     """渲染文章证据准备诊断信息。"""
     console.print("[bold cyan][预检] 文章证据准备[/bold cyan]")
     if diagnostics.get("error"):
-        _status_detail("证据准备", "error", error_message=diagnostics["error"])
+        _status_detail(
+            "证据准备",
+            "error",
+            ok_message="",
+            empty_message="",
+            error_message=diagnostics["error"],
+        )
         console.print()
         return
 
@@ -373,7 +379,7 @@ def _render_article_evidence_diagnostics(diagnostics: dict[str, Any]) -> None:
         parts.append(f"失败 {failed}")
 
     msg = f"{total} 篇候选（{', '.join(parts) or '无'}）" if total else "无候选文章"
-    _status_detail("文章证据", status, ok_message=msg, error_message=msg)
+    _status_detail("文章证据", status, ok_message=msg, empty_message=msg, error_message=msg)
     console.print()
 
 
