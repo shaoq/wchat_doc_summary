@@ -524,9 +524,23 @@ class SectorGroupService:
             query = query.order_by(SectorGroupSuggestion.confidence.desc().nullslast())
             result = await session.execute(query)
             suggestions = result.scalars().all()
+            active_groups: list[SectorGroup] = []
+            if status in (None, "pending"):
+                result = await session.execute(
+                    select(SectorGroup).where(SectorGroup.status == "active")
+                )
+                active_groups = list(result.scalars().all())
 
             output = []
             for s in suggestions:
+                if (
+                    s.status == "pending"
+                    and s.suggestion_type == "new_group"
+                    and s.suggested_group_name
+                    and self._find_existing_group_by_name(active_groups, s.suggested_group_name)
+                ):
+                    continue
+
                 members = await self._load_suggestion_members(session, s.id)
                 group_name_resolved = None
                 if s.target_group_id:
@@ -1707,18 +1721,11 @@ class SectorGroupService:
             if matched_existing:
                 continue
 
-            # 确定建议名称
+            # 确定建议名称，并先按建议名匹配已有分组。
+            # 仅比较成员名会漏掉“机器人 + 智能机器 -> 人形机器人链”这类主题名命中。
             suggested_name = cluster.theme_name or cluster.members[0].canonical_name + "链"
-            name_key = SectorIdentity.comparison_key(suggested_name)
-
-            # 检查同名 pending 建议 - 刷新而非重复创建
-            existing_pending = None
-            for s in pending_suggestions:
-                if (s.suggestion_type == "new_group"
-                        and s.status == "pending"
-                        and SectorIdentity.comparison_key(s.suggested_group_name or "") == name_key):
-                    existing_pending = s
-                    break
+            if self._find_existing_group_by_name(existing_groups, suggested_name):
+                continue
 
             # AI 清洗
             cleaned = cluster
@@ -1732,6 +1739,22 @@ class SectorGroupService:
 
             if len(cleaned.members) < 2:
                 continue
+
+            # AI 可能改写建议名称，清洗后需要再次用最终名称匹配已有分组。
+            suggested_name = cleaned.theme_name or suggested_name
+            if self._find_existing_group_by_name(existing_groups, suggested_name):
+                continue
+
+            name_key = SectorIdentity.comparison_key(suggested_name)
+
+            # 检查同名 pending 建议 - 刷新而非重复创建
+            existing_pending = None
+            for s in pending_suggestions:
+                if (s.suggestion_type == "new_group"
+                        and s.status == "pending"
+                        and SectorIdentity.comparison_key(s.suggested_group_name or "") == name_key):
+                    existing_pending = s
+                    break
 
             # 确定置信度和原因
             confidence = self._calculate_cluster_confidence(cleaned)
@@ -1799,6 +1822,30 @@ class SectorGroupService:
             -sum(m.co_occurrence_count for m in c.members),
         ))
         return deduped
+
+    @staticmethod
+    def _find_existing_group_by_name(
+        existing_groups: list[SectorGroup],
+        name: str,
+    ) -> SectorGroup | None:
+        """按规范名、别名、关键词匹配已有分组。"""
+        name_key = SectorIdentity.comparison_key(name)
+        for group in existing_groups:
+            if SectorIdentity.comparison_key(group.canonical_name) == name_key:
+                return group
+
+            for raw_values in (group.aliases, group.keywords):
+                if not raw_values:
+                    continue
+                try:
+                    values = json.loads(raw_values)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                for value in values:
+                    if SectorIdentity.comparison_key(str(value)) == name_key:
+                        return group
+
+        return None
 
     # ------------------------------------------------------------------
     # 主题约束与匹配

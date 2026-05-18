@@ -840,6 +840,30 @@ class TestThemeConstraints:
         assert {"机器人", "智能机器"} <= member_names
 
     @pytest.mark.asyncio
+    async def test_existing_group_name_suppresses_new_group_suggestion(
+        self,
+        theme_seeded_db: Database,
+        theme_service: SectorGroupService,
+    ):
+        """候选主题名已是已有分组时，不应再生成 new_group 建议。"""
+        async with theme_seeded_db.get_session() as session:
+            session.add(SectorGroup(canonical_name="人形机器人链", status="active"))
+            for name in ["机器人", "智能机器"]:
+                session.add(MarketSector(
+                    trade_date=date(2026, 5, 15),
+                    sector_code=f"{name}_2026-05-15",
+                    sector_name=name,
+                    change_pct=1.0,
+                ))
+
+        result = await theme_service.generate_suggestions(days=10)
+        assert result["new_group_suggestions"] == 0
+
+        suggestions = await theme_service.list_suggestions(suggestion_type="new_group")
+        suggestion_names = {s["suggested_group_name"] for s in suggestions}
+        assert "人形机器人链" not in suggestion_names
+
+    @pytest.mark.asyncio
     async def test_single_day_robotics_theme_not_crowded_out_by_other_themes(
         self,
         theme_seeded_db: Database,
@@ -1059,6 +1083,27 @@ class TestAICleaning:
 
 class TestDuplicateRefreshAndIgnored:
     """测试建议刷新和忽略抑制。"""
+
+    @pytest.mark.asyncio
+    async def test_stale_new_group_suggestion_for_existing_group_hidden(
+        self,
+        theme_seeded_db: Database,
+        theme_service: SectorGroupService,
+    ):
+        """已存在同名分组的 pending new_group 陈旧建议不应出现在列表中。"""
+        async with theme_seeded_db.get_session() as session:
+            session.add(SectorGroup(canonical_name="人形机器人链", status="active"))
+            session.add(SectorGroupSuggestion(
+                suggestion_type="new_group",
+                suggested_group_name="人形机器人链",
+                status="pending",
+                confidence=0.9,
+                reason="旧建议",
+            ))
+
+        suggestions = await theme_service.list_suggestions(suggestion_type="new_group")
+        suggestion_names = {s["suggested_group_name"] for s in suggestions}
+        assert "人形机器人链" not in suggestion_names
 
     @pytest.mark.asyncio
     async def test_duplicate_suggestion_refreshed(
