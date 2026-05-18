@@ -5,6 +5,7 @@ import logging
 import re
 import time as _time
 import unicodedata
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -34,6 +35,46 @@ TREND_STATUSES = (
 )
 STRENGTH_LEVELS = ("强", "中", "弱")
 ACTION_BIASES = ("跟踪", "观察", "回避")
+
+
+@dataclass
+class SectorUpdateProgressEvent:
+    """板块批量更新进度事件。"""
+
+    type: str  # batch_start, shared_repair_start/done/failed, sector_start, sector_stage, api_retry, sector_done/skipped/failed, batch_done
+    sector_name: str = ""
+    sector_index: int = 0
+    sector_total: int = 0
+    stage: str = ""  # preparation, repair, evidence, ai, save
+    action: str = ""  # updated, skipped, failed
+    elapsed: float = 0.0
+    output_path: str = ""
+    labels: dict[str, str] = field(default_factory=dict)
+    error: str = ""
+    # 安全诊断元数据（仅 verbose）
+    provider: str = ""
+    model: str = ""
+    base_url_host: str = ""
+    attempt: int = 0
+    max_attempts: int = 0
+    # 共享修复上下文
+    repair_repaired: int = 0
+    repair_low_confidence: int = 0
+    repair_unmatched: int = 0
+    # 批量上下文（batch_start / batch_done）
+    trade_date: str = ""
+    target_count: int = 0
+    lookback_window: int = 0
+    force_mode: bool = False
+    skip_preparation: bool = False
+    # 批量汇总（batch_done）
+    success_count: int = 0
+    skipped_count: int = 0
+    failed_count: int = 0
+
+
+# 进度回调类型
+SectorProgressCallback = Callable[[SectorUpdateProgressEvent], None]
 
 
 def sector_to_path_name(sector_name: str) -> str:
@@ -1008,6 +1049,7 @@ class SectorTrendAnalyzer:
         report_date: date | None = None,
         skip_repair: bool = False,
         skip_preparation: bool = False,
+        retry_callback: Callable[[dict], None] | None = None,
     ) -> dict[str, Any]:
         """更新单个板块趋势。
 
@@ -1030,8 +1072,7 @@ class SectorTrendAnalyzer:
             report_date: 报告日期（默认最近交易日）
             skip_repair: 是否跳过 CLS 看盘板块归属修复
             skip_preparation: 是否跳过自动证据准备
-            report_date: 报告日期（默认最近交易日）
-            skip_repair: 是否跳过 CLS 看盘板块归属修复
+            retry_callback: AI 重试事件回调（接收 dict）
 
         Returns:
             更新结果
@@ -1122,6 +1163,7 @@ class SectorTrendAnalyzer:
             previous_summary=previous_context,
             end_date=end_date.isoformat(),
             window_days=days,
+            retry_callback=retry_callback,
         )
 
         # 8. 保存（包含修复诊断信息和准备诊断信息）
@@ -1185,6 +1227,8 @@ class SectorTrendAnalyzer:
         days: int = 10,
         report_date: date | None = None,
         skip_repair: bool = False,
+        skip_preparation: bool = False,
+        progress_callback: SectorProgressCallback | None = None,
     ) -> dict[str, Any]:
         """批量更新所有 tracked 板块趋势。
 
@@ -1196,6 +1240,8 @@ class SectorTrendAnalyzer:
             days: 回看窗口天数
             report_date: 报告日期（默认最近交易日）
             skip_repair: 是否跳过 CLS 看盘板块归属修复
+            skip_preparation: 是否跳过自动证据准备
+            progress_callback: 进度事件回调
 
         Returns:
             批量更新结果
@@ -1212,23 +1258,104 @@ class SectorTrendAnalyzer:
             result = await session.execute(query)
             sectors = list(result.scalars().all())
 
+        end_date = report_date or self._market_analyzer.get_latest_trade_date()
+        total = len(sectors)
+        batch_start_time = _time.perf_counter()
+
+        # Emit batch_start
+        if progress_callback is not None:
+            progress_callback(SectorUpdateProgressEvent(
+                type="batch_start",
+                trade_date=end_date.isoformat() if isinstance(end_date, date) else str(end_date),
+                target_count=total,
+                lookback_window=days,
+                force_mode=force,
+                skip_preparation=skip_preparation,
+            ))
+
         # 批量修复：对整个证据窗口运行一次修复，避免每个板块重复修复
         repair_result = None
         if not skip_repair:
-            end_date = report_date or self._market_analyzer.get_latest_trade_date()
+            if progress_callback is not None:
+                progress_callback(SectorUpdateProgressEvent(
+                    type="shared_repair_start",
+                ))
             try:
                 from src.services.cls_watch_repair import ClsWatchRepairService
                 repair_service = ClsWatchRepairService(self.db)
                 repair_result = await repair_service.repair_window(end_date, days)
+                if progress_callback is not None:
+                    progress_callback(SectorUpdateProgressEvent(
+                        type="shared_repair_done",
+                        repair_repaired=repair_result.repaired,
+                        repair_low_confidence=repair_result.low_confidence,
+                        repair_unmatched=repair_result.unmatched,
+                    ))
             except Exception as e:
                 logger.warning("批量 CLS 看盘板块归属修复失败，继续使用已有数据: %s", e)
+                if progress_callback is not None:
+                    progress_callback(SectorUpdateProgressEvent(
+                        type="shared_repair_failed",
+                        error=str(e)[:200],
+                    ))
 
         results: list[dict[str, Any]] = []
         success_count = 0
         skipped_count = 0
         failed_count = 0
 
-        for sector in sectors:
+        for idx, sector in enumerate(sectors, 1):
+            sector_start = _time.perf_counter()
+
+            # Emit sector_start
+            if progress_callback is not None:
+                progress_callback(SectorUpdateProgressEvent(
+                    type="sector_start",
+                    sector_name=sector.canonical_name,
+                    sector_index=idx,
+                    sector_total=total,
+                ))
+
+            # Bridge stage callbacks into batch sector events
+            def _make_stage_cb(
+                s_name: str = sector.canonical_name,
+                s_idx: int = idx,
+                s_total: int = total,
+            ) -> Callable[[str, str], None]:
+                def _stage_cb(stage: str, detail: str = "") -> None:
+                    if progress_callback is not None:
+                        progress_callback(SectorUpdateProgressEvent(
+                            type="sector_stage",
+                            sector_name=s_name,
+                            sector_index=s_idx,
+                            sector_total=s_total,
+                            stage=stage,
+                            action=detail,
+                        ))
+                return _stage_cb
+
+            # Bridge AI retry diagnostics into sanitized progress events
+            def _make_retry_cb(
+                s_name: str = sector.canonical_name,
+                s_idx: int = idx,
+                s_total: int = total,
+            ) -> Callable[[dict], None]:
+                def _retry_cb(retry_info: dict) -> None:
+                    if progress_callback is not None:
+                        progress_callback(SectorUpdateProgressEvent(
+                            type="api_retry",
+                            sector_name=s_name,
+                            sector_index=s_idx,
+                            sector_total=s_total,
+                            attempt=retry_info.get("attempt", 0),
+                            max_attempts=retry_info.get("max_attempts", 0),
+                            error=retry_info.get("error", "")[:200],
+                            provider=retry_info.get("provider", ""),
+                            model=retry_info.get("model", ""),
+                            base_url_host=retry_info.get("base_url_host", ""),
+                        ))
+                return _retry_cb
+
             try:
                 update_result = await self.update_sector_trend(
                     sector.canonical_name,
@@ -1237,25 +1364,79 @@ class SectorTrendAnalyzer:
                     force=force,
                     report_date=report_date,
                     skip_repair=True,  # 批量模式已在上面统一修复
+                    skip_preparation=skip_preparation,
+                    progress_callback=_make_stage_cb(),
+                    retry_callback=_make_retry_cb(),
                 )
                 results.append(update_result)
-                if update_result.get("action") == "updated":
+                sector_elapsed = _time.perf_counter() - sector_start
+
+                action = update_result.get("action")
+                if action == "updated":
                     success_count += 1
+                    if progress_callback is not None:
+                        progress_callback(SectorUpdateProgressEvent(
+                            type="sector_done",
+                            sector_name=sector.canonical_name,
+                            sector_index=idx,
+                            sector_total=total,
+                            action="updated",
+                            elapsed=sector_elapsed,
+                            output_path=update_result.get("output_path", ""),
+                            labels={
+                                "trend_status": update_result.get("trend_status", ""),
+                                "strength_level": update_result.get("strength_level", ""),
+                                "action_bias": update_result.get("action_bias", ""),
+                            },
+                        ))
                 else:
                     skipped_count += 1
+                    if progress_callback is not None:
+                        progress_callback(SectorUpdateProgressEvent(
+                            type="sector_skipped",
+                            sector_name=sector.canonical_name,
+                            sector_index=idx,
+                            sector_total=total,
+                            action="skipped",
+                            elapsed=sector_elapsed,
+                        ))
+
             except Exception as e:
                 logger.error("更新板块 %s 失败: %s", sector.canonical_name, e)
                 failed_count += 1
+                sector_elapsed = _time.perf_counter() - sector_start
                 results.append({
                     "action": "failed",
                     "sector_name": sector.canonical_name,
                     "error": str(e),
                 })
+                if progress_callback is not None:
+                    progress_callback(SectorUpdateProgressEvent(
+                        type="sector_failed",
+                        sector_name=sector.canonical_name,
+                        sector_index=idx,
+                        sector_total=total,
+                        action="failed",
+                        elapsed=sector_elapsed,
+                        error=str(e)[:200],
+                    ))
                 if not continue_on_error:
                     break
 
+        batch_elapsed = _time.perf_counter() - batch_start_time
+
+        # Emit batch_done
+        if progress_callback is not None:
+            progress_callback(SectorUpdateProgressEvent(
+                type="batch_done",
+                elapsed=batch_elapsed,
+                success_count=success_count,
+                skipped_count=skipped_count,
+                failed_count=failed_count,
+            ))
+
         batch_result = {
-            "total": len(sectors),
+            "total": total,
             "success": success_count,
             "skipped": skipped_count,
             "failed": failed_count,

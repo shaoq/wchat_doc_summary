@@ -2,13 +2,14 @@
 
 import json
 import time
+from typing import Any
 
 import click
 from rich.panel import Panel
 from rich.table import Table
 
 from src.cli.utils import console, format_elapsed_time, run_async
-from src.services.sector_trend_service import SectorTrendAnalyzer
+from src.services.sector_trend_service import SectorTrendAnalyzer, SectorUpdateProgressEvent
 from src.storage.database import get_db
 
 
@@ -248,59 +249,185 @@ def update(
             return
 
         if update_all:
-            console.print("[bold]批量更新板块趋势[/bold]")
-            console.print(f"  目标: tracked 板块")
-            console.print(f"  回看: {days} 天")
-            console.print()
+            # 收集渲染所需的中间状态
+            _sector_results: list[dict[str, Any]] = []
+            _failed_sectors: list[dict[str, Any]] = []
 
-            with console.status("[bold blue]批量更新板块趋势中...[/bold blue]"):
-                result = await analyzer.update_all_sector_trends(
-                    limit=limit,
-                    force=force,
-                    continue_on_error=continue_on_error,
-                    ai_processor=ai_processor,
-                    days=days,
-                    report_date=parsed_report_date,
-                    skip_repair=skip_repair,
-                )
+            def _render_sector_event(event: SectorUpdateProgressEvent) -> None:
+                if event.type == "batch_start":
+                    console.print("[bold]批量更新板块趋势[/bold]")
+                    console.print(f"  交易日: {event.trade_date}")
+                    console.print(f"  目标: {event.target_count} 个 tracked 板块")
+                    console.print(f"  回看窗口: {event.lookback_window} 天")
+                    if event.force_mode:
+                        console.print(f"  强制模式: 是")
+                    if event.skip_preparation:
+                        console.print(f"  跳过准备: 是")
+                    console.print()
+                    return
 
-            console.print(f"\n[bold]批量更新完成[/bold]")
-            console.print(f"  成功: [green]{result['success']}[/green]")
-            console.print(f"  跳过: [yellow]{result['skipped']}[/yellow]")
-            console.print(f"  失败: [red]{result['failed']}[/red]")
+                if event.type == "shared_repair_start":
+                    console.print(f"  共享修复: CLS 看盘板块归属...")
+                    return
 
-            if result.get("repair_result"):
-                rr = result["repair_result"]
-                console.print(f"  修复: [green]{rr.repaired}[/green] 已归属, [yellow]{rr.low_confidence}[/yellow] 低置信, [dim]{rr.unmatched} 未匹配[/dim]")
-
-            if result.get("results"):
-                table = Table(title="更新详情")
-                table.add_column("板块", style="cyan")
-                table.add_column("状态", style="green")
-                table.add_column("趋势", style="yellow")
-                table.add_column("强度", style="blue")
-                table.add_column("倾向", style="magenta")
-
-                for r in result["results"]:
-                    action = r.get("action", "unknown")
-                    if action == "updated":
-                        status_text = "[green]已更新[/green]"
-                    elif action == "skipped":
-                        status_text = "[yellow]已跳过[/yellow]"
-                    elif action == "failed":
-                        status_text = f"[red]失败: {r.get('error', '')[:30]}[/red]"
-                    else:
-                        status_text = action
-
-                    table.add_row(
-                        r.get("sector_name", "-"),
-                        status_text,
-                        r.get("trend_status", "-"),
-                        r.get("strength_level", "-"),
-                        r.get("action_bias", "-"),
+                if event.type == "shared_repair_done":
+                    console.print(
+                        f"  [green]v 已完成[/green] "
+                        f"repaired={event.repair_repaired} "
+                        f"low_confidence={event.repair_low_confidence} "
+                        f"unmatched={event.repair_unmatched}"
                     )
+                    console.print()
+                    return
 
-                console.print(table)
+                if event.type == "shared_repair_failed":
+                    console.print(
+                        f"  [yellow]! 修复失败[/yellow] {event.error[:80]}"
+                    )
+                    console.print()
+                    return
+
+                if event.type == "sector_start":
+                    console.print(
+                        f"[bold cyan][{event.sector_index}/{event.sector_total}] "
+                        f"{event.sector_name}[/bold cyan]"
+                    )
+                    return
+
+                if event.type == "sector_stage":
+                    stage_labels = {
+                        "preparation": "运行证据准备...",
+                        "repair": "修复 CLS 看盘板块归属...",
+                        "evidence": "收集板块证据...",
+                        "ai": "AI 生成板块趋势...",
+                        "save": "保存板块报告...",
+                    }
+                    label = stage_labels.get(event.stage, event.action or event.stage)
+                    if event.stage == "skipped":
+                        label = f"已跳过 ({event.action})"
+                    console.print(f"  {label}")
+                    return
+
+                if event.type == "api_retry":
+                    console.print(
+                        f"  [yellow]! 重试[/yellow] "
+                        f"({event.attempt}/{event.max_attempts}) "
+                        f"{event.error[:60]}"
+                    )
+                    return
+
+                if event.type == "sector_done":
+                    _sector_results.append({
+                        "action": "updated",
+                        "sector_name": event.sector_name,
+                        "output_path": event.output_path,
+                        "labels": event.labels,
+                        "elapsed": event.elapsed,
+                    })
+                    labels = event.labels
+                    label_parts = []
+                    if labels.get("trend_status"):
+                        label_parts.append(labels["trend_status"])
+                    if labels.get("strength_level"):
+                        label_parts.append(labels["strength_level"])
+                    if labels.get("action_bias"):
+                        label_parts.append(labels["action_bias"])
+                    label_text = " ".join(label_parts) if label_parts else ""
+                    console.print(
+                        f"  [green]v 已更新[/green] {label_text}  "
+                        f"耗时 {format_elapsed_time(event.elapsed)}"
+                    )
+                    return
+
+                if event.type == "sector_skipped":
+                    _sector_results.append({
+                        "action": "skipped",
+                        "sector_name": event.sector_name,
+                        "elapsed": event.elapsed,
+                    })
+                    console.print(f"  [yellow]~ 已跳过[/yellow]")
+                    return
+
+                if event.type == "sector_failed":
+                    _failed_sectors.append({
+                        "sector_name": event.sector_name,
+                        "error": event.error,
+                    })
+                    _sector_results.append({
+                        "action": "failed",
+                        "sector_name": event.sector_name,
+                        "error": event.error,
+                        "elapsed": event.elapsed,
+                    })
+                    console.print(
+                        f"  [red]x 失败[/red]: {event.error[:80]}"
+                    )
+                    return
+
+                if event.type == "batch_done":
+                    # 汇总表
+                    console.print()
+                    console.print("[bold]批量更新完成[/bold]")
+
+                    if _sector_results:
+                        table = Table(title="更新详情")
+                        table.add_column("板块", style="cyan")
+                        table.add_column("状态", style="green")
+                        table.add_column("趋势", style="yellow")
+                        table.add_column("强度", style="blue")
+                        table.add_column("倾向", style="magenta")
+
+                        for r in _sector_results:
+                            action = r.get("action", "unknown")
+                            if action == "updated":
+                                status_text = "[green]已更新[/green]"
+                            elif action == "skipped":
+                                status_text = "[yellow]已跳过[/yellow]"
+                            elif action == "failed":
+                                status_text = f"[red]失败: {r.get('error', '')[:30]}[/red]"
+                            else:
+                                status_text = action
+
+                            labels = r.get("labels", {})
+                            table.add_row(
+                                r.get("sector_name", "-"),
+                                status_text,
+                                labels.get("trend_status", "-"),
+                                labels.get("strength_level", "-"),
+                                labels.get("action_bias", "-"),
+                            )
+
+                        console.print(table)
+
+                    console.print()
+                    console.print(f"  成功: [green]{event.success_count}[/green]")
+                    console.print(f"  跳过: [yellow]{event.skipped_count}[/yellow]")
+                    console.print(f"  失败: [red]{event.failed_count}[/red]")
+
+                    if _failed_sectors:
+                        console.print()
+                        console.print("[bold]可重试:[/bold]")
+                        for fs in _failed_sectors:
+                            console.print(
+                                f"  wchat ai sector-trends update "
+                                f"--sector {fs['sector_name']} --force"
+                            )
+
+                    console.print()
+                    console.print(f"[dim]总耗时: {format_elapsed_time(event.elapsed)}[/dim]")
+                    return
+
+            result = await analyzer.update_all_sector_trends(
+                limit=limit,
+                force=force,
+                continue_on_error=continue_on_error,
+                ai_processor=ai_processor,
+                days=days,
+                report_date=parsed_report_date,
+                skip_repair=skip_repair,
+                skip_preparation=skip_preparation,
+                progress_callback=_render_sector_event,
+            )
             return
 
         # 单板块更新 - 阶段式输出
