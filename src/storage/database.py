@@ -276,9 +276,13 @@ class Database:
                     evidence_json TEXT,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    CONSTRAINT uq_sector_group_suggestions_pending UNIQUE (suggestion_type, target_group_id, status),
                     FOREIGN KEY (target_group_id) REFERENCES sector_groups(id) ON DELETE SET NULL
                 )
+            """))
+            sync_conn.execute(text("""
+                CREATE UNIQUE INDEX uq_sector_group_suggestions_pending
+                ON sector_group_suggestions (suggestion_type, target_group_id)
+                WHERE status = 'pending'
             """))
             sync_conn.execute(
                 text("CREATE INDEX ix_sector_group_suggestions_status ON sector_group_suggestions (status)")
@@ -289,6 +293,8 @@ class Database:
             sync_conn.execute(
                 text("CREATE INDEX ix_sector_group_suggestions_target_group_id ON sector_group_suggestions (target_group_id)")
             )
+        else:
+            Database._ensure_sector_group_suggestions_pending_index(sync_conn)
 
         if "sector_group_suggestion_members" not in existing_tables:
             sync_conn.execute(text("""
@@ -370,6 +376,123 @@ class Database:
             sync_conn.execute(
                 text("CREATE INDEX ix_sector_trend_summaries_end_date ON sector_trend_summaries (end_date)")
             )
+
+    @staticmethod
+    def _ensure_sector_group_suggestions_pending_index(sync_conn) -> None:
+        """迁移旧版全状态唯一约束为仅 pending 生效的唯一索引。"""
+        table_sql = sync_conn.execute(text("""
+            SELECT sql FROM sqlite_master
+            WHERE type = 'table' AND name = 'sector_group_suggestions'
+        """)).scalar() or ""
+
+        has_legacy_constraint = (
+            "UNIQUE (suggestion_type, target_group_id, status)" in table_sql
+            or "UNIQUE(suggestion_type, target_group_id, status)" in table_sql
+        )
+
+        if has_legacy_constraint:
+            sync_conn.execute(text("PRAGMA foreign_keys=OFF"))
+            sync_conn.execute(text("DROP TABLE IF EXISTS sector_group_suggestions_old"))
+            sync_conn.execute(text("""
+                ALTER TABLE sector_group_suggestions
+                RENAME TO sector_group_suggestions_old
+            """))
+            sync_conn.execute(text("""
+                CREATE TABLE sector_group_suggestions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    suggestion_type VARCHAR(32) NOT NULL,
+                    target_group_id INTEGER,
+                    suggested_group_name VARCHAR(64),
+                    status VARCHAR(16) NOT NULL DEFAULT 'pending',
+                    confidence REAL,
+                    reason TEXT,
+                    evidence_json TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (target_group_id) REFERENCES sector_groups(id) ON DELETE SET NULL
+                )
+            """))
+            sync_conn.execute(text("""
+                INSERT INTO sector_group_suggestions (
+                    id, suggestion_type, target_group_id, suggested_group_name,
+                    status, confidence, reason, evidence_json, created_at, updated_at
+                )
+                SELECT
+                    id, suggestion_type, target_group_id, suggested_group_name,
+                    status, confidence, reason, evidence_json, created_at, updated_at
+                FROM sector_group_suggestions_old
+            """))
+            sync_conn.execute(text("DROP TABLE sector_group_suggestions_old"))
+            member_table_exists = sync_conn.execute(text("""
+                SELECT 1 FROM sqlite_master
+                WHERE type = 'table' AND name = 'sector_group_suggestion_members'
+            """)).scalar() is not None
+            if member_table_exists:
+                sync_conn.execute(text("DROP TABLE IF EXISTS sector_group_suggestion_members_old"))
+                sync_conn.execute(text("""
+                    ALTER TABLE sector_group_suggestion_members
+                    RENAME TO sector_group_suggestion_members_old
+                """))
+                sync_conn.execute(text("""
+                    CREATE TABLE sector_group_suggestion_members (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        suggestion_id INTEGER NOT NULL,
+                        sector_id INTEGER NOT NULL,
+                        suggested_relation_type VARCHAR(32),
+                        current_relation_type VARCHAR(32),
+                        suggested_weight REAL,
+                        current_weight REAL,
+                        confidence REAL,
+                        reason TEXT,
+                        FOREIGN KEY (suggestion_id) REFERENCES sector_group_suggestions(id) ON DELETE CASCADE,
+                        FOREIGN KEY (sector_id) REFERENCES tracked_sectors(id) ON DELETE CASCADE
+                    )
+                """))
+                sync_conn.execute(text("""
+                    INSERT INTO sector_group_suggestion_members (
+                        id, suggestion_id, sector_id, suggested_relation_type,
+                        current_relation_type, suggested_weight, current_weight,
+                        confidence, reason
+                    )
+                    SELECT
+                        id, suggestion_id, sector_id, suggested_relation_type,
+                        current_relation_type, suggested_weight, current_weight,
+                        confidence, reason
+                    FROM sector_group_suggestion_members_old
+                """))
+                sync_conn.execute(text("DROP TABLE sector_group_suggestion_members_old"))
+            sync_conn.execute(text("PRAGMA foreign_keys=ON"))
+
+        sync_conn.execute(text("""
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_sector_group_suggestions_pending
+            ON sector_group_suggestions (suggestion_type, target_group_id)
+            WHERE status = 'pending'
+        """))
+        sync_conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_sector_group_suggestions_status
+            ON sector_group_suggestions (status)
+        """))
+        sync_conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_sector_group_suggestions_type
+            ON sector_group_suggestions (suggestion_type)
+        """))
+        sync_conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_sector_group_suggestions_target_group_id
+            ON sector_group_suggestions (target_group_id)
+        """))
+        member_table_exists = sync_conn.execute(text("""
+            SELECT 1 FROM sqlite_master
+            WHERE type = 'table' AND name = 'sector_group_suggestion_members'
+        """)).scalar() is not None
+        if member_table_exists:
+            sync_conn.execute(text("""
+                CREATE INDEX IF NOT EXISTS ix_sector_group_suggestion_members_suggestion_id
+                ON sector_group_suggestion_members (suggestion_id)
+            """))
+            sync_conn.execute(text("""
+                CREATE INDEX IF NOT EXISTS ix_sector_group_suggestion_members_sector_id
+                ON sector_group_suggestion_members (sector_id)
+            """))
 
     async def close(self) -> None:
         """关闭数据库连接。"""

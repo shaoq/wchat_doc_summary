@@ -4,7 +4,19 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Optional
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, func, Date
+from sqlalchemy import (
+    Date,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+    text,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -782,9 +794,12 @@ class SectorGroupSuggestion(Base):
 
     __tablename__ = "sector_group_suggestions"
     __table_args__ = (
-        UniqueConstraint(
-            "suggestion_type", "target_group_id", "status",
-            name="uq_sector_group_suggestions_pending",
+        Index(
+            "uq_sector_group_suggestions_pending",
+            "suggestion_type",
+            "target_group_id",
+            unique=True,
+            sqlite_where=text("status = 'pending'"),
         ),
     )
 

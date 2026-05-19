@@ -343,6 +343,56 @@ class TestSuggestionAcceptance:
         assert "机器人" in result["accepted_members"]
 
     @pytest.mark.asyncio
+    async def test_accept_suggestion_allows_multiple_accepted_per_group(
+        self,
+        group_service: SectorGroupService,
+    ):
+        """同一分组可保留多条已接受建议历史。"""
+        group_result = await group_service.create_group("历史建议组")
+        group_id = group_result["group_id"]
+
+        async with group_service.db.get_session() as session:
+            from sqlalchemy import select
+
+            result = await session.execute(
+                select(TrackedSector).where(TrackedSector.canonical_name == "机器人")
+            )
+            sector = result.scalar_one()
+
+            session.add(
+                SectorGroupSuggestion(
+                    suggestion_type="add_members",
+                    target_group_id=group_id,
+                    status="accepted",
+                    confidence=0.8,
+                )
+            )
+
+            suggestion = SectorGroupSuggestion(
+                suggestion_type="add_members",
+                target_group_id=group_id,
+                status="pending",
+                confidence=0.7,
+            )
+            session.add(suggestion)
+            await session.flush()
+            await session.refresh(suggestion)
+
+            member = SectorGroupSuggestionMember(
+                suggestion_id=suggestion.id,
+                sector_id=sector.id,
+                suggested_relation_type="related",
+                confidence=0.7,
+            )
+            session.add(member)
+            suggestion_id = suggestion.id
+
+        result = await group_service.accept_suggestion(suggestion_id)
+
+        assert result["action"] == "accepted"
+        assert result["accepted_members"] == ["机器人"]
+
+    @pytest.mark.asyncio
     async def test_accept_suggestion_promotes_candidate(self, group_service: SectorGroupService):
         """接受建议时 candidate 板块应提升为 tracked。"""
         async with group_service.db.get_session() as session:
