@@ -1,8 +1,10 @@
 """文章命令模块 - article, show, export。"""
 
 import html
+import logging
 import re
 import shutil
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import click
@@ -14,10 +16,25 @@ from src.models.schema import Article, Feed
 from src.services.subscription import SubscriptionService
 from src.storage.database import get_db
 
+logger = logging.getLogger(__name__)
+
 # 导出相关常量
 EXPORT_BASE_DIR = Path("output/export_articles")
 UNSAFE_FILENAME_CHARS = re.compile(r'[/\\:*?"<>|]')
 TITLE_MAX_LENGTH = 30
+
+
+@dataclass
+class ExportSummary:
+    """单次导出的汇总结果。"""
+
+    feed_name: str
+    mp_id: str
+    output_dir: Path
+    exported: int = 0
+    skipped: int = 0
+    failed: int = 0
+    total: int = 0
 
 
 @click.command()
@@ -217,76 +234,238 @@ def build_article_html(article_obj: Article) -> str:
     )
 
 
+def _export_feed_articles(
+    feed: Feed,
+    articles: list[Article],
+    force: bool,
+) -> ExportSummary:
+    """导出单个公众号的文章，返回汇总结果。
+
+    Args:
+        feed: 公众号 Feed 对象。
+        articles: 待导出的文章列表。
+        force: 是否强制全量覆盖。
+
+    Returns:
+        ExportSummary 汇总结果。
+    """
+    summary = ExportSummary(
+        feed_name=feed.name,
+        mp_id=feed.mp_id,
+        output_dir=build_export_dir(feed.mp_id),
+        total=len(articles),
+    )
+
+    if not articles:
+        return summary
+
+    # 准备导出目录
+    if force and summary.output_dir.exists():
+        shutil.rmtree(summary.output_dir)
+    summary.output_dir.mkdir(parents=True, exist_ok=True)
+
+    for article_obj in articles:
+        # 日期前缀
+        if article_obj.publish_time:
+            date_prefix = article_obj.publish_time.strftime('%Y-%m-%d')
+        else:
+            date_prefix = 'unknown-date'
+
+        # 先生成基础文件名用于增量跳过检查
+        safe_title = sanitize_filename(article_obj.title)
+        base_name = f"{date_prefix}_{safe_title}" if safe_title else date_prefix
+        base_filename = f"{base_name}.html"
+
+        # 增量模式：跳过已存在文件
+        if not force and (summary.output_dir / base_filename).exists():
+            summary.skipped += 1
+            continue
+
+        # 实际写入时使用完整文件名（含重名处理）
+        filename = build_export_filename(summary.output_dir, date_prefix, article_obj.title)
+        file_path = summary.output_dir / filename
+
+        try:
+            content = build_article_html(article_obj)
+            file_path.write_text(content, encoding='utf-8')
+            summary.exported += 1
+        except Exception:
+            logger.warning(
+                "导出文章失败: id=%d title=%s",
+                article_obj.id,
+                article_obj.title,
+                exc_info=True,
+            )
+            summary.failed += 1
+
+    return summary
+
+
+def _print_summary_line(summary: ExportSummary) -> None:
+    """打印单条导出汇总行。"""
+    parts = [
+        f"新导出: {summary.exported}",
+        f"已存在跳过: {summary.skipped}",
+    ]
+    failed_part = f"失败: [red]{summary.failed}[/red]" if summary.failed else f"失败: {summary.failed}"
+    parts.append(failed_part)
+    parts.append(f"总计: {summary.total}")
+
+    console.print(f"  {('，').join(parts)}")
+
+
 @click.command()
-@click.argument('mp_id')
+@click.argument('mp_id', required=False, default=None)
 @click.option('--force', is_flag=True, help='强制全量导出，覆盖已存在文件')
-def export(mp_id: str, force: bool) -> None:
+@click.option('--all', 'export_all', is_flag=True, help='导出所有订阅的公众号')
+def export(mp_id: str | None, force: bool, export_all: bool) -> None:
     """导出公众号文章为 HTML 文件。
 
-    MP_ID: 公众号 ID
+    MP_ID: 公众号 ID（与 --all 二选一）
 
     文章将导出到 output/export_articles/<MP_ID>/ 目录下，
     每篇文章一个独立的 .html 文件。默认增量导出，使用 --force 全量覆盖。
     """
-    async def _export() -> None:
+    # 校验参数
+    if mp_id is None and not export_all:
+        console.print("[red]请指定公众号 ID 或使用 --all 导出所有订阅[/red]")
+        console.print("[dim]用法: wchat export <MP_ID>  或  wchat export --all[/dim]")
+        return
+
+    if mp_id is not None and export_all:
+        console.print("[red]不能同时指定公众号 ID 和 --all[/red]")
+        console.print("[dim]用法: wchat export <MP_ID>  或  wchat export --all[/dim]")
+        return
+
+    mode_label = "强制重建" if force else "增量"
+
+    if export_all:
+        _export_all(force, mode_label)
+    else:
+        assert mp_id is not None
+        _export_single(mp_id, force, mode_label)
+
+
+def _export_single(mp_id: str, force: bool, mode_label: str) -> None:
+    """导出单个公众号文章。"""
+    async def _do_export() -> None:
         db = await get_db()
 
         from sqlalchemy import select
 
         async with db.get_session() as session:
-            # 验证公众号存在
             feed_result = await session.execute(
-                select(Feed.id).where(Feed.mp_id == mp_id)
+                select(Feed).where(Feed.mp_id == mp_id)
             )
-            feed_id = feed_result.scalar_one_or_none()
-            if feed_id is None:
+            feed = feed_result.scalar_one_or_none()
+            if feed is None:
                 console.print(f"[red]订阅不存在: {mp_id}[/red]")
                 return
 
-            # 查询所有文章
             query = (
                 select(Article)
-                .where(Article.feed_id == feed_id)
+                .where(Article.feed_id == feed.id)
                 .order_by(Article.publish_time.desc())
             )
             result = await session.execute(query)
             articles = list(result.scalars().all())
 
-        if not articles:
-            console.print("[yellow]没有可导出的文章[/yellow]")
+        export_dir = build_export_dir(mp_id)
+
+        # 单账号开始输出
+        console.print(f"[bold]{feed.name}[/bold] ({mp_id})")
+        console.print(f"  模式: {mode_label}")
+        console.print(f"  格式: HTML")
+        console.print(f"  输出目录: {export_dir}")
+
+        summary = _export_feed_articles(feed, articles, force)
+
+        if summary.total == 0:
+            console.print("[yellow]  没有可导出的文章[/yellow]")
             return
 
-        # 准备导出目录
-        export_dir = build_export_dir(mp_id)
-        if force and export_dir.exists():
-            shutil.rmtree(export_dir)
-        export_dir.mkdir(parents=True, exist_ok=True)
+        if summary.exported == 0 and summary.skipped > 0:
+            console.print("[yellow]  没有新文章需要导出，所有文章均已存在[/yellow]")
 
-        # 逐篇导出
-        exported = 0
-        skipped = 0
+        _print_summary_line(summary)
 
-        for article_obj in articles:
-            # 日期前缀
-            if article_obj.publish_time:
-                date_prefix = article_obj.publish_time.strftime('%Y-%m-%d')
-            else:
-                date_prefix = 'unknown-date'
+    run_async(_do_export())
 
-            filename = build_export_filename(export_dir, date_prefix, article_obj.title)
-            file_path = export_dir / filename
 
-            # 增量模式：跳过已存在文件
-            if not force and file_path.exists():
-                skipped += 1
-                continue
+def _export_all(force: bool, mode_label: str) -> None:
+    """导出所有活跃订阅的文章。"""
+    async def _do_export_all() -> None:
+        from sqlalchemy import select
 
-            content = build_article_html(article_obj)
-            file_path.write_text(content, encoding='utf-8')
-            exported += 1
+        db = await get_db()
 
-        # 汇总输出
-        console.print(f"[green]导出完成: {export_dir}[/green]")
-        console.print(f"  导出: [cyan]{exported}[/cyan] 篇，跳过: [dim]{skipped}[/dim] 篇，共 [bold]{len(articles)}[/bold] 篇")
+        async with db.get_session() as session:
+            feeds_result = await session.execute(
+                select(Feed)
+                .where(Feed.status == 1)
+                .order_by(Feed.name, Feed.mp_id)
+            )
+            feeds = list(feeds_result.scalars().all())
 
-    run_async(_export())
+        if not feeds:
+            console.print("[yellow]没有活跃的订阅[/yellow]")
+            return
+
+        total_feeds = len(feeds)
+
+        # 批量开始输出
+        console.print(f"批量导出: {total_feeds} 个公众号")
+        console.print(f"模式: {mode_label}")
+        console.print(f"格式: HTML")
+        console.print("")
+
+        # 聚合统计
+        agg_exported = 0
+        agg_skipped = 0
+        agg_failed = 0
+        agg_total = 0
+        agg_feeds_done = 0
+
+        from sqlalchemy import select as sa_select
+
+        db = await get_db()
+
+        for idx, feed in enumerate(feeds, start=1):
+            async with db.get_session() as session:
+                articles_result = await session.execute(
+                    sa_select(Article)
+                    .where(Article.feed_id == feed.id)
+                    .order_by(Article.publish_time.desc())
+                )
+                articles = list(articles_result.scalars().all())
+
+            console.print(f"[{idx}/{total_feeds}] [bold]{feed.name}[/bold] ({feed.mp_id})")
+
+            summary = _export_feed_articles(feed, articles, force)
+
+            if summary.total == 0:
+                console.print("[yellow]  没有可导出的文章[/yellow]")
+            elif summary.exported == 0 and summary.skipped > 0:
+                console.print("[yellow]  没有新文章需要导出[/yellow]")
+
+            if summary.total > 0:
+                console.print(f"  输出目录: {summary.output_dir}")
+                _print_summary_line(summary)
+
+            agg_exported += summary.exported
+            agg_skipped += summary.skipped
+            agg_failed += summary.failed
+            agg_total += summary.total
+            agg_feeds_done += 1
+
+        # 聚合汇总
+        console.print("")
+        console.print("[bold]总计[/bold]")
+        console.print(f"  公众号: {agg_feeds_done}")
+        console.print(f"  新导出: {agg_exported}")
+        console.print(f"  已存在跳过: {agg_skipped}")
+        agg_failed_line = f"  失败: [red]{agg_failed}[/red]" if agg_failed else f"  失败: {agg_failed}"
+        console.print(agg_failed_line)
+        console.print(f"  文章总数: {agg_total}")
+
+    run_async(_do_export_all())
