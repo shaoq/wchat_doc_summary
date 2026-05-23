@@ -11,6 +11,7 @@ import pytest_asyncio
 
 from src.api.providers.base import ProviderArticle, ProviderArticlePage
 from src.api.providers.rss_provider import RSSProviderError
+from src.api.weread import AuthExpiredError
 from src.models.schema import Article, Feed, RSSArticleMembership, RSSSource
 from src.services.fetcher import FetcherService, FetchFinalState
 from src.services.rss_source import RSSSourceService
@@ -412,3 +413,65 @@ class TestRSSFeedRequestFailureSummary:
         assert health.consecutive_failures >= 1
         assert health.last_error_summary
         assert "ConnectTimeout" in health.last_error_summary
+
+
+class TestAuthExpiredAbort:
+    """AuthExpiredError 在 RSS 抓取中应中断处理。"""
+
+    @pytest.mark.asyncio
+    async def test_source_loop_stops_on_auth_expired(
+        self, fetcher: FetcherService, rss_service: RSSSourceService
+    ) -> None:
+        """_fetch_rss_source 文章循环在 AuthExpiredError 时应停止。"""
+        source = await rss_service.add_source("auth-abort", "https://example.com/feed")
+
+        auth_error = AuthExpiredError("Token 失效", status_code=401, response_text="WeReadError401")
+
+        # Mock _fetch_and_save_rss_article to raise AuthExpiredError
+        with patch.object(
+            fetcher, "_fetch_and_save_rss_article",
+            new=AsyncMock(side_effect=auth_error),
+        ):
+            # Mock provider to return articles so the loop enters
+            art = _make_rss_article()
+            page = ProviderArticlePage(
+                articles=[art, art, art], page=1, page_size=100, total=3,
+            )
+            with patch.object(
+                fetcher._get_provider("rss"), "get_articles",
+                new=AsyncMock(return_value=page),
+            ):
+                # Mock _rss_article_exists to return False (force into _fetch_and_save_rss_article)
+                with patch.object(fetcher, "_rss_article_exists", new=AsyncMock(return_value=False)):
+                    with pytest.raises(AuthExpiredError):
+                        await fetcher._fetch_rss_source(
+                            source=source,
+                            provider=fetcher._get_provider("rss"),
+                            rss_service=rss_service,
+                            content_mode="feed_only",
+                            on_progress=None,
+                        )
+
+    @pytest.mark.asyncio
+    async def test_session_breaks_on_auth_expired(
+        self, fetcher: FetcherService, rss_service: RSSSourceService
+    ) -> None:
+        """fetch_from_rss_sources 在 AuthExpiredError 时应中断源循环。"""
+        source1 = await rss_service.add_source("auth-src-1", "https://example.com/feed1")
+        source2 = await rss_service.add_source("auth-src-2", "https://example.com/feed2")
+
+        auth_error = AuthExpiredError("Token 失效", status_code=401, response_text="WeReadError401")
+
+        # First source raises AuthExpiredError, second should NOT be processed
+        with patch.object(
+            fetcher, "_fetch_rss_source",
+            new=AsyncMock(side_effect=auth_error),
+        ):
+            results = await fetcher.fetch_from_rss_sources()
+
+        # source1 should be in results with ERROR state
+        assert "auth-src-1" in results
+        assert results["auth-src-1"].final_state == FetchFinalState.ERROR
+
+        # source2 should NOT be processed (loop broke)
+        assert "auth-src-2" not in results

@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import and_, case, delete, or_, select, update
 
 from src.api.article import fetch_article_content, parse_article_html
+from src.utils.html_detect import looks_like_html_body
 from src.api.providers import ArticleListProvider, ProviderArticle, create_article_list_provider
 from src.api.providers.rss_provider import RSSProviderError, redact_url
 from src.api.weread import AuthExpiredError, RateLimitError, WeReadAPIError, WeReadClient
@@ -1299,6 +1300,13 @@ class FetcherService:
                     on_progress=on_progress,
                 )
                 results[source_name] = summary
+            except AuthExpiredError as e:
+                logger.warning("RSS 源抓取中断: Token 失效 - %s", e)
+                await rss_service.record_failure(source.id, str(e))
+                results[source_name] = FetchSummary(
+                    mp_id=source_name, final_state=FetchFinalState.ERROR,
+                )
+                break
             except Exception as e:
                 logger.error("RSS 源抓取失败: %s - %s", source_name, e)
                 await rss_service.record_failure(source.id, str(e))
@@ -1398,15 +1406,18 @@ class FetcherService:
 
                 await self._throttle_before_request(source.source_name, on_progress)
 
-                status, article = await self._fetch_and_save_rss_article(
-                    source=source,
-                    article_info=article_info,
-                    content_mode=content_mode,
-                    rss_service=rss_service,
-                    attribution_service=attribution_service,
-                    report=report,
-                    diagnostics=diagnostics,
-                )
+                try:
+                    status, article = await self._fetch_and_save_rss_article(
+                        source=source,
+                        article_info=article_info,
+                        content_mode=content_mode,
+                        rss_service=rss_service,
+                        attribution_service=attribution_service,
+                        report=report,
+                        diagnostics=diagnostics,
+                    )
+                except AuthExpiredError:
+                    raise
 
                 if status == "inserted":
                     inserted.append(article)  # type: ignore[arg-type]
@@ -1645,12 +1656,20 @@ class FetcherService:
             if html:
                 parsed = parse_article_html(html)
                 content = parsed.get("content")
+                # 当页面解析器无法提取正文时，回退到原始 Feed HTML
+                if not content:
+                    content = html
                 parsed_title = parsed.get("title")
                 parsed_cover = parsed.get("cover")
             else:
                 content = feed_content_html or ""
                 parsed_title = None
                 parsed_cover = None
+
+            # 仅保留纯文本摘要，避免 HTML body 被存入 summary
+            raw_summary = article_info.get("summary")
+            if raw_summary and looks_like_html_body(raw_summary):
+                raw_summary = None
 
             # 保存文章
             async with self.db.get_session() as session:
@@ -1659,7 +1678,7 @@ class FetcherService:
                     article_id=article_id,
                     title=parsed_title or title,
                     content=content,
-                    summary=article_info.get("summary"),
+                    summary=raw_summary,
                     pic_url=parsed_cover or article_info.get("cover"),
                     provider=provider,
                     provider_item_id=str(provider_item_id) if provider_item_id else None,

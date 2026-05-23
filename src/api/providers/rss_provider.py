@@ -19,6 +19,7 @@ from src.api.providers.base import (
     ProviderSubscription,
 )
 from src.api.request_error import format_request_error
+from src.utils.html_detect import looks_like_html_body
 
 logger = logging.getLogger(__name__)
 
@@ -151,7 +152,7 @@ class RSSProvider(ArticleListProvider):
         # 提取摘要
         summary = getattr(entry, "summary", None) or getattr(entry, "description", None)
 
-        # 提取 HTML 内容
+        # 提取 HTML 内容（优先 content 字段，其次 content:encoded）
         content_html = None
         content_items = getattr(entry, "content", None)
         if content_items:
@@ -164,8 +165,17 @@ class RSSProvider(ArticleListProvider):
             content_html = getattr(entry, "content", [{}])
             if isinstance(content_html, list) and content_html:
                 content_html = content_html[0].get("value") if isinstance(content_html[0], dict) else None
-            if not content_html:
-                content_html = summary
+
+        # 当无专用 content 字段时，用 summary/description 作为 body 回退
+        summary_is_html_body = False
+        if not content_html:
+            content_html = summary
+            # 标记 summary 被用作 body 回退，不应同时作为文本摘要
+            if summary and looks_like_html_body(summary):
+                summary_is_html_body = True
+
+        # 仅保留纯文本摘要：如果 summary 本身就是 HTML body，不重复暴露为摘要
+        text_summary = None if summary_is_html_body else summary
 
         # 提取封面
         cover = None
@@ -196,7 +206,7 @@ class RSSProvider(ArticleListProvider):
             url=url or None,
             publish_time=publish_time,
             cover=cover,
-            summary=summary,
+            summary=text_summary,
             content_html=content_html,
             raw=raw,
         )

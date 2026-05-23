@@ -20,7 +20,7 @@ from sqlalchemy import or_, select
 
 from config.settings import get_settings
 from src.api.providers import create_article_list_provider
-from src.api.weread import WeReadClient
+from src.api.weread import AuthExpiredError, WeReadClient
 from src.models.schema import Article, Feed
 from src.api.providers.rss_provider import redact_url
 from src.services.feed_discovery import DiscoveredFeed, DiscoveryReport, FeedDiscoveryService
@@ -299,6 +299,8 @@ class RSSAttributionService:
         try:
             provider = self._get_identity_provider()
             subscription_info = await provider.get_subscription_from_article(original_url)
+        except AuthExpiredError:
+            raise
         except Exception as e:
             logger.warning("RSS 归属 - URL 解析失败: %s - %s", title, e)
             return None

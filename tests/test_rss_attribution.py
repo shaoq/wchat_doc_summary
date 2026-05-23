@@ -695,3 +695,77 @@ class TestRSSAttributionSettings:
         """identity resolver 不能是 rss（rss 不支持 URL 解析）。"""
         valid_providers = {"weread", "wechat2rss"}
         assert "rss" not in valid_providers
+
+
+# ── AuthExpiredError Propagation Tests ──
+
+
+class TestAuthExpiredErrorPropagation:
+    """Tests proving AuthExpiredError propagates from subscribe-compatible resolver."""
+
+    @pytest.mark.asyncio
+    async def test_auth_expired_propagates_from_resolver(
+        self, attribution_service: RSSAttributionService
+    ) -> None:
+        """AuthExpiredError 应从 _subscribe_compatible_resolve 向上传播。"""
+        from src.api.weread import AuthExpiredError
+
+        mock_provider = AsyncMock()
+        mock_provider.get_subscription_from_article = AsyncMock(
+            side_effect=AuthExpiredError("Token 失效", status_code=401, response_text="WeReadError401"),
+        )
+        attribution_service._identity_provider_cache["weread"] = mock_provider
+
+        # All cache lookups return None → triggers Tier 4
+        session, ctx = _make_mock_session(scalar_result=None)
+        attribution_service.db.get_session = MagicMock(return_value=ctx)
+
+        article_info = {
+            "original_url": "https://mp.weixin.qq.com/s/test_auth",
+            "title": "认证测试文章",
+            "raw": {},
+            "provider": "rss",
+        }
+
+        with patch("src.services.rss_attribution.get_settings") as mock_settings:
+            s = MagicMock()
+            s.rss_auto_subscribe_discovered_feeds = True
+            s.rss_identity_resolver_provider = "weread"
+            s.rss_unknown_feed_policy = "skip"
+            mock_settings.return_value = s
+
+            with pytest.raises(AuthExpiredError, match="Token"):
+                await attribution_service.attribute(article_info)
+
+    @pytest.mark.asyncio
+    async def test_non_auth_exception_returns_none(
+        self, attribution_service: RSSAttributionService
+    ) -> None:
+        """非认证异常应返回 None（不传播）。"""
+        mock_provider = AsyncMock()
+        mock_provider.get_subscription_from_article = AsyncMock(
+            side_effect=ConnectionError("network unreachable"),
+        )
+        attribution_service._identity_provider_cache["weread"] = mock_provider
+
+        session, ctx = _make_mock_session(scalar_result=None)
+        attribution_service.db.get_session = MagicMock(return_value=ctx)
+
+        article_info = {
+            "original_url": "https://mp.weixin.qq.com/s/test_net",
+            "title": "网络测试文章",
+            "raw": {},
+            "provider": "rss",
+        }
+
+        with patch("src.services.rss_attribution.get_settings") as mock_settings:
+            s = MagicMock()
+            s.rss_auto_subscribe_discovered_feeds = True
+            s.rss_identity_resolver_provider = "weread"
+            s.rss_unknown_feed_policy = "skip"
+            mock_settings.return_value = s
+
+            diagnostics = AttributionDiagnostics()
+            result = await attribution_service.attribute(article_info, diagnostics=diagnostics)
+
+        assert result is None

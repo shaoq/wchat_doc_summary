@@ -8,6 +8,7 @@ from src.api.providers.rss_provider import redact_url
 from src.cli.utils import console, run_async
 from src.services.rss_source import RSSSourceService
 from src.storage.database import get_db
+from src.utils.html_detect import looks_like_html_body
 
 
 @click.group("source")
@@ -246,3 +247,70 @@ def source_fetch() -> None:
         console.print(f"\n[green]RSS 抓取完成: {total_new} 篇新增, {total_existing} 篇已存在[/green]")
 
     run_async(_fetch())
+
+
+@rss_source.command("repair")
+@click.option("--dry-run", is_flag=True, help="仅统计，不实际修改")
+def source_repair(dry_run: bool) -> None:
+    """修复 RSS 文章的 HTML 内容存储问题。
+
+    将历史 RSS 文章中误存到 summary 字段的 HTML 正文迁移到 content 字段。
+    仅影响 provider='rss'、content 为空、summary 含 HTML 的记录。
+    """
+    from sqlalchemy import func as sql_func, select, update as sa_update
+
+    from src.models.schema import Article
+
+    async def _repair() -> None:
+        db = await get_db()
+
+        async with db.get_session() as session:
+            # 查找受影响的 RSS 文章
+            result = await session.execute(
+                select(Article).where(
+                    Article.provider == "rss",
+                    (Article.content == "") | Article.content.is_(None),
+                    Article.summary.is_not(None),
+                )
+            )
+            candidates = list(result.scalars().all())
+
+            matched = 0
+            for article in candidates:
+                if looks_like_html_body(article.summary):
+                    matched += 1
+
+        console.print(f"[cyan]RSS 文章修复扫描完成[/cyan]")
+        console.print(f"  候选记录: {len(candidates)}")
+        console.print(f"  HTML 正文匹配: {matched}")
+
+        if matched == 0:
+            console.print("[green]无需修复[/green]")
+            return
+
+        if dry_run:
+            console.print(f"[yellow]dry-run 模式，跳过实际修改[/yellow]")
+            return
+
+        updated = 0
+        async with db.get_session() as session:
+            result = await session.execute(
+                select(Article).where(
+                    Article.provider == "rss",
+                    (Article.content == "") | Article.content.is_(None),
+                    Article.summary.is_not(None),
+                )
+            )
+            articles = list(result.scalars().all())
+
+            for article in articles:
+                if looks_like_html_body(article.summary):
+                    article.content = article.summary
+                    article.summary = None
+                    updated += 1
+
+            await session.flush()
+
+        console.print(f"[green]修复完成: {updated}/{matched} 条记录已更新[/green]")
+
+    run_async(_repair())

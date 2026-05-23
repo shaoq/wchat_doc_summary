@@ -12,6 +12,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from src.cli.utils import console, run_async
+from src.utils.html_detect import looks_like_html_body
 from src.models.schema import Article, Feed
 from src.services.subscription import SubscriptionService
 from src.storage.database import get_db
@@ -203,13 +204,17 @@ def build_article_html(article_obj: Article) -> str:
         )
     meta_html = "\n".join(meta_parts)
 
-    # 摘要
-    summary_html = ""
-    if article_obj.summary:
-        summary_html = f'<div class="article-summary">{html.escape(article_obj.summary)}</div>'
-
-    # 正文：保留存储的 HTML，不调用 html_to_markdown
+    # 历史 RSS 回退：content 为空但 summary 含 HTML body 时，将 summary 用作正文
+    summary_used_as_body = False
     body_html = article_obj.content or ""
+    if not body_html and article_obj.provider == "rss" and looks_like_html_body(article_obj.summary):
+        body_html = article_obj.summary or ""
+        summary_used_as_body = True
+
+    # 摘要：仅当 summary 未被用作正文回退时才显示
+    summary_html = ""
+    if article_obj.summary and not summary_used_as_body:
+        summary_html = f'<div class="article-summary">{html.escape(article_obj.summary)}</div>'
 
     return (
         "<!doctype html>\n"
