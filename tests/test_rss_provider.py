@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from src.api.providers.rss_provider import RSSProvider, RSSProviderError, redact_url
@@ -301,3 +302,58 @@ class TestRSSProviderContentExtraction:
 
         art = page.articles[0]
         assert art.summary == "这是摘要内容"
+
+
+class TestRSSProviderRequestDiagnostics:
+    """RSS feed 请求失败诊断测试。"""
+
+    def _make_provider(self) -> RSSProvider:
+        with patch("src.api.providers.rss_provider.get_settings") as mock_settings:
+            mock_settings.return_value = MagicMock(
+                wechat_rss_api_key=None,
+                request_timeout=30,
+            )
+            return RSSProvider()
+
+    @pytest.mark.asyncio
+    async def test_request_error_with_empty_message(self) -> None:
+        """空消息 httpx.RequestError 应生成包含异常类名的诊断。"""
+        provider = self._make_provider()
+        request = httpx.Request("GET", "https://example.com/feed.xml")
+
+        with patch("httpx.AsyncClient.get", new=AsyncMock(
+            side_effect=httpx.ConnectTimeout("", request=request),
+        )):
+            with pytest.raises(RSSProviderError, match="ConnectTimeout"):
+                await provider._fetch_feed("https://example.com/feed.xml")
+
+    @pytest.mark.asyncio
+    async def test_request_error_with_cause(self) -> None:
+        """有底层 cause 的请求错误应包含 cause 类名和消息。"""
+        provider = self._make_provider()
+        request = httpx.Request("GET", "https://example.com/feed.xml")
+        root = OSError("DNS resolution failed")
+        exc = httpx.ConnectError("connection error", request=request)
+        exc.__cause__ = root
+
+        with patch("httpx.AsyncClient.get", new=AsyncMock(side_effect=exc)):
+            with pytest.raises(RSSProviderError, match="OSError") as exc_info:
+                await provider._fetch_feed("https://example.com/feed.xml")
+
+        msg = str(exc_info.value)
+        assert "DNS resolution failed" in msg
+
+    @pytest.mark.asyncio
+    async def test_http_status_error_includes_code_and_redacted_url(self) -> None:
+        """HTTP 状态错误应包含状态码和脱敏 URL。"""
+        provider = self._make_provider()
+        request = httpx.Request("GET", "https://example.com/feed.xml?key=secret123")
+        response = httpx.Response(403, request=request)
+
+        with patch("httpx.AsyncClient.get", new=AsyncMock(return_value=response)):
+            with pytest.raises(RSSProviderError, match="HTTP 403") as exc_info:
+                await provider._fetch_feed("https://example.com/feed.xml?key=secret123")
+
+        msg = str(exc_info.value)
+        assert "secret123" not in msg
+        assert "url=" in msg

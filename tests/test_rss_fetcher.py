@@ -5,10 +5,12 @@ from __future__ import annotations
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 import pytest_asyncio
 
 from src.api.providers.base import ProviderArticle, ProviderArticlePage
+from src.api.providers.rss_provider import RSSProviderError
 from src.models.schema import Article, Feed, RSSArticleMembership, RSSSource
 from src.services.fetcher import FetcherService, FetchFinalState
 from src.services.rss_source import RSSSourceService
@@ -377,3 +379,36 @@ class TestRSSFallback:
         # prefer_feed 有 feed 内容时不会调用 fetch，所以这里不会触发
         # 但 fetch_missing 会触发
         assert status == "inserted"
+
+
+class TestRSSFeedRequestFailureSummary:
+    """RSS feed 请求失败时 source failure summary 非空测试。"""
+
+    @pytest.mark.asyncio
+    async def test_request_error_produces_non_empty_failure_summary(
+        self, fetcher: FetcherService, rss_service: RSSSourceService
+    ) -> None:
+        """RSS feed 请求失败应向 record_failure 传入非空摘要。"""
+        source = await rss_service.add_source("diag-test", "https://example.com/feed")
+
+        request_exc = httpx.ConnectTimeout(
+            "", request=httpx.Request("GET", "https://example.com/feed"),
+        )
+        provider_error = RSSProviderError(
+            f"RSS 请求失败: [ConnectTimeout] | url=https://example.com/feed"
+        )
+
+        with patch.object(
+            fetcher._get_provider("rss"), "get_articles",
+            new=AsyncMock(side_effect=provider_error),
+        ):
+            results = await fetcher.fetch_from_rss_sources()
+
+        assert "diag-test" in results
+        assert results["diag-test"].final_state == FetchFinalState.ERROR
+
+        health = await rss_service.get_health(source.id)
+        assert health is not None
+        assert health.consecutive_failures >= 1
+        assert health.last_error_summary
+        assert "ConnectTimeout" in health.last_error_summary

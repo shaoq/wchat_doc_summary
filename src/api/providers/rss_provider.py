@@ -18,6 +18,7 @@ from src.api.providers.base import (
     ProviderArticlePage,
     ProviderSubscription,
 )
+from src.api.request_error import format_request_error
 
 logger = logging.getLogger(__name__)
 
@@ -103,9 +104,18 @@ class RSSProvider(ArticleListProvider):
         url = self._apply_api_key(feed_url)
         logger.debug("RSS fetch: %s", redact_url(feed_url))
 
-        async with httpx.AsyncClient() as client:
-            response = await client.get(url, timeout=self.timeout, follow_redirects=True)
-            response.raise_for_status()
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url, timeout=self.timeout, follow_redirects=True)
+                response.raise_for_status()
+        except httpx.RequestError as exc:
+            diagnostic = format_request_error(exc)
+            raise RSSProviderError(f"RSS 请求失败: {diagnostic}") from exc
+        except httpx.HTTPStatusError as exc:
+            safe_url = redact_url(str(exc.request.url))
+            raise RSSProviderError(
+                f"RSS 请求失败: HTTP {exc.response.status_code} | url={safe_url}"
+            ) from exc
 
         feed = feedparser.parse(response.text)
         if feed.bozo and not feed.entries:
