@@ -1,5 +1,6 @@
 """文章命令模块 - article, show, export。"""
 
+import html
 import re
 import shutil
 from pathlib import Path
@@ -12,7 +13,6 @@ from src.cli.utils import console, run_async
 from src.models.schema import Article, Feed
 from src.services.subscription import SubscriptionService
 from src.storage.database import get_db
-from src.utils.html_converter import html_to_markdown
 
 # 导出相关常量
 EXPORT_BASE_DIR = Path("output/export_articles")
@@ -141,56 +141,92 @@ def build_export_filename(export_dir: Path, date_prefix: str, title: str) -> str
     """组合日期前缀 + 截断标题生成文件名，处理重名。"""
     safe_title = sanitize_filename(title)
     base_name = f"{date_prefix}_{safe_name}" if (safe_name := safe_title) else date_prefix
-    filename = f"{base_name}.md"
+    filename = f"{base_name}.html"
 
     # 处理重名：追加序号
     if export_dir.exists() and (export_dir / filename).exists():
         seq = 2
-        while (export_dir / f"{base_name}_{seq}.md").exists():
+        while (export_dir / f"{base_name}_{seq}.html").exists():
             seq += 1
-        filename = f"{base_name}_{seq}.md"
+        filename = f"{base_name}_{seq}.html"
 
     return filename
 
 
-def build_article_markdown(article_obj: Article) -> str:
-    """生成单篇文章的 Markdown 内容。"""
-    lines: list[str] = [f"# {article_obj.title}\n\n"]
+_ARTICLE_CSS = """\
+body{margin:0;padding:0;background:#f5f5f5;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,"Noto Sans SC",sans-serif;line-height:1.8;color:#333}
+.article{max-width:720px;margin:2rem auto;padding:2rem 2.5rem;background:#fff;border-radius:6px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
+.article-header{margin-bottom:1.5rem;padding-bottom:1rem;border-bottom:1px solid #eee}
+.article-header h1{font-size:1.5rem;line-height:1.4;margin:0 0 .8rem}
+.article-meta{font-size:.85rem;color:#666}
+.article-meta span{margin-right:1.2rem}
+.article-meta a{color:#576b95;text-decoration:none}
+.article-summary{margin:1rem 0;padding:.8rem 1rem;background:#f8f9fa;border-left:3px solid #576b95;font-size:.9rem;color:#555;border-radius:0 4px 4px 0}
+.article-content img{max-width:100%;height:auto}
+.article-content{word-break:break-word}"""
 
-    # 元信息
+
+def build_article_html(article_obj: Article) -> str:
+    """生成单篇文章的完整 HTML 文档。"""
+    title = html.escape(article_obj.title or "")
+
+    # 元信息行
+    meta_parts: list[str] = []
     if article_obj.publish_time:
-        lines.append(f"- **发布时间**: {article_obj.publish_time.strftime('%Y-%m-%d %H:%M')}\n")
+        meta_parts.append(
+            f'<span>发布时间: {html.escape(article_obj.publish_time.strftime("%Y-%m-%d %H:%M"))}</span>'
+        )
     if article_obj.original_url:
-        lines.append(f"- **原文链接**: {article_obj.original_url}\n")
+        meta_parts.append(
+            f'<span>原文链接: <a href="{html.escape(article_obj.original_url)}" target="_blank">查看原文</a></span>'
+        )
     if article_obj.pic_url:
-        lines.append(f"- **封面图片**: {article_obj.pic_url}\n")
+        meta_parts.append(
+            f'<span>封面图片: <img src="{html.escape(article_obj.pic_url)}" alt="封面" style="max-width:200px;vertical-align:middle"></span>'
+        )
+    meta_html = "\n".join(meta_parts)
 
-    # 如果有元信息则加空行
-    has_meta = any([article_obj.publish_time, article_obj.original_url, article_obj.pic_url])
-    if has_meta:
-        lines.append("\n")
-
-    # AI 摘要
+    # 摘要
+    summary_html = ""
     if article_obj.summary:
-        lines.append(f"> {article_obj.summary}\n\n")
+        summary_html = f'<div class="article-summary">{html.escape(article_obj.summary)}</div>'
 
-    # 正文（HTML → Markdown）
-    if article_obj.content:
-        lines.append(f"{html_to_markdown(article_obj.content)}\n")
+    # 正文：保留存储的 HTML，不调用 html_to_markdown
+    body_html = article_obj.content or ""
 
-    return "".join(lines)
+    return (
+        "<!doctype html>\n"
+        '<html lang="zh-CN">\n'
+        "<head>\n"
+        '<meta charset="utf-8">\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        f"<title>{title}</title>\n"
+        f"<style>{_ARTICLE_CSS}</style>\n"
+        "</head>\n"
+        "<body>\n"
+        '<main class="article">\n'
+        '<header class="article-header">\n'
+        f"<h1>{title}</h1>\n"
+        f'<div class="article-meta">\n{meta_html}\n</div>\n'
+        f"{summary_html}\n"
+        "</header>\n"
+        f'<article class="article-content">\n{body_html}\n</article>\n'
+        "</main>\n"
+        "</body>\n"
+        "</html>"
+    )
 
 
 @click.command()
 @click.argument('mp_id')
 @click.option('--force', is_flag=True, help='强制全量导出，覆盖已存在文件')
 def export(mp_id: str, force: bool) -> None:
-    """导出公众号文章为 Markdown 文件。
+    """导出公众号文章为 HTML 文件。
 
     MP_ID: 公众号 ID
 
     文章将导出到 output/export_articles/<MP_ID>/ 目录下，
-    每篇文章一个独立的 .md 文件。默认增量导出，使用 --force 全量覆盖。
+    每篇文章一个独立的 .html 文件。默认增量导出，使用 --force 全量覆盖。
     """
     async def _export() -> None:
         db = await get_db()
@@ -245,7 +281,7 @@ def export(mp_id: str, force: bool) -> None:
                 skipped += 1
                 continue
 
-            content = build_article_markdown(article_obj)
+            content = build_article_html(article_obj)
             file_path.write_text(content, encoding='utf-8')
             exported += 1
 
