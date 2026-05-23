@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 # 用于脱敏的敏感查询参数名（不区分大小写）
 _SENSITIVE_PARAMS = frozenset({
     "key", "token", "k", "api_key", "apikey", "secret", "auth",
+    "access_token",
 })
 
 

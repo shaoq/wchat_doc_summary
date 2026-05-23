@@ -1,5 +1,7 @@
 """API 层测试 - 测试微信读书客户端和文章抓取功能。"""
 
+import logging
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
@@ -11,6 +13,7 @@ from src.api.article import (
     extract_images,
     ArticleFetchError,
 )
+from src.api.request_error import format_request_error
 
 
 class TestWeReadClient:
@@ -528,3 +531,160 @@ class TestAuthExpiredError:
         assert call_count == 1
         assert "WeReadError401" in str(exc_info.value)
         assert exc_info.value.status_code == 500
+
+
+class TestRequestErrorDiagnostics:
+    """请求错误诊断格式化测试。"""
+
+    def test_blank_message_includes_exception_class(self) -> None:
+        """空白消息的 RequestError 应包含异常类名。"""
+        error = httpx.ConnectError("")
+        result = format_request_error(error)
+
+        assert "ConnectError" in result
+
+    def test_blank_message_includes_redacted_url(self) -> None:
+        """空白消息的 RequestError 应包含脱敏后的 URL。"""
+        request = httpx.Request("GET", "https://api.example.com/data?key=secret123")
+        error = httpx.ConnectError("", request=request)
+        result = format_request_error(error)
+
+        assert "api.example.com" in result
+        assert "secret123" not in result
+        assert "key=***" in result
+
+    def test_non_empty_message_preserved(self) -> None:
+        """非空消息应保留在诊断中。"""
+        error = httpx.ReadError("connection reset by peer")
+        result = format_request_error(error)
+
+        assert "ReadError" in result
+        assert "connection reset by peer" in result
+
+    def test_cause_included_when_present(self) -> None:
+        """底层原因应包含在诊断中。"""
+        cause = OSError("Network is unreachable")
+        error = httpx.ConnectError("")
+        error.__cause__ = cause
+        result = format_request_error(error)
+
+        assert "OSError" in result
+        assert "Network is unreachable" in result
+
+    def test_cause_class_only_when_no_message(self) -> None:
+        """底层原因无消息时仅显示类名。"""
+        cause = ConnectionResetError()
+        error = httpx.ConnectError("")
+        error.__cause__ = cause
+        result = format_request_error(error)
+
+        assert "ConnectionResetError" in result
+
+    def test_sensitive_params_redacted(self) -> None:
+        """敏感查询参数应被脱敏。"""
+        request = httpx.Request("GET", "https://api.example.com/data?access_token=abc123&token=xyz&normal=yes")
+        error = httpx.ReadTimeout("", request=request)
+        result = format_request_error(error)
+
+        assert "abc123" not in result
+        assert "xyz" not in result
+        assert "normal=yes" in result
+
+    @pytest.mark.asyncio
+    async def test_weread_request_error_log_includes_class_and_redacted_url(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """WeReadClient 重试日志应包含异常类和脱敏 URL。"""
+        client = WeReadClient(base_url="https://api.example.com")
+        client.max_retries = 0
+
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_request = httpx.Request("GET", "https://api.example.com/test?key=secret")
+            mock_client.return_value.__aenter__.return_value.request = AsyncMock(
+                side_effect=httpx.ConnectError("", request=mock_request)
+            )
+
+            with caplog.at_level(logging.WARNING):
+                with pytest.raises(WeReadAPIError) as exc_info:
+                    await client._request("GET", "/test")
+
+        # 终端错误包含诊断信息
+        assert "ConnectError" in str(exc_info.value)
+        assert "key=***" in str(exc_info.value)
+        assert "secret" not in str(exc_info.value)
+
+        # 重试日志包含诊断信息
+        assert any("ConnectError" in r.message for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_article_request_error_log_includes_diagnostics(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """fetch_article_content 重试日志应包含增强诊断。"""
+        mock_request = httpx.Request("GET", "https://mp.weixin.qq.com/s/test?token=abc")
+        with patch("httpx.AsyncClient") as mock_client, \
+             patch("src.api.article.get_settings") as mock_settings:
+            mock_settings.return_value = MagicMock(max_retries=0, request_timeout=30)
+            mock_client.return_value.__aenter__.return_value.get = AsyncMock(
+                side_effect=httpx.ConnectError("", request=mock_request)
+            )
+
+            with caplog.at_level(logging.WARNING):
+                with pytest.raises(ArticleFetchError) as exc_info:
+                    await fetch_article_content("test")
+
+        assert "ConnectError" in str(exc_info.value)
+        assert "token=***" in str(exc_info.value)
+
+
+class TestMaxRetriesOverride:
+    """max_retries_override 行为测试。"""
+
+    @pytest.mark.asyncio
+    async def test_override_zero_raises_after_first_attempt(self) -> None:
+        """max_retries_override=0 应在首次尝试后抛出。"""
+        client = WeReadClient(base_url="https://api.example.com")
+        client.max_retries = 3  # 默认允许更多重试
+
+        call_count = 0
+
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_request = httpx.Request("GET", "https://api.example.com/test")
+
+            async def count_calls(*args, **kwargs):
+                nonlocal call_count
+                call_count += 1
+                raise httpx.ConnectError("", request=mock_request)
+
+            mock_client.return_value.__aenter__.return_value.request = count_calls
+
+            with pytest.raises(WeReadAPIError) as exc_info:
+                await client._request("GET", "/test", max_retries_override=0)
+
+        # 应仅调用一次（attempt=0 == max_retries=0）
+        assert call_count == 1
+        assert "ConnectError" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_override_one_retries_once(self) -> None:
+        """max_retries_override=1 应重试一次后抛出。"""
+        client = WeReadClient(base_url="https://api.example.com")
+        client.max_retries = 5
+
+        call_count = 0
+
+        with patch("httpx.AsyncClient") as mock_client:
+            mock_request = httpx.Request("GET", "https://api.example.com/test")
+
+            async def count_calls(*args, **kwargs):
+                nonlocal call_count
+                call_count += 1
+                raise httpx.ConnectError("", request=mock_request)
+
+            mock_client.return_value.__aenter__.return_value.request = count_calls
+
+            with pytest.raises(WeReadAPIError):
+                await client._request("GET", "/test", max_retries_override=1)
+
+        # 1 initial + 1 retry = 2 calls
+        assert call_count == 2

@@ -6,6 +6,7 @@ from typing import Any
 import httpx
 
 from config.settings import get_settings
+from src.api.request_error import format_request_error
 
 logger = logging.getLogger(__name__)
 
@@ -164,9 +165,9 @@ class WeReadClient:
                             response_text=e.response.text,
                         ) from e
                 except httpx.RequestError as e:
-                    logger.warning(f"请求错误 (尝试 {attempt + 1}): {e}")
-                    if attempt == self.max_retries:
-                        raise WeReadAPIError(f"网络请求失败: {e}") from e
+                    logger.warning(f"请求错误 (尝试 {attempt + 1}): {format_request_error(e)}")
+                    if attempt == max_retries:
+                        raise WeReadAPIError(f"网络请求失败: {format_request_error(e)}") from e
 
         raise WeReadAPIError("未知错误")
 

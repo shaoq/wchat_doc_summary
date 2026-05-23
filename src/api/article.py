@@ -10,6 +10,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from config.settings import get_settings
+from src.api.request_error import format_request_error
 
 logger = logging.getLogger(__name__)
 
@@ -66,9 +67,9 @@ async def fetch_article_content(article_ref: str) -> str:
                         f"获取文章失败: HTTP {e.response.status_code}"
                     ) from e
             except httpx.RequestError as e:
-                logger.warning(f"请求错误 (尝试 {attempt + 1}): {e}")
+                logger.warning(f"请求错误 (尝试 {attempt + 1}): {format_request_error(e)}")
                 if attempt == settings.max_retries:
-                    raise ArticleFetchError(f"网络请求失败: {e}") from e
+                    raise ArticleFetchError(f"网络请求失败: {format_request_error(e)}") from e
 
     raise ArticleFetchError("未知错误")
 
