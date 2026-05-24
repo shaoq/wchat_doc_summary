@@ -8,6 +8,15 @@ from rich.table import Table
 
 from src.cli.utils import console, run_async
 from src.storage.database import get_db
+from src.cli.cls_export import (
+    CLSExportResult,
+    build_cls_export_html,
+    build_cls_export_path,
+    discover_local_dates,
+    query_telegraphs_for_date,
+    query_watch_for_date,
+    write_export,
+)
 
 
 @click.group(name='cls')
@@ -192,3 +201,171 @@ def list_watch(limit: int) -> None:
         console.print(table)
 
     run_async(_list_watch())
+
+
+@cls_data.command('export')
+@click.option('--date', 'target_date', type=str, default=None, help='指定日期 (YYYY-MM-DD)，默认今天')
+@click.option('--all', 'export_all', is_flag=True, help='导出所有本地日期')
+@click.option('--type', 'export_type', type=click.Choice(['all', 'telegraphs', 'watch'], case_sensitive=False), default='all', help='导出数据类型（默认 all）')
+@click.option('--output', 'output_path', type=click.Path(), default=None, help='自定义输出路径（仅单日期）')
+@click.option('--force', is_flag=True, help='强制覆盖已存在的文件')
+def export_cls(target_date: str | None, export_all: bool, export_type: str, output_path: str | None, force: bool) -> None:
+    """导出本地 CLS 数据为每日 HTML 文件。
+
+    默认导出当天的所有类型数据。使用 --all 导出所有日期。
+    """
+    # 参数校验
+    if export_all and target_date:
+        console.print("[red]不能同时指定 --date 和 --all[/red]")
+        return
+
+    if export_all and output_path:
+        console.print("[red]--output 不能与 --all 一起使用[/red]")
+        return
+
+    export_type = export_type.lower()
+    mode_label = "强制重建" if force else "增量"
+
+    async def _do_export() -> None:
+        db = await get_db()
+
+        if export_all:
+            await _export_all_dates(db, export_type, mode_label, force)
+        else:
+            dt: date
+            if target_date:
+                try:
+                    dt = date.fromisoformat(target_date)
+                except ValueError:
+                    console.print(f"[red]日期格式错误: {target_date}，请使用 YYYY-MM-DD 格式[/red]")
+                    return
+            else:
+                dt = date.today()
+
+            custom_path = output_path
+            await _export_single_date(db, dt, export_type, mode_label, force, custom_path)
+
+    run_async(_do_export())
+
+
+async def _export_single_date(
+    db,
+    target_date: date,
+    export_type: str,
+    mode_label: str,
+    force: bool,
+    custom_output: str | None = None,
+) -> CLSExportResult:
+    """导出单个日期的 CLS 数据。"""
+    console.print(f"日期: {target_date.isoformat()}")
+    console.print(f"类型: {export_type}")
+    console.print(f"模式: {mode_label}")
+
+    # 查询数据
+    telegraphs = []
+    watch_items = []
+    if export_type in ("all", "telegraphs"):
+        telegraphs = await query_telegraphs_for_date(db, target_date)
+    if export_type in ("all", "watch"):
+        watch_items = await query_watch_for_date(db, target_date)
+
+    # 确定输出路径
+    if custom_output:
+        out_path = __import__('pathlib').Path(custom_output)
+    else:
+        out_path = build_cls_export_path(target_date, export_type)
+
+    console.print(f"输出: {out_path}")
+
+    # 无数据时不生成空文件
+    if not telegraphs and not watch_items:
+        console.print("[yellow]无匹配数据，跳过导出[/yellow]")
+        return CLSExportResult(
+            target_date=target_date,
+            export_type=export_type,
+            output_path=out_path,
+            no_data=True,
+        )
+
+    # 构建 HTML
+    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    content = build_cls_export_html(target_date, export_type, telegraphs, watch_items, generated_at)
+
+    # 写入文件
+    written = write_export(out_path, content, force)
+    if written:
+        console.print(f"[green]导出完成: {len(telegraphs)} 条电报, {len(watch_items)} 条看盘数据[/green]")
+        return CLSExportResult(
+            target_date=target_date,
+            export_type=export_type,
+            output_path=out_path,
+            telegraph_count=len(telegraphs),
+            watch_count=len(watch_items),
+            exported=True,
+        )
+    else:
+        console.print(f"[yellow]已跳过（文件已存在）: {out_path}[/yellow]")
+        return CLSExportResult(
+            target_date=target_date,
+            export_type=export_type,
+            output_path=out_path,
+            telegraph_count=len(telegraphs),
+            watch_count=len(watch_items),
+            skipped=True,
+        )
+
+
+async def _export_all_dates(
+    db,
+    export_type: str,
+    mode_label: str,
+    force: bool,
+) -> None:
+    """导出所有本地日期的 CLS 数据。"""
+    from src.cli.cls_export import EXPORT_DIR
+
+    dates = await discover_local_dates(db, export_type)
+
+    if not dates:
+        console.print("[yellow]本地无匹配的 CLS 数据[/yellow]")
+        return
+
+    total_dates = len(dates)
+    console.print(f"批量导出: {total_dates} 个日期")
+    console.print(f"类型: {export_type}")
+    console.print(f"模式: {mode_label}")
+    console.print(f"输出目录: {EXPORT_DIR}")
+    console.print("")
+
+    agg_exported = 0
+    agg_skipped = 0
+    agg_no_data = 0
+    agg_telegraphs = 0
+    agg_watch = 0
+
+    for idx, d in enumerate(dates, start=1):
+        console.print(f"[{idx}/{total_dates}] {d.isoformat()}")
+
+        result = await _export_single_date(db, d, export_type, mode_label, force)
+
+        if result.no_data:
+            agg_no_data += 1
+        elif result.exported:
+            agg_exported += 1
+            agg_telegraphs += result.telegraph_count
+            agg_watch += result.watch_count
+        elif result.skipped:
+            agg_skipped += 1
+            agg_telegraphs += result.telegraph_count
+            agg_watch += result.watch_count
+
+        console.print("")
+
+    # 汇总
+    console.print("[bold]总计[/bold]")
+    console.print(f"  日期总数: {total_dates}")
+    console.print(f"  导出: {agg_exported}")
+    console.print(f"  跳过: {agg_skipped}")
+    console.print(f"  无数据: {agg_no_data}")
+    console.print(f"  电报总数: {agg_telegraphs}")
+    console.print(f"  看盘数据总数: {agg_watch}")
