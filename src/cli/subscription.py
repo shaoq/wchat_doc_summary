@@ -154,6 +154,7 @@ def ls(active_only: bool) -> None:
         table.add_column("公众号名称", style="green")
         table.add_column("公众号 ID", style="blue")
         table.add_column("权重", style="magenta", justify="center")
+        table.add_column("批量导出", style="cyan", justify="center")
         table.add_column("文章数", style="magenta", justify="right")
         table.add_column("最近文章", style="yellow")
         table.add_column("RSS 源", style="dim")
@@ -166,6 +167,7 @@ def ls(active_only: bool) -> None:
             latest_time = latest_article_time.strftime("%Y-%m-%d") if latest_article_time else "-"
             weight_labels = {0: "[dim]低[/dim]", 5: "[yellow]中[/yellow]", 10: "[bold red]高[/bold red]"}
             weight_display = weight_labels.get(feed.weight, str(feed.weight))
+            export_display = "[green]是[/green]" if feed.include_in_export_all else "[dim]否[/dim]"
 
             # 查找关联的 RSS 源
             from sqlalchemy import select, func
@@ -188,6 +190,7 @@ def ls(active_only: bool) -> None:
                 feed.name[:20] + "..." if len(feed.name) > 20 else feed.name,
                 feed.mp_id[:25] + "..." if len(feed.mp_id) > 25 else feed.mp_id,
                 weight_display,
+                export_display,
                 str(article_count),
                 latest_time,
                 rss_label,
@@ -242,6 +245,7 @@ def info(mp_id: str) -> None:
             f"[bold]简介:[/bold] {feed.intro or '无'}\n"
             f"[bold]状态:[/bold] {'活跃' if feed.status == 1 else '停用'}\n"
             f"[bold]权重:[/bold] {feed.weight} ({'低' if feed.weight == 0 else '中' if feed.weight == 5 else '高'})\n"
+            f"[bold]批量导出:[/bold] {'是' if feed.include_in_export_all else '否'}\n"
             f"[bold]文章数量:[/bold] {article_count}\n"
             f"[bold]创建时间:[/bold] {feed.created_at.strftime('%Y-%m-%d %H:%M') if feed.created_at else '未知'}\n"
             f"[bold]最后同步:[/bold] {feed.sync_time.strftime('%Y-%m-%d %H:%M') if feed.sync_time else '从未同步'}",

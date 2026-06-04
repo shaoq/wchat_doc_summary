@@ -87,6 +87,7 @@ class SubscriptionService:
                 provider=provider,
                 provider_feed_id=provider_feed_id,
                 provider_meta=provider_meta,
+                include_in_export_all=1,
                 status=1,
             )
             session.add(feed)
@@ -254,3 +255,24 @@ class SubscriptionService:
             feeds = list(result.scalars().all())
             logger.info(f"获取抓取队列: {len(feeds)} 条记录（按权重排序）")
             return feeds
+
+    async def set_export_all_preference(self, mp_id: str, enabled: bool) -> Feed | None:
+        """设置订阅是否参与 export --all，返回更新后的订阅。"""
+        async with self.db.get_session() as session:
+            result = await session.execute(
+                select(Feed).where(Feed.mp_id == mp_id)
+            )
+            feed = result.scalar_one_or_none()
+            if feed is None:
+                logger.warning(f"订阅不存在，无法设置批量导出偏好: {mp_id}")
+                return None
+
+            feed.include_in_export_all = 1 if enabled else 0
+            await session.flush()
+            await session.refresh(feed)
+            logger.info(
+                "设置批量导出偏好: mp_id=%s enabled=%s",
+                mp_id,
+                enabled,
+            )
+            return feed

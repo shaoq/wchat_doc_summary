@@ -26,6 +26,37 @@ async def test_subscription_service_persists_feed(integration_db: Database) -> N
     assert db_feed is not None
     assert db_feed.id == feed.id
     assert db_feed.name == "测试公众号"
+    assert db_feed.include_in_export_all == 1
+
+
+@pytest.mark.asyncio
+async def test_subscription_service_sets_export_all_preference(integration_db: Database) -> None:
+    """订阅服务能切换批量导出偏好。"""
+    service = SubscriptionService(integration_db)
+    await service.add_subscription("MP_WXS_export_pref", "导出偏好号")
+
+    updated = await service.set_export_all_preference("MP_WXS_export_pref", False)
+    assert updated is not None
+    assert updated.include_in_export_all == 0
+
+    async with integration_db.get_session() as session:
+        result = await session.execute(
+            select(Feed).where(Feed.mp_id == "MP_WXS_export_pref")
+        )
+        db_feed = result.scalar_one_or_none()
+
+    assert db_feed is not None
+    assert db_feed.include_in_export_all == 0
+
+
+@pytest.mark.asyncio
+async def test_subscription_service_set_export_all_preference_unknown(
+    integration_db: Database,
+) -> None:
+    """切换未知订阅批量导出偏好时返回 None。"""
+    service = SubscriptionService(integration_db)
+    updated = await service.set_export_all_preference("MP_WXS_missing", False)
+    assert updated is None
 
 
 @pytest.mark.asyncio

@@ -6,6 +6,7 @@ from typing import Generator
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from sqlalchemy import inspect, text
 
 from src.storage.database import Database, CRUDOperations
 from src.models.schema import Base, Feed, Article, Auth
@@ -56,6 +57,44 @@ class TestDatabase:
 
             # 验证引擎已创建
             assert database._engine is not None
+
+    @pytest.mark.asyncio
+    async def test_compatible_schema_adds_export_all_preference(self, database: Database) -> None:
+        """旧 feeds 表初始化后应补齐批量导出偏好列且默认启用。"""
+        async with database.engine.begin() as conn:
+            await conn.execute(text("""
+                CREATE TABLE feeds (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    mp_id VARCHAR(128) NOT NULL,
+                    name VARCHAR(255) NOT NULL,
+                    status INTEGER DEFAULT 1
+                )
+            """))
+            await conn.execute(text("""
+                INSERT INTO feeds (mp_id, name, status)
+                VALUES ('MP_legacy', '旧订阅', 1)
+            """))
+            await conn.execute(text("""
+                CREATE TABLE articles (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    feed_id INTEGER NOT NULL,
+                    article_id VARCHAR(128) NOT NULL,
+                    title VARCHAR(512) NOT NULL
+                )
+            """))
+            await conn.run_sync(Database._ensure_compatible_schema)
+
+            def _inspect(sync_conn):
+                columns = {col["name"] for col in inspect(sync_conn).get_columns("feeds")}
+                row = sync_conn.execute(
+                    text("SELECT include_in_export_all FROM feeds WHERE mp_id = 'MP_legacy'")
+                ).fetchone()
+                return columns, row[0]
+
+            columns, include_in_export_all = await conn.run_sync(_inspect)
+
+        assert "include_in_export_all" in columns
+        assert include_in_export_all == 1
 
     @pytest.mark.asyncio
     async def test_close(self, database: Database) -> None:

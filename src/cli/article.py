@@ -320,17 +320,31 @@ def _print_summary_line(summary: ExportSummary) -> None:
 
 
 @click.command()
-@click.argument('mp_id', required=False, default=None)
+@click.argument('args', nargs=-1)
 @click.option('--force', is_flag=True, help='强制全量导出，覆盖已存在文件')
 @click.option('--all', 'export_all', is_flag=True, help='导出所有订阅的公众号')
-def export(mp_id: str | None, force: bool, export_all: bool) -> None:
+def export(args: tuple[str, ...], force: bool, export_all: bool) -> None:
     """导出公众号文章为 HTML 文件。
 
     MP_ID: 公众号 ID（与 --all 二选一）
 
     文章将导出到 output/export_articles/<MP_ID>/ 目录下，
     每篇文章一个独立的 .html 文件。默认增量导出，使用 --force 全量覆盖。
+
+    设置是否参与批量导出:
+    wchat export set-export <MP_ID> true|false
     """
+    if args and args[0] == "set-export":
+        _set_export_preference(args, force, export_all)
+        return
+
+    if len(args) > 1:
+        console.print("[red]只能指定一个公众号 ID[/red]")
+        console.print("[dim]用法: wchat export <MP_ID>  或  wchat export --all[/dim]")
+        return
+
+    mp_id = args[0] if args else None
+
     # 校验参数
     if mp_id is None and not export_all:
         console.print("[red]请指定公众号 ID 或使用 --all 导出所有订阅[/red]")
@@ -349,6 +363,41 @@ def export(mp_id: str | None, force: bool, export_all: bool) -> None:
     else:
         assert mp_id is not None
         _export_single(mp_id, force, mode_label)
+
+
+def _set_export_preference(args: tuple[str, ...], force: bool, export_all: bool) -> None:
+    """设置公众号是否参与 export --all。"""
+    if force or export_all:
+        console.print("[red]set-export 不支持 --force 或 --all[/red]")
+        console.print("[dim]用法: wchat export set-export <MP_ID> true|false[/dim]")
+        return
+
+    if len(args) != 3:
+        console.print("[red]请指定公众号 ID 和 true|false[/red]")
+        console.print("[dim]用法: wchat export set-export <MP_ID> true|false[/dim]")
+        return
+
+    _, mp_id, raw_enabled = args
+    normalized = raw_enabled.lower()
+    if normalized not in {"true", "false"}:
+        console.print("[red]导出标识必须是 true 或 false[/red]")
+        console.print("[dim]用法: wchat export set-export <MP_ID> true|false[/dim]")
+        return
+
+    enabled = normalized == "true"
+
+    async def _do_set_export_preference() -> None:
+        db = await get_db()
+        subscription_service = SubscriptionService(db)
+        feed = await subscription_service.set_export_all_preference(mp_id, enabled)
+        if feed is None:
+            console.print(f"[red]订阅不存在: {mp_id}[/red]")
+            return
+
+        state = "参与" if enabled else "不参与"
+        console.print(f"[green]已设置 {feed.name} ({feed.mp_id}) {state}批量导出[/green]")
+
+    run_async(_do_set_export_preference())
 
 
 def _export_single(mp_id: str, force: bool, mode_label: str) -> None:
@@ -405,15 +454,24 @@ def _export_all(force: bool, mode_label: str) -> None:
         db = await get_db()
 
         async with db.get_session() as session:
+            active_count_result = await session.execute(
+                select(Feed).where(Feed.status == 1)
+            )
+            active_feeds = list(active_count_result.scalars().all())
+
             feeds_result = await session.execute(
                 select(Feed)
-                .where(Feed.status == 1)
+                .where(Feed.status == 1, Feed.include_in_export_all == 1)
                 .order_by(Feed.name, Feed.mp_id)
             )
             feeds = list(feeds_result.scalars().all())
 
         if not feeds:
-            console.print("[yellow]没有活跃的订阅[/yellow]")
+            if active_feeds:
+                console.print("[yellow]没有启用批量导出的订阅[/yellow]")
+                console.print("[dim]可使用 wchat export set-export <MP_ID> true 启用[/dim]")
+            else:
+                console.print("[yellow]没有活跃的订阅[/yellow]")
             return
 
         total_feeds = len(feeds)

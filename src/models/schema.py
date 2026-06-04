@@ -52,6 +52,11 @@ class Feed(Base):
         default=5,
         comment="权重: 0-低, 5-中, 10-高",
     )
+    include_in_export_all: Mapped[int] = mapped_column(
+        Integer,
+        default=1,
+        comment="是否参与 export --all: 0-否, 1-是",
+    )
     status: Mapped[int] = mapped_column(
         Integer,
         default=1,

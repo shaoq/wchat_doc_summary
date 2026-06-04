@@ -88,6 +88,7 @@ class Database:
             "feeds",
             {
                 "weight": "INTEGER DEFAULT 5",
+                "include_in_export_all": "INTEGER DEFAULT 1",
                 "provider": "VARCHAR(64)",
                 "provider_feed_id": "VARCHAR(255)",
                 "provider_meta": "TEXT",
