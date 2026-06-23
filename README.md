@@ -18,7 +18,9 @@
 - AI 摘要、关键词、分类、情感分析
 - 文章股票提取与股票反查
 - A 股市场总结
+- 市场数据缓存回填与板块趋势跟踪
 - 财联社电报 / 看盘数据抓取与查看
+- 文章与财联社数据 HTML 导出
 
 ## 安装
 
@@ -74,9 +76,19 @@ LLM_MODEL=claude-3-5-haiku-latest
 | `ARTICLE_LIST_PROVIDER` | 文章列表 Provider，推荐 `rss`；兼容 `weread` / `wechat2rss` |
 | `WECHAT_RSS_API_KEY` | 微信 RSS SaaS 全局 API Key（放在 `.env` 中） |
 | `RSS_CONTENT_MODE` | 内容模式: `feed_only` / `prefer_feed`（默认）/ `fetch_missing` |
+| `RSS_STALE_THRESHOLD_HOURS` | RSS 源过期阈值小时数，默认 `48` |
+| `WECHAT_RSS_PLAN_LIMIT` | RSS SaaS 套餐源数量上限，仅用于告警 |
 | `RSS_AUTO_SUBSCRIBE_DISCOVERED_FEEDS` | 是否自动订阅 RSS 中发现的未知公众号（默认 `false`） |
 | `RSS_DISCOVERED_FEED_DEFAULT_STATUS` | 自动发现的公众号默认状态: `active` / `inactive`（默认） |
 | `RSS_UNKNOWN_FEED_POLICY` | 未知公众号处理策略: `skip`（默认）/ `create_placeholder` |
+| `RSS_IDENTITY_RESOLVER_PROVIDER` | RSS 归属解析使用的身份提供者，默认 `weread` |
+| `LLM_BASE_URL` | Anthropic 兼容 API 地址，默认 `https://api.anthropic.com` |
+| `LLM_API_KEY` | AI 命令使用的 API Key |
+| `LLM_MODEL` | AI 命令使用的模型，默认 `claude-3-5-haiku-latest` |
+| `FETCH_PAGE_INTERVAL` / `FETCH_PAGE_JITTER` | 列表翻页基础间隔与随机抖动 |
+| `FETCH_ARTICLE_INTERVAL` / `FETCH_ARTICLE_JITTER` | 文章内容抓取基础间隔与随机抖动 |
+| `FETCH_SUBSCRIPTION_DELAY` / `FETCH_SUBSCRIPTION_JITTER` | 批量抓取订阅间基础等待与随机抖动 |
+| `FETCH_RATE_LIMIT` / `FETCH_RATE_WINDOW` | 全局抓取限速与滑动窗口秒数 |
 
 说明：
 
@@ -209,9 +221,27 @@ wchat show MP_WXS_xxx
 导出文章：
 
 ```bash
-wchat export --format json --output articles.json
-wchat export --format markdown --output articles.md
+# 导出单个公众号文章为 HTML
+wchat export MP_WXS_xxx
+
+# 强制重建该公众号导出目录
+wchat export MP_WXS_xxx --force
+
+# 导出所有启用批量导出的活跃订阅
+wchat export --all
+wchat export --all --force
 ```
+
+文章默认导出到 `output/export_articles/<MP_ID>/`，每篇文章一个独立 `.html` 文件；无 `--force` 时为增量导出，已存在文件会跳过。
+
+控制某个公众号是否参与 `wchat export --all`：
+
+```bash
+wchat export set-export MP_WXS_xxx false
+wchat export set-export MP_WXS_xxx true
+```
+
+这个开关只影响 `wchat export --all`。即使关闭批量导出，仍然可以用 `wchat export MP_WXS_xxx` 显式导出该公众号。`wchat ls` 和 `wchat info MP_WXS_xxx` 会显示“批量导出”状态。
 
 ### 5. 抓取所有订阅
 
@@ -332,6 +362,38 @@ wchat ai market-summary --force
 wchat ai market-summary --offline
 ```
 
+查看历史总结：
+
+```bash
+wchat ai market-summary --list
+```
+
+回填历史市场数据缓存：
+
+```bash
+wchat ai market-data backfill --help
+```
+
+## 板块趋势跟踪
+
+查看板块趋势命令：
+
+```bash
+wchat ai sector-trends --help
+```
+
+常用入口：
+
+```bash
+wchat ai sector-trends init
+wchat ai sector-trends update
+wchat ai sector-trends ls
+wchat ai sector-trends show
+wchat ai sector-trends history
+wchat ai sector-trends matrix
+wchat ai sector-trends groups --help
+```
+
 ## 财联社数据命令
 
 抓取电报：
@@ -346,6 +408,34 @@ wchat cls fetch-telegraphs --date 2026-03-27 --hours 36
 ```bash
 wchat cls fetch-watch
 wchat cls fetch-watch --date 2026-03-27 --hours 12
+```
+
+查看本地数据：
+
+```bash
+wchat cls list-telegraphs
+wchat cls list-watch
+```
+
+导出本地 CLS 数据为每日 HTML 文件：
+
+```bash
+# 默认导出当天电报和看盘数据
+wchat cls export
+
+# 指定日期
+wchat cls export --date 2026-03-27
+
+# 导出所有本地日期
+wchat cls export --all
+
+# 只导出某类数据
+wchat cls export --type telegraphs
+wchat cls export --type watch
+
+# 自定义单日输出路径或强制覆盖
+wchat cls export --date 2026-03-27 --output output/cls_exports/custom.html
+wchat cls export --date 2026-03-27 --force
 ```
 
 ## 常见问题
@@ -394,11 +484,25 @@ wchat source health 全部     # 查看指定源
 LLM_API_KEY=你的密钥
 ```
 
-### 8. 数据文件和输出文件在哪里
+### 8. `wchat export --all` 为什么跳过某些公众号？
+
+`wchat export --all` 只导出活跃且启用“批量导出”的订阅。可以用以下命令查看和切换：
+
+```bash
+wchat ls
+wchat info MP_WXS_xxx
+wchat export set-export MP_WXS_xxx true
+```
+
+显式导出 `wchat export MP_WXS_xxx` 不受这个开关限制。
+
+### 9. 数据文件和输出文件在哪里
 
 默认路径：
 
 - 数据库：`data/wchat.db`
+- 文章 HTML 导出：`output/export_articles/`
+- CLS 每日 HTML 导出：`output/cls_exports/`
 - 股票提取输出：`output/extract_stocks/`
 - 市场总结输出：`output/market_summaries/`
 
