@@ -360,6 +360,26 @@ class FinanceClient:
         "MSFT": "Microsoft",
         "AAPL": "Apple",
     }
+    GLOBAL_THEME_SYMBOLS: dict[str, tuple[str, str]] = {
+        "^SOX": ("semiconductor", "费城半导体指数"),
+        "^HXC": ("china_adr", "纳斯达克中国金龙指数"),
+        "^NBI": ("biotech", "纳斯达克生物科技指数"),
+        "SMH": ("semiconductor_etf", "VanEck 半导体ETF"),
+        "SOXX": ("semiconductor_etf", "iShares 半导体ETF"),
+        "KWEB": ("china_internet", "中概互联网ETF"),
+        "FXI": ("china_large_cap", "中国大盘股ETF"),
+        "XBI": ("biotech_etf", "SPDR 生物科技ETF"),
+        "IBB": ("biotech_etf", "iShares 生物科技ETF"),
+        "KRE": ("regional_bank", "SPDR 区域银行ETF"),
+        "XLF": ("financials", "金融行业ETF"),
+        "XLK": ("technology", "科技行业ETF"),
+        "XLE": ("energy", "能源行业ETF"),
+        "XLV": ("healthcare", "医疗保健ETF"),
+        "XLY": ("consumer_discretionary", "可选消费ETF"),
+        "XLP": ("consumer_staples", "必需消费ETF"),
+        "XLI": ("industrials", "工业ETF"),
+        "IWM": ("small_cap", "罗素2000 ETF"),
+    }
     FRED_DAILY_SERIES: dict[str, str] = {
         "DJIA": "^DJI",
         "SP500": "^GSPC",
@@ -367,12 +387,30 @@ class FinanceClient:
         "VIXCLS": "^VIX",
         "DTWEXBGS": "DX-Y.NYB",
         "DGS10": "^TNX",
+        "NASDAQ100": "QQQ",
     }
     TENCENT_GLOBAL_SYMBOLS: dict[str, str] = {
         "usDJI": "^DJI",
         "usINX": "^GSPC",
         "usIXIC": "^IXIC",
         "usSOX": "^SOX",
+        "usHXC": "^HXC",
+        "usNBI": "^NBI",
+        "usSMH": "SMH",
+        "usSOXX": "SOXX",
+        "usKWEB": "KWEB",
+        "usFXI": "FXI",
+        "usXBI": "XBI",
+        "usIBB": "IBB",
+        "usKRE": "KRE",
+        "usXLF": "XLF",
+        "usXLK": "XLK",
+        "usXLE": "XLE",
+        "usXLV": "XLV",
+        "usXLY": "XLY",
+        "usXLP": "XLP",
+        "usXLI": "XLI",
+        "usIWM": "IWM",
         "usNVDA": "NVDA",
         "usMSFT": "MSFT",
         "usAAPL": "AAPL",
@@ -382,6 +420,23 @@ class FinanceClient:
         "gb_inx": "^GSPC",
         "gb_ixic": "^IXIC",
         "gb_sox": "^SOX",
+        "gb_hxc": "^HXC",
+        "gb_nbi": "^NBI",
+        "gb_smh": "SMH",
+        "gb_soxx": "SOXX",
+        "gb_kweb": "KWEB",
+        "gb_fxi": "FXI",
+        "gb_xbi": "XBI",
+        "gb_ibb": "IBB",
+        "gb_kre": "KRE",
+        "gb_xlf": "XLF",
+        "gb_xlk": "XLK",
+        "gb_xle": "XLE",
+        "gb_xlv": "XLV",
+        "gb_xly": "XLY",
+        "gb_xlp": "XLP",
+        "gb_xli": "XLI",
+        "gb_iwm": "IWM",
         "gb_nvda": "NVDA",
         "gb_msft": "MSFT",
         "gb_aapl": "AAPL",
@@ -471,6 +526,7 @@ class FinanceClient:
                 "indices": [],
                 "risk_signals": {},
                 "leaders": [],
+                "theme_indices": [],
                 "source": source,
                 "message": message,
             },
@@ -605,6 +661,23 @@ class FinanceClient:
                 "change_pct": change_pct,
             })
 
+        theme_indices: list[dict[str, Any]] = []
+        for yahoo_symbol, (theme_key, name) in self.GLOBAL_THEME_SYMBOLS.items():
+            row = by_symbol.get(yahoo_symbol)
+            if not row:
+                continue
+            price = self._quote_price(row)
+            change_pct = self._quote_change_pct(row)
+            if price is None or change_pct is None:
+                continue
+            theme_indices.append({
+                "symbol": str(row.get("symbol", yahoo_symbol)).lstrip("^"),
+                "theme": theme_key,
+                "name": name,
+                "price": price,
+                "change_pct": change_pct,
+            })
+
         status = "ok"
         if not indices and not risk_signals and not leaders:
             status = "error"
@@ -633,6 +706,7 @@ class FinanceClient:
                 "indices": indices,
                 "risk_signals": risk_signals,
                 "leaders": leaders[:5],
+                "theme_indices": theme_indices[:12],
                 "source": self.GLOBAL_CONTEXT_SOURCE,
                 "message": message,
             },

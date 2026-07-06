@@ -29,6 +29,15 @@ def _global_context(status="ok"):
             ] if status != "error" else [],
             "risk_signals": {},
             "leaders": [],
+            "theme_indices": [
+                {
+                    "symbol": "SOX",
+                    "theme": "semiconductor",
+                    "name": "费城半导体指数",
+                    "price": 5200.0,
+                    "change_pct": 0.024,
+                },
+            ] if status != "error" else [],
             "source": "yahoo_quote",
         },
     }
@@ -723,6 +732,7 @@ def test_market_stage_shows_component_level_statuses():
     assert "板块: 暂无板块数据" in output
     assert "涨停股: 0 只" in output
     assert "海外市场: DJIA +0.40%, SPX +0.60%, IXIC +0.90%" in output
+    assert "themes: SOX +2.40%" in output
     assert "session=regular" in output
 
     idx_stage1 = output.find("[1/3] 获取市场数据")

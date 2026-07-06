@@ -80,6 +80,7 @@ class MarketDataCacheService:
                 "indices": [],
                 "risk_signals": {},
                 "leaders": [],
+                "theme_indices": [],
                 "source": "cache",
                 "message": "无可用海外市场上下文缓存",
             },

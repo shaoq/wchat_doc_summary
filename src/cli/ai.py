@@ -270,6 +270,18 @@ def _get_global_context_status_item(market_data: dict[str, Any]) -> dict[str, st
     )
     if not index_summary:
         index_summary = context.get("message") or "暂无指数信号"
+    theme_indices = (
+        us_market.get("theme_indices", [])
+        if isinstance(us_market.get("theme_indices"), list)
+        else []
+    )
+    theme_summary = ", ".join(
+        f"{item.get('symbol', item.get('name', ''))} {_format_pct(item.get('change_pct'))}"
+        for item in theme_indices[:3]
+        if isinstance(item, dict)
+    )
+    if theme_summary:
+        index_summary = f"{index_summary} | themes: {theme_summary}"
 
     # 构建 fallback 状态后缀
     fallback_suffix = ""

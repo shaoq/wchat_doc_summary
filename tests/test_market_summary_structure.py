@@ -75,6 +75,22 @@ def _full_global_market_context() -> dict:
             "leaders": [
                 {"symbol": "NVDA", "name": "NVIDIA", "change_pct": 0.012},
             ],
+            "theme_indices": [
+                {
+                    "symbol": "SOX",
+                    "theme": "semiconductor",
+                    "name": "费城半导体指数",
+                    "price": 5200.0,
+                    "change_pct": 0.024,
+                },
+                {
+                    "symbol": "HXC",
+                    "theme": "china_adr",
+                    "name": "纳斯达克中国金龙指数",
+                    "price": 6000.0,
+                    "change_pct": 0.015,
+                },
+            ],
             "source": "yahoo_quote",
         },
     }
@@ -380,6 +396,8 @@ class TestGenerateMarketSummaryPromptStructure:
 
         assert "海外市场上下文" in captured_prompt
         assert "纳斯达克综合指数" in captured_prompt
+        assert "主题/板块映射" in captured_prompt
+        assert "费城半导体指数" in captured_prompt
         assert "数据缺口提示\n无" in captured_prompt
 
     @pytest.mark.asyncio

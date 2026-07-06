@@ -1499,6 +1499,21 @@ class AIProcessor:
         if leader_parts:
             lines.append("行业/龙头代理：" + "；".join(leader_parts))
 
+        theme_indices = (
+            us_market.get("theme_indices", [])
+            if isinstance(us_market.get("theme_indices"), list)
+            else []
+        )
+        theme_parts = []
+        for item in theme_indices[:8]:
+            if not isinstance(item, dict):
+                continue
+            change = item.get("change_pct")
+            change_text = f"{change * 100:+.2f}%" if isinstance(change, (int, float)) else "N/A"
+            theme_parts.append(f"{item.get('name', item.get('symbol', ''))} {change_text}")
+        if theme_parts:
+            lines.append("主题/板块映射：" + "；".join(theme_parts))
+
         if status == "partial":
             message = context.get("message", "海外市场上下文部分缺失")
             lines.append(f"注意：{message}。只能使用已给出的海外信号，不得补全未知走势。")

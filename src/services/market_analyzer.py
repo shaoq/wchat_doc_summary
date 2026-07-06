@@ -209,6 +209,7 @@ class MarketAnalyzer:
                 "indices": [],
                 "risk_signals": {},
                 "leaders": [],
+                "theme_indices": [],
                 "source": "none",
                 "message": message,
             },

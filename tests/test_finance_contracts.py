@@ -154,6 +154,24 @@ class TestGlobalMarketContextContract:
                 "regularMarketChangePercent": 1.2,
                 "regularMarketTime": 1710500000,
             },
+            {
+                "symbol": "^SOX",
+                "regularMarketPrice": 5200.0,
+                "regularMarketChangePercent": 2.4,
+                "regularMarketTime": 1710500000,
+            },
+            {
+                "symbol": "^HXC",
+                "regularMarketPrice": 6000.0,
+                "regularMarketChangePercent": 1.5,
+                "regularMarketTime": 1710500000,
+            },
+            {
+                "symbol": "KWEB",
+                "regularMarketPrice": 25.6,
+                "regularMarketChangePercent": 2.5,
+                "regularMarketTime": 1710500000,
+            },
         ]
 
         result = finance_client._normalize_global_quote_rows(rows, date(2026, 3, 27))
@@ -165,6 +183,9 @@ class TestGlobalMarketContextContract:
         assert result["session"] in {"pre_market", "regular", "post_market", "closed"}
         assert len(result["us_market"]["indices"]) == 3
         assert set(result["us_market"]["risk_signals"]) == {"vix", "dxy", "us10y"}
+        themes = result["us_market"]["theme_indices"]
+        assert {item["symbol"] for item in themes} >= {"SOX", "HXC", "KWEB"}
+        assert themes[0]["theme"]
 
     def test_normalize_global_quote_rows_marks_partial_without_fabricating(self, finance_client):
         """Contract: 部分缺失时保留可用数据，不用零值占位。"""
