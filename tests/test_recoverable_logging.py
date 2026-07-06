@@ -54,7 +54,7 @@ class TestOverseasMarketLogging:
 
     @pytest.mark.asyncio
     async def test_primary_401_fallback_success_no_warning(self, finance_client, caplog):
-        """主源 401 且 fallback 成功时不应产生 warning 级别日志。"""
+        """腾讯实时源 401 且新浪 fallback 成功时不应产生 warning 级别日志。"""
         mock_rows = [
             {"symbol": "^DJI", "regularMarketPrice": 39000.0, "regularMarketChangePercent": 0.4, "regularMarketTime": 1710500000},
             {"symbol": "^GSPC", "regularMarketPrice": 5200.0, "regularMarketChangePercent": 0.6, "regularMarketTime": 1710500000},
@@ -66,11 +66,11 @@ class TestOverseasMarketLogging:
         ]
         with caplog.at_level(logging.WARNING, logger="src.api.finance"):
             with patch.object(
-                finance_client, "_fetch_yahoo_quotes_sync",
+                finance_client, "_fetch_tencent_global_quotes_sync",
                 side_effect=Exception("401 Client Error: Unauthorized"),
             ):
                 with patch.object(
-                    finance_client, "_fetch_yahoo_chart_sync", return_value=mock_rows,
+                    finance_client, "_fetch_sina_global_quotes_sync", return_value=mock_rows,
                 ):
                     result = await finance_client.get_global_market_context(date(2026, 3, 27))
 
@@ -87,14 +87,26 @@ class TestOverseasMarketLogging:
         """所有 provider 均失败时应产生一次最终 warning。"""
         with caplog.at_level(logging.DEBUG, logger="src.api.finance"):
             with patch.object(
-                finance_client, "_fetch_yahoo_quotes_sync",
+                finance_client, "_fetch_tencent_global_quotes_sync",
                 side_effect=Exception("401 Client Error: Unauthorized"),
             ):
                 with patch.object(
-                    finance_client, "_fetch_yahoo_chart_sync",
+                    finance_client, "_fetch_sina_global_quotes_sync",
                     side_effect=Exception("Connection refused"),
                 ):
-                    result = await finance_client.get_global_market_context(date(2026, 3, 27))
+                    with patch.object(
+                        finance_client, "_fetch_yahoo_quotes_sync",
+                        side_effect=Exception("401 Client Error: Unauthorized"),
+                    ):
+                        with patch.object(
+                            finance_client, "_fetch_yahoo_chart_sync",
+                            side_effect=Exception("Connection refused"),
+                        ):
+                            with patch.object(
+                                finance_client, "_fetch_fred_daily_sync",
+                                side_effect=Exception("429 Too Many Requests"),
+                            ):
+                                result = await finance_client.get_global_market_context(date(2026, 3, 27))
 
         assert result["status"] == "error"
         warning_messages = [r for r in caplog.records if r.levelno >= logging.WARNING]
@@ -107,7 +119,7 @@ class TestOverseasMarketLogging:
 
     @pytest.mark.asyncio
     async def test_primary_success_no_fallback_no_warning(self, finance_client, caplog):
-        """主源成功时不应产生任何 warning 日志。"""
+        """腾讯实时源成功时不应产生任何 warning 日志。"""
         mock_rows = [
             {"symbol": "^DJI", "regularMarketPrice": 39000.0, "regularMarketChangePercent": 0.4, "regularMarketTime": 1710500000},
             {"symbol": "^GSPC", "regularMarketPrice": 5200.0, "regularMarketChangePercent": 0.6, "regularMarketTime": 1710500000},
@@ -119,7 +131,7 @@ class TestOverseasMarketLogging:
         ]
         with caplog.at_level(logging.WARNING, logger="src.api.finance"):
             with patch.object(
-                finance_client, "_fetch_yahoo_quotes_sync", return_value=mock_rows,
+                finance_client, "_fetch_tencent_global_quotes_sync", return_value=mock_rows,
             ):
                 result = await finance_client.get_global_market_context(date(2026, 3, 27))
 
@@ -253,11 +265,11 @@ class TestMarketSummaryLoggingPollution:
         ]
         with caplog.at_level(logging.WARNING, logger="src.api.finance"):
             with patch.object(
-                finance_client, "_fetch_yahoo_quotes_sync",
+                finance_client, "_fetch_tencent_global_quotes_sync",
                 side_effect=Exception("401 Client Error: Unauthorized"),
             ):
                 with patch.object(
-                    finance_client, "_fetch_yahoo_chart_sync", return_value=mock_rows,
+                    finance_client, "_fetch_sina_global_quotes_sync", return_value=mock_rows,
                 ):
                     result = await finance_client.get_global_market_context(date(2026, 3, 27))
 

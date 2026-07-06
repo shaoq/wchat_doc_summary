@@ -1394,6 +1394,14 @@ class TestProviderFallbackContract:
         assert failure_type == "unauthorized"
         assert "401" in message
 
+    def test_classify_403_as_unauthorized(self, finance_client):
+        """Contract: 403 错误也应被分类为上游拒绝访问。"""
+        failure_type, message = finance_client._classify_provider_failure(
+            Exception("403 Client Error: Forbidden")
+        )
+        assert failure_type == "unauthorized"
+        assert "403" in message
+
     def test_classify_429_as_rate_limited(self, finance_client):
         """Contract: 429 错误应被分类为 rate_limited。"""
         failure_type, message = finance_client._classify_provider_failure(
@@ -1425,8 +1433,8 @@ class TestProviderFallbackContract:
         assert failure_type == "network_error"
 
     @pytest.mark.asyncio
-    async def test_primary_success_no_fallback(self, finance_client):
-        """Contract: 主源成功时不应尝试 fallback。"""
+    async def test_tencent_realtime_success_no_fallback(self, finance_client):
+        """Contract: 腾讯实时源成功时不应尝试后续 fallback。"""
         mock_rows = [
             {"symbol": "^DJI", "regularMarketPrice": 39000.0, "regularMarketChangePercent": 0.4, "regularMarketTime": 1710500000},
             {"symbol": "^GSPC", "regularMarketPrice": 5200.0, "regularMarketChangePercent": 0.6, "regularMarketTime": 1710500000},
@@ -1437,24 +1445,24 @@ class TestProviderFallbackContract:
             {"symbol": "NVDA", "regularMarketPrice": 900.0, "regularMarketChangePercent": 1.2, "regularMarketTime": 1710500000},
         ]
         with patch.object(
-            finance_client, "_fetch_yahoo_quotes_sync", return_value=mock_rows,
+            finance_client, "_fetch_tencent_global_quotes_sync", return_value=mock_rows,
         ):
             with patch.object(
-                finance_client, "_fetch_yahoo_chart_sync",
+                finance_client, "_fetch_sina_global_quotes_sync",
             ) as mock_fallback:
                 result = await finance_client.get_global_market_context(date(2026, 3, 27))
 
         assert result["status"] == "ok"
-        assert result["source"] == "yahoo_quote"
+        assert result["source"] == "tencent_realtime"
         assert result["degraded"] is False
         assert len(result["source_attempts"]) == 1
-        assert result["source_attempts"][0]["source"] == "yahoo_quote"
+        assert result["source_attempts"][0]["source"] == "tencent_realtime"
         assert result["source_attempts"][0]["failure_type"] == "none"
         mock_fallback.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_primary_401_triggers_fallback(self, finance_client):
-        """Contract: 主源 401 失败后应尝试 fallback。"""
+    async def test_sina_realtime_fallback_after_tencent_failure(self, finance_client):
+        """Contract: 腾讯实时源失败后应尝试新浪实时 fallback。"""
         mock_rows = [
             {"symbol": "^DJI", "regularMarketPrice": 39000.0, "regularMarketChangePercent": 0.4, "regularMarketTime": 1710500000},
             {"symbol": "^GSPC", "regularMarketPrice": 5200.0, "regularMarketChangePercent": 0.6, "regularMarketTime": 1710500000},
@@ -1465,21 +1473,21 @@ class TestProviderFallbackContract:
             {"symbol": "NVDA", "regularMarketPrice": 900.0, "regularMarketChangePercent": 1.2, "regularMarketTime": 1710500000},
         ]
         with patch.object(
-            finance_client, "_fetch_yahoo_quotes_sync",
+            finance_client, "_fetch_tencent_global_quotes_sync",
             side_effect=Exception("401 Client Error: Unauthorized"),
         ):
             with patch.object(
-                finance_client, "_fetch_yahoo_chart_sync", return_value=mock_rows,
+                finance_client, "_fetch_sina_global_quotes_sync", return_value=mock_rows,
             ):
                 result = await finance_client.get_global_market_context(date(2026, 3, 27))
 
         assert result["status"] == "ok"
-        assert result["source"] == "yahoo_chart"
+        assert result["source"] == "sina_realtime"
         assert result["degraded"] is True
         assert len(result["source_attempts"]) == 2
-        assert result["source_attempts"][0]["source"] == "yahoo_quote"
+        assert result["source_attempts"][0]["source"] == "tencent_realtime"
         assert result["source_attempts"][0]["failure_type"] == "unauthorized"
-        assert result["source_attempts"][1]["source"] == "yahoo_chart"
+        assert result["source_attempts"][1]["source"] == "sina_realtime"
         assert result["source_attempts"][1]["failure_type"] == "none"
 
     @pytest.mark.asyncio
@@ -1496,13 +1504,21 @@ class TestProviderFallbackContract:
             {"symbol": "NVDA", "regularMarketPrice": 211.5, "chartPreviousClose": 207.665, "regularMarketTime": 1778184002},
         ]
         with patch.object(
-            finance_client, "_fetch_yahoo_quotes_sync",
-            side_effect=Exception("401 Client Error: Unauthorized"),
+            finance_client, "_fetch_tencent_global_quotes_sync",
+            side_effect=Exception("Connection refused"),
         ):
             with patch.object(
-                finance_client, "_fetch_yahoo_chart_sync", return_value=mock_rows,
+                finance_client, "_fetch_sina_global_quotes_sync",
+                side_effect=Exception("Connection refused"),
             ):
-                result = await finance_client.get_global_market_context(date(2026, 5, 8))
+                with patch.object(
+                    finance_client, "_fetch_yahoo_quotes_sync",
+                    side_effect=Exception("401 Client Error: Unauthorized"),
+                ):
+                    with patch.object(
+                        finance_client, "_fetch_yahoo_chart_sync", return_value=mock_rows,
+                    ):
+                        result = await finance_client.get_global_market_context(date(2026, 5, 8))
 
         assert result["status"] == "ok"
         assert result["source"] == "yahoo_chart"
@@ -1520,24 +1536,90 @@ class TestProviderFallbackContract:
     async def test_all_providers_fail_returns_error_with_attempts(self, finance_client):
         """Contract: 所有 provider 均失败时返回 error 并附带完整尝试序列。"""
         with patch.object(
-            finance_client, "_fetch_yahoo_quotes_sync",
-            side_effect=Exception("401 Client Error: Unauthorized"),
+            finance_client, "_fetch_tencent_global_quotes_sync",
+            side_effect=Exception("Connection refused"),
         ):
             with patch.object(
-                finance_client, "_fetch_yahoo_chart_sync",
+                finance_client, "_fetch_sina_global_quotes_sync",
                 side_effect=Exception("Connection refused"),
             ):
-                result = await finance_client.get_global_market_context(date(2026, 3, 27))
+                with patch.object(
+                    finance_client, "_fetch_yahoo_quotes_sync",
+                    side_effect=Exception("401 Client Error: Unauthorized"),
+                ):
+                    with patch.object(
+                        finance_client, "_fetch_yahoo_chart_sync",
+                        side_effect=Exception("Connection refused"),
+                    ):
+                        with patch.object(
+                            finance_client, "_fetch_fred_daily_sync",
+                            side_effect=Exception("429 Too Many Requests"),
+                        ):
+                            result = await finance_client.get_global_market_context(date(2026, 3, 27))
 
         assert result["status"] == "error"
         assert result["degraded"] is False
-        assert len(result["source_attempts"]) == 2
-        assert result["source_attempts"][0]["failure_type"] == "unauthorized"
+        assert len(result["source_attempts"]) == 5
+        assert result["source_attempts"][0]["source"] == "tencent_realtime"
+        assert result["source_attempts"][0]["failure_type"] == "network_error"
+        assert result["source_attempts"][1]["source"] == "sina_realtime"
         assert result["source_attempts"][1]["failure_type"] == "network_error"
+        assert result["source_attempts"][2]["failure_type"] == "unauthorized"
+        assert result["source_attempts"][3]["failure_type"] == "network_error"
+        assert result["source_attempts"][4]["source"] == "fred_daily"
+        assert result["source_attempts"][4]["failure_type"] == "rate_limited"
 
     @pytest.mark.asyncio
-    async def test_empty_primary_triggers_fallback(self, finance_client):
-        """Contract: 主源返回空数据时也应触发 fallback。"""
+    async def test_fred_daily_fallback_after_realtime_and_yahoo_failures(self, finance_client):
+        """Contract: 实时源和 Yahoo 均失败时应尝试 FRED 日频 fallback。"""
+        fred_rows = [
+            {"symbol": "^DJI", "regularMarketPrice": 39000.0, "regularMarketPreviousClose": 38800.0, "regularMarketChangePercent": 0.515, "regularMarketTime": 1710500000},
+            {"symbol": "^GSPC", "regularMarketPrice": 5200.0, "regularMarketPreviousClose": 5175.0, "regularMarketChangePercent": 0.483, "regularMarketTime": 1710500000},
+            {"symbol": "^IXIC", "regularMarketPrice": 16500.0, "regularMarketPreviousClose": 16400.0, "regularMarketChangePercent": 0.61, "regularMarketTime": 1710500000},
+            {"symbol": "^VIX", "regularMarketPrice": 13.5, "regularMarketPreviousClose": 14.0, "regularMarketChangePercent": -3.57, "regularMarketTime": 1710500000},
+            {"symbol": "DX-Y.NYB", "regularMarketPrice": 104.1, "regularMarketPreviousClose": 104.0, "regularMarketChangePercent": 0.096, "regularMarketTime": 1710500000},
+            {"symbol": "^TNX", "regularMarketPrice": 4.2, "regularMarketPreviousClose": 4.18, "regularMarketChange": 0.2, "regularMarketChangePercent": 0.478, "regularMarketTime": 1710500000},
+        ]
+        with patch.object(
+            finance_client, "_fetch_tencent_global_quotes_sync",
+            side_effect=Exception("Connection refused"),
+        ):
+            with patch.object(
+                finance_client, "_fetch_sina_global_quotes_sync",
+                side_effect=Exception("Connection refused"),
+            ):
+                with patch.object(
+                    finance_client, "_fetch_yahoo_quotes_sync",
+                    side_effect=Exception("403 Client Error: Forbidden"),
+                ):
+                    with patch.object(
+                        finance_client, "_fetch_yahoo_chart_sync",
+                        side_effect=Exception("429 Too Many Requests"),
+                    ):
+                        with patch.object(
+                            finance_client, "_fetch_fred_daily_sync", return_value=fred_rows,
+                        ):
+                            result = await finance_client.get_global_market_context(date(2026, 3, 27))
+
+        assert result["status"] == "ok"
+        assert result["source"] == "fred_daily"
+        assert result["degraded"] is True
+        assert [attempt["source"] for attempt in result["source_attempts"]] == [
+            "tencent_realtime",
+            "sina_realtime",
+            "yahoo_quote",
+            "yahoo_chart",
+            "fred_daily",
+        ]
+        assert result["source_attempts"][2]["failure_type"] == "unauthorized"
+        assert result["source_attempts"][3]["failure_type"] == "rate_limited"
+        assert result["source_attempts"][4]["failure_type"] == "none"
+        indices = {item["symbol"]: item for item in result["us_market"]["indices"]}
+        assert set(indices) == {"DJIA", "SPX", "IXIC"}
+
+    @pytest.mark.asyncio
+    async def test_empty_realtime_sources_trigger_yahoo_fallback(self, finance_client):
+        """Contract: 实时源返回空数据时也应继续触发 Yahoo fallback。"""
         mock_rows = [
             {"symbol": "^DJI", "regularMarketPrice": 39000.0, "regularMarketChangePercent": 0.4, "regularMarketTime": 1710500000},
             {"symbol": "^GSPC", "regularMarketPrice": 5200.0, "regularMarketChangePercent": 0.6, "regularMarketTime": 1710500000},
@@ -1548,17 +1630,25 @@ class TestProviderFallbackContract:
             {"symbol": "NVDA", "regularMarketPrice": 900.0, "regularMarketChangePercent": 1.2, "regularMarketTime": 1710500000},
         ]
         with patch.object(
-            finance_client, "_fetch_yahoo_quotes_sync", return_value=[],
+            finance_client, "_fetch_tencent_global_quotes_sync", return_value=[],
         ):
             with patch.object(
-                finance_client, "_fetch_yahoo_chart_sync", return_value=mock_rows,
+                finance_client, "_fetch_sina_global_quotes_sync", return_value=[],
             ):
-                result = await finance_client.get_global_market_context(date(2026, 3, 27))
+                with patch.object(
+                    finance_client, "_fetch_yahoo_quotes_sync", return_value=[],
+                ):
+                    with patch.object(
+                        finance_client, "_fetch_yahoo_chart_sync", return_value=mock_rows,
+                    ):
+                        result = await finance_client.get_global_market_context(date(2026, 3, 27))
 
         assert result["status"] == "ok"
         assert result["source"] == "yahoo_chart"
         assert result["degraded"] is True
         assert result["source_attempts"][0]["failure_type"] == "empty"
+        assert result["source_attempts"][1]["failure_type"] == "empty"
+        assert result["source_attempts"][2]["failure_type"] == "empty"
 
     @pytest.mark.asyncio
     async def test_disabled_network_returns_error_with_empty_attempts(self, finance_client):

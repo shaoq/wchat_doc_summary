@@ -8,6 +8,7 @@
 import ast
 import asyncio
 import contextlib
+import csv
 import inspect
 import json
 import logging
@@ -359,6 +360,32 @@ class FinanceClient:
         "MSFT": "Microsoft",
         "AAPL": "Apple",
     }
+    FRED_DAILY_SERIES: dict[str, str] = {
+        "DJIA": "^DJI",
+        "SP500": "^GSPC",
+        "NASDAQCOM": "^IXIC",
+        "VIXCLS": "^VIX",
+        "DTWEXBGS": "DX-Y.NYB",
+        "DGS10": "^TNX",
+    }
+    TENCENT_GLOBAL_SYMBOLS: dict[str, str] = {
+        "usDJI": "^DJI",
+        "usINX": "^GSPC",
+        "usIXIC": "^IXIC",
+        "usSOX": "^SOX",
+        "usNVDA": "NVDA",
+        "usMSFT": "MSFT",
+        "usAAPL": "AAPL",
+    }
+    SINA_GLOBAL_SYMBOLS: dict[str, str] = {
+        "gb_dji": "^DJI",
+        "gb_inx": "^GSPC",
+        "gb_ixic": "^IXIC",
+        "gb_sox": "^SOX",
+        "gb_nvda": "NVDA",
+        "gb_msft": "MSFT",
+        "gb_aapl": "AAPL",
+    }
 
     def __init__(
         self,
@@ -407,6 +434,8 @@ class FinanceClient:
         error_str = str(error)
         if "401" in error_str:
             return ProviderFailureType.UNAUTHORIZED.value, "上游拒绝访问 (401 Unauthorized)"
+        if "403" in error_str:
+            return ProviderFailureType.UNAUTHORIZED.value, "上游拒绝访问 (403 Forbidden)"
         if "429" in error_str:
             return ProviderFailureType.RATE_LIMITED.value, "上游限流 (429 Too Many Requests)"
         if isinstance(error, (ConnectionError, requests.ConnectionError)):
@@ -626,11 +655,95 @@ class FinanceClient:
         finally:
             session.close()
 
+    def _parse_datetime_timestamp(self, value: str, tz: ZoneInfo) -> int | None:
+        try:
+            parsed = datetime.strptime(value.strip(), "%Y-%m-%d %H:%M:%S").replace(tzinfo=tz)
+            return int(parsed.timestamp())
+        except (TypeError, ValueError):
+            return None
+
+    def _fetch_tencent_global_quotes_sync(self) -> list[Mapping[str, Any]]:
+        """从腾讯行情接口获取当天海外核心指数和美股龙头实时数据。"""
+        session = self._requests_session(referer="https://stockapp.finance.qq.com/")
+        try:
+            response = session.get(
+                "https://web.sqt.gtimg.cn/q=" + ",".join(self.TENCENT_GLOBAL_SYMBOLS),
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            text = response.content.decode("gbk", errors="ignore")
+
+            rows: list[Mapping[str, Any]] = []
+            for match in re.finditer(r'v_(\w+)="([^"]*)"', text):
+                code = match.group(1)
+                symbol = self.TENCENT_GLOBAL_SYMBOLS.get(code)
+                if not symbol:
+                    continue
+                data = match.group(2).split("~")
+                if len(data) < 33 or data[0] != "200":
+                    continue
+                price = self._to_float(data[3])
+                previous_close = self._to_float(data[4])
+                change_pct = self._to_float(data[32])
+                timestamp = self._parse_datetime_timestamp(data[30], _NEW_YORK_TZ)
+                if price is None or change_pct is None:
+                    continue
+                rows.append({
+                    "symbol": symbol,
+                    "regularMarketPrice": price,
+                    "regularMarketPreviousClose": previous_close,
+                    "regularMarketChangePercent": change_pct,
+                    "regularMarketChange": self._to_float(data[31]),
+                    "regularMarketTime": timestamp,
+                })
+            return rows
+        finally:
+            session.close()
+
+    def _fetch_sina_global_quotes_sync(self) -> list[Mapping[str, Any]]:
+        """从新浪行情接口获取当天海外核心指数和美股龙头实时数据。"""
+        session = self._requests_session(referer="https://finance.sina.com.cn/")
+        try:
+            response = session.get(
+                "https://hq.sinajs.cn/list=" + ",".join(self.SINA_GLOBAL_SYMBOLS),
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            text = response.content.decode("gb18030", errors="ignore")
+
+            rows: list[Mapping[str, Any]] = []
+            for match in re.finditer(r'var hq_str_(\w+)="([^"]*)"', text):
+                code = match.group(1)
+                symbol = self.SINA_GLOBAL_SYMBOLS.get(code)
+                if not symbol:
+                    continue
+                data = match.group(2).split(",")
+                if len(data) < 5 or not data[1]:
+                    continue
+                price = self._to_float(data[1])
+                change_pct = self._to_float(data[2])
+                timestamp = self._parse_datetime_timestamp(data[3], _SHANGHAI_TZ)
+                previous_close = self._to_float(data[26]) if len(data) > 26 else None
+                if price is None or change_pct is None:
+                    continue
+                rows.append({
+                    "symbol": symbol,
+                    "regularMarketPrice": price,
+                    "regularMarketPreviousClose": previous_close,
+                    "regularMarketChangePercent": change_pct,
+                    "regularMarketChange": self._to_float(data[4]),
+                    "regularMarketTime": timestamp,
+                })
+            return rows
+        finally:
+            session.close()
+
     def _fetch_yahoo_chart_sync(self, symbols: list[str]) -> list[Mapping[str, Any]]:
         """使用 Yahoo chart API 获取行情数据（作为 v7 quote 的 fallback provider）。"""
         session = self._requests_session(referer="https://finance.yahoo.com/")
         try:
             results: list[Mapping[str, Any]] = []
+            errors: list[Exception] = []
             for symbol in symbols:
                 try:
                     response = session.get(
@@ -662,8 +775,62 @@ class FinanceClient:
                         "preMarketChangePercent": meta.get("preMarketChangePercent"),
                         "preMarketTime": meta.get("preMarketTime"),
                     })
-                except Exception:
+                except Exception as e:
+                    errors.append(e)
                     continue
+            if not results and errors:
+                raise errors[-1]
+            return results
+        finally:
+            session.close()
+
+    def _fetch_fred_daily_sync(self) -> list[Mapping[str, Any]]:
+        """使用 FRED 公开日频 CSV 作为 Yahoo 全链路失败后的 fallback。"""
+        session = self._requests_session()
+        try:
+            results: list[Mapping[str, Any]] = []
+            for series_id, symbol in self.FRED_DAILY_SERIES.items():
+                response = session.get(
+                    "https://fred.stlouisfed.org/graph/fredgraph.csv",
+                    params={"id": series_id},
+                    timeout=self.timeout,
+                )
+                response.raise_for_status()
+
+                values: list[tuple[date, float]] = []
+                for row in csv.DictReader(response.text.splitlines()):
+                    raw_date = row.get("observation_date")
+                    raw_value = row.get(series_id)
+                    if not raw_date or raw_value in (None, "", "."):
+                        continue
+                    try:
+                        values.append((date.fromisoformat(raw_date), float(raw_value)))
+                    except (TypeError, ValueError):
+                        continue
+
+                if len(values) < 2:
+                    continue
+
+                current_date, current_value = values[-1]
+                _, previous_value = values[-2]
+                if previous_value == 0:
+                    continue
+
+                change = current_value - previous_value
+                market_time = datetime.combine(
+                    current_date,
+                    time_type(16, 0),
+                    tzinfo=_NEW_YORK_TZ,
+                )
+                regular_market_change = change * 10 if symbol == "^TNX" else change
+                results.append({
+                    "symbol": symbol,
+                    "regularMarketPrice": current_value,
+                    "regularMarketPreviousClose": previous_value,
+                    "regularMarketChangePercent": change / previous_value * 100,
+                    "regularMarketChange": regular_market_change,
+                    "regularMarketTime": int(market_time.timestamp()),
+                })
             return results
         finally:
             session.close()
@@ -671,7 +838,7 @@ class FinanceClient:
     async def get_global_market_context(self, target_a_trade_date: date) -> dict[str, Any]:
         """获取与 A 股目标交易日关联的海外市场上下文。
 
-        使用有序 provider chain: yahoo_quote -> yahoo_chart，
+        使用有序 provider chain: tencent_realtime -> sina_realtime -> yahoo_quote -> yahoo_chart -> fred_daily，
         短路于首个可用结果，并记录 source_attempts 和 degraded 元数据。
         """
         if _DISABLE_NETWORK:
@@ -690,7 +857,74 @@ class FinanceClient:
 
         source_attempts: list[ProviderAttempt] = []
 
-        # Provider 1: Yahoo v7 quote (主源)
+        # Provider 1: Tencent realtime quote (primary, no API key)
+        try:
+            loop = asyncio.get_event_loop()
+            rows = await loop.run_in_executor(None, self._fetch_tencent_global_quotes_sync)
+            if rows:
+                result = self._normalize_global_quote_rows(rows, target_a_trade_date)
+                result["source"] = "tencent_realtime"
+                result["us_market"]["source"] = "tencent_realtime"
+                source_attempts.append(ProviderAttempt(
+                    source="tencent_realtime",
+                    status=result["status"],
+                    failure_type=ProviderFailureType.NONE.value,
+                    message="腾讯实时源获取成功",
+                ))
+                result["source_attempts"] = source_attempts
+                result["degraded"] = False
+                return result
+            source_attempts.append(ProviderAttempt(
+                source="tencent_realtime",
+                status="error",
+                failure_type=ProviderFailureType.EMPTY.value,
+                message="腾讯实时源返回空数据",
+            ))
+        except Exception as e:
+            failure_type, message = self._classify_provider_failure(e)
+            source_attempts.append(ProviderAttempt(
+                source="tencent_realtime",
+                status="error",
+                failure_type=failure_type,
+                message=message,
+            ))
+            logger.debug("海外市场腾讯实时源获取失败: %s", message)
+
+        # Provider 2: Sina realtime quote (fallback, no API key)
+        try:
+            loop = asyncio.get_event_loop()
+            rows = await loop.run_in_executor(None, self._fetch_sina_global_quotes_sync)
+            if rows:
+                result = self._normalize_global_quote_rows(rows, target_a_trade_date)
+                result["source"] = "sina_realtime"
+                result["us_market"]["source"] = "sina_realtime"
+                source_attempts.append(ProviderAttempt(
+                    source="sina_realtime",
+                    status=result["status"],
+                    failure_type=ProviderFailureType.NONE.value,
+                    message="新浪实时源获取成功",
+                ))
+                result["source_attempts"] = source_attempts
+                result["degraded"] = True
+                logger.info("海外市场上下文 fallback 成功 (sina_realtime)")
+                return result
+            source_attempts.append(ProviderAttempt(
+                source="sina_realtime",
+                status="error",
+                failure_type=ProviderFailureType.EMPTY.value,
+                message="新浪实时源返回空数据",
+            ))
+        except Exception as e:
+            failure_type, message = self._classify_provider_failure(e)
+            source_attempts.append(ProviderAttempt(
+                source="sina_realtime",
+                status="error",
+                failure_type=failure_type,
+                message=message,
+            ))
+            logger.debug("海外市场新浪实时源获取失败: %s", message)
+
+        # Provider 3: Yahoo v7 quote
         try:
             loop = asyncio.get_event_loop()
             rows = await loop.run_in_executor(None, lambda: self._fetch_yahoo_quotes_sync(symbols))
@@ -700,10 +934,11 @@ class FinanceClient:
                     source="yahoo_quote",
                     status=result["status"],
                     failure_type=ProviderFailureType.NONE.value,
-                    message="主源获取成功",
+                    message="Yahoo quote 获取成功",
                 ))
                 result["source_attempts"] = source_attempts
-                result["degraded"] = False
+                result["degraded"] = True
+                logger.info("海外市场上下文 fallback 成功 (yahoo_quote)")
                 return result
             source_attempts.append(ProviderAttempt(
                 source="yahoo_quote",
@@ -721,7 +956,7 @@ class FinanceClient:
             ))
             logger.debug("海外市场主源获取失败: %s", message)
 
-        # Provider 2: Yahoo v8 chart (fallback)
+        # Provider 4: Yahoo v8 chart (fallback)
         try:
             loop = asyncio.get_event_loop()
             rows = await loop.run_in_executor(None, lambda: self._fetch_yahoo_chart_sync(symbols))
@@ -754,6 +989,40 @@ class FinanceClient:
                 message=message,
             ))
             logger.debug("海外市场 fallback 获取失败: %s", message)
+
+        # Provider 5: FRED daily close data (low-frequency fallback)
+        try:
+            loop = asyncio.get_event_loop()
+            rows = await loop.run_in_executor(None, self._fetch_fred_daily_sync)
+            if rows:
+                result = self._normalize_global_quote_rows(rows, target_a_trade_date)
+                result["source"] = "fred_daily"
+                result["us_market"]["source"] = "fred_daily"
+                source_attempts.append(ProviderAttempt(
+                    source="fred_daily",
+                    status=result["status"],
+                    failure_type=ProviderFailureType.NONE.value,
+                    message="日频 fallback 获取成功",
+                ))
+                result["source_attempts"] = source_attempts
+                result["degraded"] = True
+                logger.info("海外市场上下文 fallback 成功 (fred_daily)")
+                return result
+            source_attempts.append(ProviderAttempt(
+                source="fred_daily",
+                status="error",
+                failure_type=ProviderFailureType.EMPTY.value,
+                message="海外市场日频 fallback 返回空数据",
+            ))
+        except Exception as e:
+            failure_type, message = self._classify_provider_failure(e)
+            source_attempts.append(ProviderAttempt(
+                source="fred_daily",
+                status="error",
+                failure_type=failure_type,
+                message=message,
+            ))
+            logger.debug("海外市场日频 fallback 获取失败: %s", message)
 
         # 所有 provider 均失败 — 输出一次聚合 warning
         failure_summary = ", ".join(

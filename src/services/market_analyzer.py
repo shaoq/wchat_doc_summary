@@ -217,7 +217,7 @@ class MarketAnalyzer:
     def _global_context_is_cache_miss(self, context: Any) -> bool:
         if not isinstance(context, dict):
             return True
-        return context.get("source") == "cache" and context.get("status") == "error"
+        return context.get("status") == "error"
 
     async def _attach_live_global_market_context(
         self,
