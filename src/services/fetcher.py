@@ -1695,6 +1695,8 @@ class FetcherService:
             logger.info("RSS 文章保存成功: %s", article.title[:30])
             return "inserted", article
 
+        except AuthExpiredError:
+            raise
         except Exception as e:
             logger.error("RSS 文章保存失败: %s - %s", title, e)
             return "failed", None

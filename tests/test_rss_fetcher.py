@@ -419,6 +419,28 @@ class TestAuthExpiredAbort:
     """AuthExpiredError 在 RSS 抓取中应中断处理。"""
 
     @pytest.mark.asyncio
+    async def test_save_layer_propagates_auth_expired(
+        self, fetcher: FetcherService, rss_service: RSSSourceService
+    ) -> None:
+        """归属解析遇到 Token 失效时，保存层不得转换为普通单篇失败。"""
+        source = await rss_service.add_source("auth-save", "https://example.com/feed")
+        attribution_service = MagicMock()
+        attribution_service.attribute = AsyncMock(
+            side_effect=AuthExpiredError(
+                "Token 失效", status_code=401, response_text="WeReadError401",
+            ),
+        )
+
+        with pytest.raises(AuthExpiredError):
+            await fetcher._fetch_and_save_rss_article(
+                source=source,
+                article_info=_make_rss_article().to_article_info(),
+                content_mode="feed_only",
+                rss_service=rss_service,
+                attribution_service=attribution_service,
+            )
+
+    @pytest.mark.asyncio
     async def test_source_loop_stops_on_auth_expired(
         self, fetcher: FetcherService, rss_service: RSSSourceService
     ) -> None:
