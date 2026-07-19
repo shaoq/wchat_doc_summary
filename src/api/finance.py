@@ -329,19 +329,14 @@ class FinanceClient:
 
     @classmethod
     def get_category_capabilities(cls) -> dict[str, dict[str, Any]]:
-        """返回按当前 provider 调整的分类能力。
+        """返回分类能力（深拷贝）。
 
-        tickflow/mixed 模式下 TickFlow 支持历史日K，indices/sectors 升 historical_safe。
-        注：实际历史回填依赖 daily_kline 历史数据，需先 `wchat ai market-data sync --days N` 预热。
+        indices/sectors 保持 historical_safe=False：backfill 命令仍用原 _get_xxx（不支持
+        历史日期），tickflow 历史回填留待 backfill 接入 TickFlow 后再升级，避免名实不符。
         """
         import copy
-        from config.settings import settings
 
-        caps = copy.deepcopy(cls.CATEGORY_CAPABILITIES)
-        if settings.market_data_provider in ("tickflow", "mixed"):
-            caps["indices"]["historical_safe"] = True
-            caps["sectors"]["historical_safe"] = True
-        return caps
+        return copy.deepcopy(cls.CATEGORY_CAPABILITIES)
 
     SOURCE_STRATEGIES: dict[str, tuple[str, ...]] = {
         "indices": ("tencent_realtime", "akshare_index_spot"),

@@ -51,8 +51,8 @@
 
 ## 8. 回填扩展
 
-- [x] 8.1 finance.get_category_capabilities() classmethod（tickflow/mixed 时 indices/sectors 升 historical_safe）+ backfill_service 改用
-- [x] 8.2 historical_safe 动态判定测试 → 4 passed（default off 原行为 + mixed/tickflow 升级）
+- [~] 8.1 回退：indices/sectors 保持 historical_safe=False（backfill 未接 TickFlow 历史回填，升级会名实不符；get_category_capabilities 仅深拷贝，接入 TickFlow 留后续）
+- [~] 8.2 回退（随 8.1）：get_category_capabilities 深拷贝单测 2 passed
 
 ## 9. 板块口径冷启动（BREAKING，Phase 3）
 

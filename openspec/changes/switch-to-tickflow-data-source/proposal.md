@@ -24,7 +24,6 @@
 ### Modified Capabilities
 
 - `market-data-source-strategy`: 涨跌统计主源 pytdx → TickFlow 盘后日K本地聚合；策略层重构为 Provider 实例 fallback 链。
-- `market-data-backfill`: `indices` / `sectors` 从 `historical_safe=False` 升级为 `True`（TickFlow 历史日K支持按日期回填）。
 - `sector-trend-tracking`: 板块口径迁移至**申万一级行业**，冷启动重建（不迁移历史）。
 - `sector-group-tracking`: `THEME_DEFINITIONS` 主题词表按申万行业命名重写。
 
