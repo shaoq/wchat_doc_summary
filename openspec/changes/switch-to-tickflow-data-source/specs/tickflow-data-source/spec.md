@@ -66,3 +66,19 @@ TickFlow-returned percentage values SHALL be normalized to the internal decimal 
 - **WHEN** TickFlow returns a change value in percent or fractional form
 - **THEN** the provider SHALL convert it to the internal decimal scale exactly once
 - **AND** a unit test SHALL assert the final dict value is not scaled again by `_normalize_pct`
+
+### Requirement: TickFlow SHALL auto-sync daily_kline before summary when stale
+
+In tickflow/mixed mode, `get_all_market_data` SHALL ensure `daily_kline` has the latest trade day's data before aggregating; if stale or empty, it SHALL auto-trigger an incremental sync (latest day) so that pure-TickFlow `market-summary` does not analyze against missing/stale data.
+
+#### Scenario: daily_kline is fresh
+
+- **WHEN** `get_all_market_data` runs in tickflow/mixed mode
+- **AND** `daily_kline.latest_date` is on or after the latest trade day
+- **THEN** it SHALL skip the sync and aggregate directly
+
+#### Scenario: daily_kline is stale or empty
+
+- **WHEN** `daily_kline.latest_date` is before the latest trade day (or the table is empty)
+- **THEN** it SHALL auto-trigger `sync(count=1)` before aggregating
+- **AND** subsequent aggregation SHALL use the freshly-synced data

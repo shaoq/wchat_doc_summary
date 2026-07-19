@@ -68,3 +68,8 @@
 - [x] 10.3 mixed 模式 fallback（tickflow 核心不全落原逻辑）+ tickflow 模式失败返回空
 - [x] 10.4 测试套件：新增 30+ 单测全绿；5 个 test_sector_groups 失败经 main 确认为预先存在（与本变更无关）
 - [x] 10.5 README 配置表加 MARKET_DATA_PROVIDER / TICKFLOW_API_KEY 说明
+
+## 11. 自动 sync 增强（用户需求：纯 TickFlow + summary 自动取数，避免分析错误）
+
+- [x] 11.1 finance.py _ensure_daily_kline_fresh（latest vs get_effective_fetch_trade_date，落后自动 sync）
+- [x] 11.2 单测 → 3 passed（fresh skip / stale sync / empty sync）

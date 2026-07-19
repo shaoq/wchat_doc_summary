@@ -2184,6 +2184,8 @@ class FinanceClient:
         from src.storage.database import get_db
 
         db = await get_db()
+        # 确保 daily_kline 有最新交易日（落后/空则自动 sync，避免分析错误）
+        await self._ensure_daily_kline_fresh(db)
         provider = TickFlowProvider(db)
         try:
             indices, volume, statistics, sectors, limit_up = await asyncio.gather(
@@ -2244,6 +2246,29 @@ class FinanceClient:
                 "status": "ok" if limit_up else "empty",
             },
         }
+
+    async def _ensure_daily_kline_fresh(self, db: Any) -> None:
+        """tickflow/mixed 模式：确保 daily_kline 有最新交易日数据，否则自动 sync。
+
+        纯 TickFlow 模式无 fallback，daily_kline 落后会导致 market-summary 分析错误，
+        故在此自动补拉（增量最新一天，~1 分钟）。daily_kline 已是最新交易日则跳过。
+        """
+        from src.services.market_data_sync_service import MarketDataSyncService
+        from src.services.trade_calendar import get_effective_fetch_trade_date
+        from src.storage.daily_kline_repository import DailyKlineRepository
+
+        repo = DailyKlineRepository(db)
+        latest = await repo.latest_date()
+        target = get_effective_fetch_trade_date()
+        if latest is not None and latest >= target:
+            return  # 已是最新交易日，无需 sync
+        logger.info(
+            "daily_kline 落后 (latest=%s, target=%s)，自动 sync 全市场日K",
+            latest,
+            target,
+        )
+        sync = MarketDataSyncService(db)
+        await sync.sync(count=1)
 
     @staticmethod
     def _tf_indices_to_dict(indices) -> dict[str, Any]:
