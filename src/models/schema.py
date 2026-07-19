@@ -643,6 +643,36 @@ class DailyKline(Base):
         return f"<DailyKline(symbol='{self.symbol}', trade_date='{self.trade_date}')>"
 
 
+class IndustryMember(Base):
+    """申万行业成分股映射缓存（SW1 universe 成分，sectors 聚合用）。
+
+    盘后/按需从 TickFlow universes.get 拉取后落库，后续聚合直接读 DB，
+    避免每次 sectors 调用都拉 ~28 个 universe。
+    """
+
+    __tablename__ = "industry_members"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    industry_code: Mapped[str] = mapped_column(
+        String(32), nullable=False, index=True, comment="行业代码(SW1_xxx)"
+    )
+    industry_name: Mapped[str] = mapped_column(String(64), nullable=False, comment="行业名称")
+    symbol: Mapped[str] = mapped_column(
+        String(16), nullable=False, index=True, comment="成分股代码"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now(), comment="更新时间"
+    )
+
+    __table_args__ = (
+        UniqueConstraint("industry_code", "symbol", name="uq_industry_member"),
+        {},
+    )
+
+    def __repr__(self) -> str:
+        return f"<IndustryMember({self.industry_code}/{self.symbol})>"
+
+
 class TrackedSector(Base):
     """板块跟踪档案模型 - 记录候选/跟踪板块的长期状态。"""
 

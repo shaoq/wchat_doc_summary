@@ -175,9 +175,9 @@ class Settings(BaseSettings):
     )
 
     # 市场数据源配置（TickFlow 切换）
-    market_data_provider: Literal["mixed", "tickflow"] = Field(
-        default="mixed",
-        description="市场数据源: mixed(TickFlow主+原源fallback) / tickflow(TickFlow)",
+    market_data_provider: Literal["off", "mixed", "tickflow"] = Field(
+        default="off",
+        description="市场数据源: off(原源,默认) / mixed(TickFlow主+原源fallback) / tickflow(TickFlow)",
     )
     tickflow_api_key: str | None = Field(
         default=None,

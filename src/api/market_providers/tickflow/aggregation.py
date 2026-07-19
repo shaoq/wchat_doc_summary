@@ -118,35 +118,104 @@ class LocalAggregator:
         return SectorResult(top_sectors=top, bottom_sectors=bottom)
 
     async def _get_industry_map(self) -> dict[str, dict[str, Any]]:
-        """SW1 行业成分映射（实例缓存，进程内不变）。"""
+        """SW1 行业成分映射：实例缓存 → DB 持久缓存 → 在线拉取并落库。"""
         if self._industry_map is not None:
             return self._industry_map
-        self._industry_map = await asyncio.to_thread(self._fetch_industry_map)
-        return self._industry_map
+
+        # 1. 读 DB 持久缓存
+        cached = await self._load_industry_map_db()
+        if cached:
+            self._industry_map = cached
+            return cached
+
+        # 2. miss：在线拉取（带整体超时兜底），成功后落库
+        try:
+            mapping = await asyncio.wait_for(
+                asyncio.to_thread(self._fetch_industry_map), timeout=90
+            )
+        except asyncio.TimeoutError:
+            logger.warning("拉取 SW1 行业成分超时(90s)，sectors 本轮可能不可用")
+            mapping = {}
+        if mapping:
+            await self._save_industry_map_db(mapping)
+        self._industry_map = mapping
+        return mapping
+
+    async def _load_industry_map_db(self) -> dict[str, dict[str, Any]] | None:
+        """从 industry_members 表读缓存映射。"""
+        from sqlalchemy import select
+
+        from src.models.schema import IndustryMember
+
+        try:
+            async with self.db.get_session() as session:
+                result = await session.execute(select(IndustryMember))
+                rows = result.scalars().all()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("读 industry_members 失败: %s", e)
+            return None
+        if not rows:
+            return None
+        mapping: dict[str, dict[str, Any]] = {}
+        for r in rows:
+            mapping.setdefault(r.industry_code, {"name": r.industry_name, "symbols": []})[
+                "symbols"
+            ].append(r.symbol)
+        return mapping
+
+    async def _save_industry_map_db(self, mapping: dict[str, dict[str, Any]]) -> None:
+        """全量替换写入 industry_members（日更语义）。"""
+        from sqlalchemy import delete
+
+        from src.models.schema import IndustryMember
+
+        try:
+            async with self.db.get_session() as session:
+                await session.execute(delete(IndustryMember))
+                objs = [
+                    IndustryMember(
+                        industry_code=uid, industry_name=info["name"], symbol=sym
+                    )
+                    for uid, info in mapping.items()
+                    for sym in info["symbols"]
+                ]
+                session.add_all(objs)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("写 industry_members 失败: %s", e)
 
     @staticmethod
     def _fetch_industry_map() -> dict[str, dict[str, Any]]:
-        """从 TickFlow free 拉 SW1 行业成分（同步）。返回 {uid: {name, symbols}}。"""
+        """从 TickFlow free 拉 SW1 行业成分（universes.batch 单请求，避免限流）。"""
         tf = get_client()
         try:
             unis = tf.universes.list()
         except Exception as e:  # noqa: BLE001
             logger.warning("universes.list failed: %s", e)
             return {}
+
+        sw1 = [
+            (u.get("id", ""), u.get("name", ""))
+            if isinstance(u, dict)
+            else (getattr(u, "id", ""), getattr(u, "name", ""))
+            for u in unis or []
+        ]
+        sw1 = [(uid, name) for uid, name in sw1 if uid.startswith("CN_Equity_SW1")]
+        if not sw1:
+            return {}
+
+        uids = [uid for uid, _ in sw1]
+        name_map = {uid: name for uid, name in sw1}
+
+        try:
+            detail = tf.universes.batch(uids)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("universes.batch(%d SW1) failed: %s", len(uids), e)
+            return {}
+
         mapping: dict[str, dict[str, Any]] = {}
-        for u in unis or []:
-            item = (
-                u
-                if isinstance(u, dict)
-                else {"id": getattr(u, "id", ""), "name": getattr(u, "name", "")}
-            )
-            uid = item.get("id", "")
-            if not uid.startswith("CN_Equity_SW1"):
-                continue
-            try:
-                detail = tf.universes.get(uid)
-                syms = detail.get("symbols", []) if isinstance(detail, dict) else []
-                mapping[uid] = {"name": item.get("name", ""), "symbols": list(syms)}
-            except Exception as e:  # noqa: BLE001
-                logger.warning("universes.get(%s) failed: %s", uid, e)
+        for uid in uids:
+            entry = detail.get(uid) if isinstance(detail, dict) else None
+            syms = entry.get("symbols", []) if isinstance(entry, dict) else []
+            if syms:
+                mapping[uid] = {"name": name_map.get(uid, ""), "symbols": list(syms)}
         return mapping

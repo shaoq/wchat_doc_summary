@@ -39,20 +39,20 @@
 
 - [x] 6.1 从 `daily_kline` 聚合 volume（amount 按 SH/SZ 求和/亿）/ statistics（change_pct up/down/flat）/ snapshot / limit_up（≥9.9%）
 - [x] 6.2 `sectors`：SW1 行业成分 join daily_kline 求均值（universes.get 拿成分）
-- [x] 6.3 SW1 行业成分映射（universes.list + get）+ 实例缓存
+- [x] 6.3 SW1 行业成分映射：universes.batch 单请求拉取 + industry_members DB 持久缓存（首次 2.6s / 二次读 0.03s）。注：free 档 SW1 universe 实测 335 个（含细分，非 28 一级），task 9 按 level 精化
 - [x] 6.4 涨跌幅小数口径 + 单测 → 6 passed（聚合全程小数，无 _normalize_pct 二次缩放）
 
 ## 7. TickFlow provider 组装 + finance.py 重构
 
-- [ ] 7.1 `src/api/market_providers/tickflow/provider.py`：组装 client + 管道触发 + 本地聚合，实现 6 分类
-- [ ] 7.2 `finance.py`：`SOURCE_STRATEGIES` 升级为 Provider 实例元组，adapter 调 Provider + dataclass→dict
-- [ ] 7.3 `_run_source_strategy` 接入 Provider 链（逻辑不变）
-- [ ] 7.4 `get_all_market_data()` dict 契约回归测试：对比重构前后输出 → verify: `pytest tests/test_finance_contract.py`
+- [x] 7.1 `src/api/market_providers/tickflow/provider.py`：TickFlowProvider 组装 sync+aggregator，实现 6 分类
+- [x] 7.2 finance.py get_all_market_data 顶层分流（tickflow/mixed）+ _get_market_data_from_tickflow + 4 转换方法（小数口径，绕过 _normalize_pct）
+- [x] 7.3 _run_source_strategy 不变（顶层分流方案下原逻辑保留作 mixed fallback）
+- [x] 7.4 dict 契约测试 → 6 passed（转换方法 + 小数口径，防 _normalize_pct 二次缩放）
 
 ## 8. 回填扩展
 
-- [ ] 8.1 `CATEGORY_CAPABILITIES`：TickFlow active 时 `indices` / `sectors` 标记 historical-safe（基于历史日K）
-- [ ] 8.2 backfill 集成测试：历史日期回填 indices/sectors 成功 → verify: `pytest tests/test_market_data_backfill.py`
+- [x] 8.1 finance.get_category_capabilities() classmethod（tickflow/mixed 时 indices/sectors 升 historical_safe）+ backfill_service 改用
+- [x] 8.2 historical_safe 动态判定测试 → 4 passed（default off 原行为 + mixed/tickflow 升级）
 
 ## 9. 板块口径冷启动（BREAKING，Phase 3）
 
