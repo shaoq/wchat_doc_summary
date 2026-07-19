@@ -1,6 +1,6 @@
 ## MODIFIED Requirements
 
-### Requirement: Rise-fall statistics use a post-close daily-K aggregation strategy
+### Requirement: Rise-fall statistics use a pytdx A-share quote strategy
 
 The system SHALL compute rise-fall statistics by aggregating the local `daily_kline` table (populated by the TickFlow post-close pipeline) before attempting any legacy fallback strategy.
 
