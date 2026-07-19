@@ -2267,15 +2267,21 @@ class FinanceClient:
 
     @staticmethod
     def _tf_indices_to_dict(indices) -> dict[str, Any]:
-        """{sh/sz/cy: IndexQuote} → 扁平 {sh_index_*, sz_index_*, cy_index_*}。"""
+        """{sh/sz/cy: IndexQuote} → {sh: {name, close, change}, ...}。
+
+        契约对齐 ai_processor._format_indices_for_prompt 与 market_data_cache_service
+        （均期望嵌套 {key: {name, close, change}}）。
+        """
         if not indices:
             return {}
-        result: dict[str, Any] = {}
-        for key, q in indices.items():
-            result[f"{key}_index_name"] = q.name
-            result[f"{key}_index_price"] = q.price
-            result[f"{key}_index_change"] = q.change
-        return result
+        return {
+            key: {
+                "name": q.name,
+                "close": q.price if q.price is not None else 0,
+                "change": q.change if q.change is not None else 0,
+            }
+            for key, q in indices.items()
+        }
 
     @staticmethod
     def _tf_sectors_to_dict(sectors) -> dict[str, list]:

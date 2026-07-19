@@ -9,14 +9,12 @@ from src.api.market_providers.base import (
 )
 
 
-def test_tf_indices_to_dict_flattens_and_keeps_decimal():
-    """{sh: IndexQuote} → 扁平 {sh_index_*}，change 保持小数。"""
+def test_tf_indices_to_dict_nested_and_keeps_decimal():
+    """{sh: IndexQuote} → {sh: {name, close, change}}，change 保持小数。"""
     d = FinanceClient._tf_indices_to_dict(
         {"sh": IndexQuote("上证指数", 3764.15, -0.0305)}
     )
-    assert d["sh_index_name"] == "上证指数"
-    assert d["sh_index_price"] == 3764.15
-    assert d["sh_index_change"] == -0.0305  # 小数口径，未被 _normalize_pct 缩放
+    assert d["sh"] == {"name": "上证指数", "close": 3764.15, "change": -0.0305}
 
 
 def test_tf_indices_to_dict_empty():
