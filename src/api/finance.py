@@ -327,6 +327,17 @@ class FinanceClient:
         "snapshot": {"historical_safe": False, "description": "全市场股票快照（仅实时）"},
     }
 
+    @classmethod
+    def get_category_capabilities(cls) -> dict[str, dict[str, Any]]:
+        """返回分类能力（深拷贝）。
+
+        indices/sectors 保持 historical_safe=False：backfill 命令仍用原 _get_xxx（不支持
+        历史日期），tickflow 历史回填留待 backfill 接入 TickFlow 后再升级，避免名实不符。
+        """
+        import copy
+
+        return copy.deepcopy(cls.CATEGORY_CAPABILITIES)
+
     SOURCE_STRATEGIES: dict[str, tuple[str, ...]] = {
         "indices": ("tencent_realtime", "akshare_index_spot"),
         "volume": (_OFFICIAL_TURNOVER_SOURCE, _AKSHARE_BREADTH_SOURCE),
@@ -2092,6 +2103,29 @@ class FinanceClient:
                 },
             }
 
+        # TickFlow 数据源分流（task 7.2）：tickflow/mixed 时优先走 TickFlowProvider
+        from config.settings import settings as _settings
+
+        if _settings.market_data_provider in ("tickflow", "mixed"):
+            tf_data = await self._get_market_data_from_tickflow(trade_date)
+            if tf_data is not None:
+                return tf_data
+            if _settings.market_data_provider == "tickflow":
+                logger.warning("TickFlow 模式取数失败，返回空数据")
+                return {
+                    "indices": {},
+                    "volume": {"sh_volume": 0, "sz_volume": 0, "total_volume": 0},
+                    "statistics": {"up_count": 0, "down_count": 0, "flat_count": 0},
+                    "sectors": {"top_sectors": [], "bottom_sectors": []},
+                    "limit_up": [],
+                    "fetch_time": datetime.now().isoformat(),
+                    "breadth_quality": {
+                        "volume": {"status": "error", "source": "tickflow"},
+                        "statistics": {"status": "error", "source": "tickflow"},
+                    },
+                }
+            # mixed: TickFlow 不全，落到下方原逻辑
+
         logger.info("开始获取市场数据...")
 
         if isinstance(trade_date, datetime):
@@ -2133,3 +2167,145 @@ class FinanceClient:
 
         logger.info("市场数据获取完成")
         return market_data
+
+    async def _get_market_data_from_tickflow(
+        self, trade_date: Optional[date | datetime] = None
+    ) -> Optional[dict[str, Any]]:
+        """从 TickFlowProvider 组装 market_data dict（小数口径，绕过 _normalize_pct）。
+
+        核心（volume/statistics）不可用时返回 None，供 mixed 模式 fallback 原逻辑。
+        """
+        from src.api.market_providers.tickflow.provider import TickFlowProvider
+        from src.storage.database import get_db
+
+        db = await get_db()
+        # 确保 daily_kline 有最新交易日（落后/空则自动 sync，避免分析错误）
+        await self._ensure_daily_kline_fresh(db)
+        provider = TickFlowProvider(db)
+        try:
+            indices, volume, statistics, sectors, limit_up = await asyncio.gather(
+                provider.get_indices(trade_date),
+                provider.get_volume(trade_date),
+                provider.get_statistics(trade_date),
+                provider.get_sectors(trade_date),
+                provider.get_limit_up(trade_date),
+                return_exceptions=True,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("TickFlow 取数异常: %s", e)
+            return None
+
+        # 异常转 None
+        indices = None if isinstance(indices, Exception) else indices
+        volume = None if isinstance(volume, Exception) else volume
+        statistics = None if isinstance(statistics, Exception) else statistics
+        sectors = None if isinstance(sectors, Exception) else sectors
+        limit_up = None if isinstance(limit_up, Exception) else limit_up
+
+        # 核心（volume/statistics）必须可用，否则 fallback
+        if volume is None or statistics is None:
+            logger.info("TickFlow 核心数据不全，fallback 原源")
+            return None
+
+        return {
+            "indices": self._tf_indices_to_dict(indices),
+            "volume": {
+                "sh_volume": volume.sh_volume or 0,
+                "sz_volume": volume.sz_volume or 0,
+                "total_volume": volume.total_volume or 0,
+            },
+            "statistics": {
+                "up_count": statistics.up_count,
+                "down_count": statistics.down_count,
+                "flat_count": statistics.flat_count,
+            },
+            "sectors": self._tf_sectors_to_dict(sectors),
+            "limit_up": self._tf_limit_up_to_list(limit_up),
+            "fetch_time": datetime.now().isoformat(),
+            "breadth_quality": {
+                "volume": {
+                    "status": "ok",
+                    "source": "tickflow",
+                    "actual_count": 1,
+                    "expected_count": 1,
+                },
+                "statistics": {
+                    "status": "ok",
+                    "source": "tickflow",
+                    "actual_count": 1,
+                    "expected_count": 1,
+                },
+            },
+            "limit_up_quality": {
+                "source_type": "tickflow",
+                "status": "ok" if limit_up else "empty",
+            },
+        }
+
+    async def _ensure_daily_kline_fresh(self, db: Any) -> None:
+        """tickflow/mixed 模式：确保 daily_kline 有最新交易日数据，否则自动 sync。
+
+        纯 TickFlow 模式无 fallback，daily_kline 落后会导致 market-summary 分析错误，
+        故在此自动补拉（增量最新一天，~1 分钟）。daily_kline 已是最新交易日则跳过。
+        """
+        from src.services.market_data_sync_service import MarketDataSyncService
+        from src.services.trade_calendar import get_effective_fetch_trade_date
+        from src.storage.daily_kline_repository import DailyKlineRepository
+
+        repo = DailyKlineRepository(db)
+        latest = await repo.latest_date()
+        target = get_effective_fetch_trade_date()
+        if latest is not None and latest >= target:
+            return  # 已是最新交易日，无需 sync
+        logger.info(
+            "daily_kline 落后 (latest=%s, target=%s)，自动 sync 全市场日K",
+            latest,
+            target,
+        )
+        sync = MarketDataSyncService(db)
+        await sync.sync(count=1)
+
+    @staticmethod
+    def _tf_indices_to_dict(indices) -> dict[str, Any]:
+        """{sh/sz/cy: IndexQuote} → {sh: {name, close, change}, ...}。
+
+        契约对齐 ai_processor._format_indices_for_prompt 与 market_data_cache_service
+        （均期望嵌套 {key: {name, close, change}}）。
+        """
+        if not indices:
+            return {}
+        return {
+            key: {
+                "name": q.name,
+                "close": q.price if q.price is not None else 0,
+                "change": q.change if q.change is not None else 0,
+            }
+            for key, q in indices.items()
+        }
+
+    @staticmethod
+    def _tf_sectors_to_dict(sectors) -> dict[str, list]:
+        """SectorResult → {top_sectors, bottom_sectors}（change 小数）。"""
+        if not sectors:
+            return {"top_sectors": [], "bottom_sectors": []}
+
+        def to_rows(rows):
+            return [
+                {"name": r.sector_name, "code": r.sector_code, "change": r.change_pct}
+                for r in rows
+            ]
+
+        return {
+            "top_sectors": to_rows(sectors.top_sectors),
+            "bottom_sectors": to_rows(sectors.bottom_sectors),
+        }
+
+    @staticmethod
+    def _tf_limit_up_to_list(limit_up) -> list[dict[str, Any]]:
+        """[LimitUpRow] → [{name, code, change}]（change 小数）。"""
+        if not limit_up:
+            return []
+        return [
+            {"name": r.stock_name, "code": r.stock_code, "change": r.change_pct}
+            for r in limit_up
+        ]

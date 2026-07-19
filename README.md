@@ -89,6 +89,8 @@ LLM_MODEL=claude-3-5-haiku-latest
 | `FETCH_ARTICLE_INTERVAL` / `FETCH_ARTICLE_JITTER` | 文章内容抓取基础间隔与随机抖动 |
 | `FETCH_SUBSCRIPTION_DELAY` / `FETCH_SUBSCRIPTION_JITTER` | 批量抓取订阅间基础等待与随机抖动 |
 | `FETCH_RATE_LIMIT` / `FETCH_RATE_WINDOW` | 全局抓取限速与滑动窗口秒数 |
+| `MARKET_DATA_PROVIDER` | 市场数据源: `off`(akshare/pytdx,默认) / `mixed`(TickFlow 主+原源 fallback) / `tickflow`。启用 mixed/tickflow 前需 `wchat ai market-data sync` 预热 daily_kline |
+| `TICKFLOW_API_KEY` | TickFlow API Key（free 档留空，走 free-api 服务器） |
 
 说明：
 

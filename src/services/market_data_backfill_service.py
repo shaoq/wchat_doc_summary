@@ -69,7 +69,7 @@ class MarketDataBackfillService:
         Returns:
             BackfillResult 包含各分类结果
         """
-        capabilities = FinanceClient.CATEGORY_CAPABILITIES
+        capabilities = FinanceClient.get_category_capabilities()
         outcomes: list[CategoryOutcome] = []
 
         # 收集 historical-safe 分类

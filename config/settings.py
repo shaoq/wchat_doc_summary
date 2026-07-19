@@ -174,6 +174,20 @@ class Settings(BaseSettings):
         description="数据存储目录",
     )
 
+    # 市场数据源配置（TickFlow 切换）
+    market_data_provider: Literal["off", "mixed", "tickflow"] = Field(
+        default="tickflow",
+        description="市场数据源: tickflow(默认,纯TickFlow+market-summary自动sync) / mixed(TickFlow主+原源fallback) / off(纯原源)",
+    )
+    tickflow_api_key: str | None = Field(
+        default=None,
+        description="TickFlow API Key（free 档可留空，走 free-api 服务器）",
+    )
+    tickflow_base_url: str | None = Field(
+        default=None,
+        description="TickFlow 自定义端点（留空用默认 free-api）",
+    )
+
     def get_db_path(self) -> Path:
         """获取数据库文件路径。"""
         # 从 database_url 中提取路径
