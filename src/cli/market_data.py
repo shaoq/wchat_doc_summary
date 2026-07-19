@@ -95,3 +95,34 @@ def backfill(target_date: str) -> None:
             console.print(f"  [green]完成[/green] - 所有支持历史的分类已写入")
 
     run_async(_backfill())
+
+
+@market_data.command()
+@click.option(
+    "--days",
+    "days",
+    default=1,
+    type=int,
+    help="每只票日K根数（1=增量最新一天，N=回填历史）",
+)
+def sync(days: int) -> None:
+    """盘后批量拉全市场日K（TickFlow free）写入本地 daily_kline。
+
+    free 档无全市场实时快照，所有聚合指标（涨跌家数/成交额/行业涨幅）依赖本表。
+    盘后运行，增量（days=1）约 1 分钟。
+    """
+
+    async def _sync() -> None:
+        from src.services.market_data_sync_service import MarketDataSyncService
+
+        db = await get_db()
+        service = MarketDataSyncService(db)
+
+        console.print(f"[bold]盘后日K同步[/bold] (days={days})")
+        with console.status("[bold blue]拉取全市场日K中（增量约 1 分钟）...[/bold blue]"):
+            result = await service.sync(count=days)
+        console.print(
+            f"[green]完成[/green]: {result['symbols']} 标的, {result['rows']} 行"
+        )
+
+    run_async(_sync())

@@ -605,6 +605,44 @@ class GlobalMarketContext(Base):
         return f"<GlobalMarketContext(target_a_trade_date='{self.target_a_trade_date}', status='{self.status}')>"
 
 
+class DailyKline(Base):
+    """全市场日K线缓存模型（TickFlow 盘后管道原料，供本地聚合）。
+
+    存全市场 A 股日K，按 (symbol, trade_date) 唯一。盘后管道批量写入，
+    各聚合指标（涨跌家数/成交额/行业涨幅/涨停池/快照）从本表本地算。
+    """
+
+    __tablename__ = "daily_kline"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(
+        String(16), nullable=False, index=True, comment="股票代码"
+    )
+    trade_date: Mapped[datetime] = mapped_column(
+        Date, nullable=False, index=True, comment="交易日期"
+    )
+    open: Mapped[Optional[float]] = mapped_column(Float, nullable=True, comment="开盘价")
+    high: Mapped[Optional[float]] = mapped_column(Float, nullable=True, comment="最高价")
+    low: Mapped[Optional[float]] = mapped_column(Float, nullable=True, comment="最低价")
+    close: Mapped[Optional[float]] = mapped_column(Float, nullable=True, comment="收盘价")
+    volume: Mapped[Optional[float]] = mapped_column(Float, nullable=True, comment="成交量")
+    amount: Mapped[Optional[float]] = mapped_column(Float, nullable=True, comment="成交额")
+    change_pct: Mapped[Optional[float]] = mapped_column(
+        Float, nullable=True, comment="涨跌幅(小数口径)"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), comment="创建时间"
+    )
+
+    __table_args__ = (
+        UniqueConstraint("symbol", "trade_date", name="uq_daily_kline_symbol_date"),
+        {},
+    )
+
+    def __repr__(self) -> str:
+        return f"<DailyKline(symbol='{self.symbol}', trade_date='{self.trade_date}')>"
+
+
 class TrackedSector(Base):
     """板块跟踪档案模型 - 记录候选/跟踪板块的长期状态。"""
 

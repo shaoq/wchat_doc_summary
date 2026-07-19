@@ -16,6 +16,7 @@ anthropic>=0.18.0
 chinese-calendar>=4.0.0
 akshare>=1.12.0
 pytdx>=1.72
+tickflow>=0.1.23,<0.2
 
 # Dev dependencies
 pytest>=7.0.0
