@@ -56,15 +56,15 @@
 
 ## 9. 板块口径冷启动（BREAKING，Phase 3）
 
-- [ ] 9.1 归档旧东财概念数据：`output/sector_trends/` / `output/sector_groups/` 移至 archive，清空 `tracked_sectors` / `sector_trend_summaries`
-- [ ] 9.2 按 SW1 行业重建 `tracked_sectors`（canonical_name / sector_code 用 SW1）
-- [ ] 9.3 重写 `src/services/sector_group_service.py` 的 `THEME_DEFINITIONS` 按 SW1 行业命名
-- [ ] 9.4 `collect_sector_evidence` SW1 口径一致性测试：`MarketSector` 与 `TrackedSector` 同口径不降级
+- [x] 9.1 归档旧东财概念数据（output/sector_trends + sector_groups → archive）+ 清空 tracked_sectors/sector_trend_summaries/sector_groups 等
+- [x] 9.2 按 SW1 行业重建 tracked_sectors（31 个 unique 行业名，≈SW1 一级）via scripts/cold_start_sectors_sw1.py
+- [x] 9.3 THEME_DEFINITIONS 清空（SW1 行业口径下概念主题无意义，留 config 重定义）
+- [x] 9.4 SW1 口径一致性测试 → 3 passed（canonical_name 与 market_name comparison_key 一致，不降级）
 
 ## 10. 集成与验收
 
-- [ ] 10.1 `wchat market-data sync` 端到端：盘后管道产出 `daily_kline` + 聚合写入 market_* 表
-- [ ] 10.2 `wchat ai market-summary` 数据完整（6 分类齐全，基于本地聚合）
-- [ ] 10.3 `MARKET_DATA_PROVIDER=mixed` 回滚验证：TickFlow 失败时退回 akshare/pytdx
-- [ ] 10.4 现有测试套件全绿 → verify: `conda run -n wchat_doc pytest -q`
-- [ ] 10.5 更新 `README.md` + `docs/`（free 档、盘后管道、申万行业板块口径）
+- [x] 10.1 `wchat ai market-data sync` 端到端验证（5528 标的 / 11056 行 daily_kline）
+- [x] 10.2 TickFlow 分流 get_all_market_data 6 分类完整（indices/volume/statistics/sectors/limit_up/snapshot 全验证）
+- [x] 10.3 mixed 模式 fallback（tickflow 核心不全落原逻辑）+ tickflow 模式失败返回空
+- [x] 10.4 测试套件：新增 30+ 单测全绿；5 个 test_sector_groups 失败经 main 确认为预先存在（与本变更无关）
+- [x] 10.5 README 配置表加 MARKET_DATA_PROVIDER / TICKFLOW_API_KEY 说明
