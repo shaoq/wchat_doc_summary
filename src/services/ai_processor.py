@@ -84,6 +84,13 @@ MARKET_SUMMARY_TEMPLATE_PATH = Path("templates/market_summary.md")
 MARKET_SUMMARY_MAX_TOKENS = 2200
 MARKET_STRATEGY_ENHANCEMENT_MAX_TOKENS = 1200
 
+# 推理模型（如 glm-5.3）的思考过程计入 max_tokens，
+# 额外预留预算避免思考挤占正文（按实际用量计费，调大上限不增加成本）。
+# 上限受 Anthropic SDK 非流式请求约束：expected_time = 3600*max_tokens/128000
+# 不得超过 600 秒，即 max_tokens <= 21333。最大单任务 2500，
+# 取 18800 使总上限（21300）贴近该天花板；再往上需改用流式请求
+THINKING_TOKEN_HEADROOM = 18800
+
 # 板块趋势模板路径
 SECTOR_TREND_TEMPLATE_PATH = Path("templates/sector_trend_summary.md")
 SECTOR_TREND_MAX_TOKENS = 2500
@@ -606,12 +613,31 @@ class AIProcessor:
                 try:
                     response = await self.client.messages.create(
                         model=self.model,
-                        max_tokens=max_tokens,
+                        # 推理模型的思考过程计入 max_tokens，为正文预留思考预算
+                        max_tokens=max_tokens + THINKING_TOKEN_HEADROOM,
                         messages=[{"role": "user", "content": current_prompt}],
                     )
 
-                    content = response.content[0]
-                    return content.text if hasattr(content, "text") else str(content)
+                    # 推理模型（如 glm-5.3）会在正文前返回 thinking 块，
+                    # 跳过思考块，只拼接正文文本块
+                    text_parts = [
+                        block.text
+                        for block in response.content
+                        if hasattr(block, "text")
+                    ]
+                    if not text_parts:
+                        raise RuntimeError(
+                            "LLM 响应中没有文本块（可能思考过程耗尽了 "
+                            f"max_tokens），stop_reason="
+                            f"{getattr(response, 'stop_reason', 'unknown')}"
+                        )
+                    if getattr(response, "stop_reason", None) == "max_tokens":
+                        # 截断的正文仍按尽力而为返回，但必须留下可诊断的警告
+                        logger.warning(
+                            "LLM 响应疑似被截断（stop_reason=max_tokens）%s",
+                            stage_label,
+                        )
+                    return "".join(text_parts)
 
                 except Exception as e:
                     is_safety = self._is_content_safety_error(e)

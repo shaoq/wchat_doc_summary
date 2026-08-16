@@ -1,11 +1,12 @@
 """AI 内容安全重试与策略增强降级测试。"""
 
 import re
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.services.ai_processor import AIProcessor
+from src.services.ai_processor import AIProcessor, THINKING_TOKEN_HEADROOM
 
 
 def _make_processor() -> AIProcessor:
@@ -363,6 +364,93 @@ class TestStrategyEnhancementFallback:
 
         assert "### 6.1 主线与板块策略" in result
         assert "继续关注热点和龙头表现" not in result
+
+
+class TestThinkingBlockParsing:
+    """测试推理模型（如 glm-5.3）返回 thinking 块时的响应解析。"""
+
+    @pytest.mark.asyncio
+    async def test_call_api_skips_thinking_blocks(self) -> None:
+        """响应含 thinking+text 块时，应只返回 text 块内容。"""
+        processor = _make_processor()
+        processor._request_interval = 0
+
+        mock_response = MagicMock()
+        mock_response.content = [
+            SimpleNamespace(type="thinking", thinking="Let me analyze...", signature="sig"),
+            SimpleNamespace(type="text", text="你好"),
+        ]
+
+        with patch.object(
+            processor.client.messages, "create", new_callable=AsyncMock
+        ) as mock_create:
+            mock_create.return_value = mock_response
+            result = await processor._call_api("test prompt", max_tokens=100)
+
+        assert result == "你好"
+        assert "Let me analyze" not in result
+
+    @pytest.mark.asyncio
+    async def test_call_api_raises_when_no_text_blocks(self) -> None:
+        """思考耗尽 max_tokens 导致没有文本块时，应报错而非返回思考内容。"""
+        processor = _make_processor()
+        processor._request_interval = 0
+        processor.settings.max_retries = 0
+
+        mock_response = MagicMock()
+        mock_response.stop_reason = "max_tokens"
+        mock_response.content = [
+            SimpleNamespace(type="thinking", thinking="思考被截断...", signature="sig"),
+        ]
+
+        with patch.object(
+            processor.client.messages, "create", new_callable=AsyncMock
+        ) as mock_create:
+            mock_create.return_value = mock_response
+            with pytest.raises(RuntimeError, match="没有文本块"):
+                await processor._call_api("test prompt", max_tokens=100)
+
+    @pytest.mark.asyncio
+    async def test_call_api_warns_on_max_tokens_truncation(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """stop_reason=max_tokens 时应打警告，避免静默截断。"""
+        processor = _make_processor()
+        processor._request_interval = 0
+
+        mock_response = MagicMock()
+        mock_response.stop_reason = "max_tokens"
+        mock_response.content = [SimpleNamespace(type="text", text="半份报告...")]
+
+        with patch.object(
+            processor.client.messages, "create", new_callable=AsyncMock
+        ) as mock_create:
+            mock_create.return_value = mock_response
+            result = await processor._call_api("test prompt", max_tokens=100)
+
+        assert result == "半份报告..."
+        truncation_logs = [
+            r for r in caplog.records if "截断" in r.message
+        ]
+        assert len(truncation_logs) > 0
+
+    @pytest.mark.asyncio
+    async def test_call_api_reserves_headroom_for_thinking(self) -> None:
+        """max_tokens 应额外预留思考预算，避免正文被思考挤出。"""
+        processor = _make_processor()
+        processor._request_interval = 0
+
+        mock_response = MagicMock()
+        mock_response.content = [SimpleNamespace(type="text", text="你好")]
+
+        with patch.object(
+            processor.client.messages, "create", new_callable=AsyncMock
+        ) as mock_create:
+            mock_create.return_value = mock_response
+            await processor._call_api("test prompt", max_tokens=100)
+
+        actual_max_tokens = mock_create.call_args.kwargs["max_tokens"]
+        assert actual_max_tokens == 100 + THINKING_TOKEN_HEADROOM
 
 
 class TestPriorContextDigest:
